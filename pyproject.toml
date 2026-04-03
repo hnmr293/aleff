@@ -1,0 +1,42 @@
+[project]
+name = "aleff1"
+version = "0.1.0"
+description = "Algebraic effects for Python — deep, stateful, one-shot handlers via greenlet-based delimited continuations"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+authors = [
+    { name = "hnmr" },
+]
+keywords = ["algebraic-effects", "effects", "greenlet", "delimited-continuations"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/hnmr293/aleff1"
+Repository = "https://github.com/hnmr293/aleff1"
+Issues = "https://github.com/hnmr293/aleff1/issues"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.9",
+    "ty>=0.0.28",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aleff1"]
+
+[tool.ruff]
+line-length = 120
