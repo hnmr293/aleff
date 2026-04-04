@@ -151,7 +151,7 @@ class TestEffectCompositionEdgeCases:
         def plain_fn():
             return 42
 
-        @effect(plain_fn, read)  # type: ignore
+        @effect(plain_fn, read)
         def pipeline():
             plain_fn()
             return read()

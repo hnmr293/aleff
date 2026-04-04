@@ -14,7 +14,7 @@ from aleff._aleff import FrameSnapshot, snapshot_frames, snapshot_num_frames
 
 class TestModuleAvailability:
     def test_import(self):
-        import aleff._aleff  # noqa: F401
+        import aleff._aleff  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
     def test_snapshot_type_exists(self):
         assert FrameSnapshot is not None
@@ -73,6 +73,7 @@ class TestSnapshotFrames:
 
     def test_deep_recursion(self):
         """Snapshot works inside deep recursion."""
+
         def recurse(n: int) -> FrameSnapshot:
             if n == 0:
                 return snapshot_frames()
@@ -146,6 +147,7 @@ class TestSnapshotLifecycle:
 
     def test_multiple_snapshots_independent(self):
         """Multiple snapshots from different points are independent."""
+
         def a():
             return snapshot_frames(1)
 
@@ -161,7 +163,7 @@ class TestSnapshotLifecycle:
     def test_snapshot_not_constructible(self):
         """FrameSnapshot cannot be directly instantiated."""
         with pytest.raises(TypeError):
-            FrameSnapshot()  # type: ignore
+            FrameSnapshot()
 
 
 # ---------------------------------------------------------------------------
