@@ -15,7 +15,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from aleff1 import (
+from aleff import (
     effect,
     Effect,
     Resume,

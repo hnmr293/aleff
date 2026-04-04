@@ -7,7 +7,7 @@ Run the same business logic with different handler implementations (production, 
 
 from dataclasses import dataclass
 
-from aleff1 import (
+from aleff import (
     effect,
     Effect,
     Resume,

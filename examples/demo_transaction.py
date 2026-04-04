@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from aleff1 import (
+from aleff import (
     effect,
     Effect,
     Resume,

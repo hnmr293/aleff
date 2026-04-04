@@ -22,7 +22,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from aleff1 import (
+from aleff import (
     effect,
     Effect,
     Resume,
