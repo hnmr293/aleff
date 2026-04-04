@@ -714,3 +714,104 @@ class TestMultiShotMixed:
 
         result = await h_async(outer)
         assert result == [101, 102]
+
+
+# ---------------------------------------------------------------------------
+# Multi-shot: effect inside loop (value stack preservation)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiShotLoop:
+    def test_effect_in_for_loop_immutable(self):
+        """Effect called multiple times inside a for loop.
+
+        ``(*choices, choose())`` creates a temporary list that is shared
+        across shots (Scheme semantics), so each k(1) restore sees the
+        list mutated by the preceding k(0).  The range iterator is also
+        shared and exhausted after the one-shot path completes.
+        """
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[tuple[int, ...]]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[tuple[int, ...]]]):
+            return k(0) + k(1)
+
+        def body():
+            choices: tuple[int, ...] = ()
+            for _ in range(3):
+                choices = (*choices, choose())
+            return [choices]
+
+        result = h(body)
+        assert result == [(0, 0, 0), (0, 0, 0, 1), (0, 0, 1), (0, 1)]
+
+    def test_effect_in_for_loop_new_list(self):
+        """Effect in a for loop with ``[*items, choose()]``.
+
+        The temporary list from ``[*items, ...]`` is shared across shots
+        (Scheme semantics), and the range iterator is exhausted after
+        the one-shot path completes.
+        """
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[tuple[int, ...]]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[tuple[int, ...]]]):
+            return k(10) + k(20)
+
+        def body():
+            items: list[int] = []
+            for _ in range(2):
+                items = [*items, choose()]
+            return [tuple(items)]
+
+        result = h(body)
+        assert result == [(10, 10), (10, 10, 20), (10, 20)]
+
+    def test_effect_in_while_loop(self):
+        """Effect called inside a while loop with immutable accumulation."""
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[tuple[int, int]]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[tuple[int, int]]]):
+            return k(0) + k(1)
+
+        def body():
+            a = choose()
+            i = 0
+            total = 0
+            while i < 2:
+                total += choose()
+                i += 1
+            return [(a, total)]
+
+        result = h(body)
+        # a: 2 choices, loop body: 2 choices x 2 iterations = 4 combos
+        # total possible: 2 * 4 = 8
+        assert len(result) == 8
+
+    def test_effect_in_nested_expression_in_loop(self):
+        """Effect inside ``total = total + choose()`` in a for loop.
+
+        ``total`` is an int (immutable) so each shot gets an independent
+        value.  However, the range iterator is shared and exhausted after
+        the one-shot path, so k(2) from iter 0 cannot enter iter 1.
+        """
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[int]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[int]]):
+            return k(1) + k(2)
+
+        def body():
+            total = 0
+            for _ in range(2):
+                total = total + choose()
+            return [total]
+
+        result = h(body)
+        # k(1)→k(1)→2, k(1)→k(2)→3, k(2)→iterator exhausted→2
+        assert result == [2, 3, 2]

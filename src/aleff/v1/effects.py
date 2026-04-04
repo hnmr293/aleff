@@ -3,7 +3,7 @@ from functools import wraps
 from typing import Any, Callable, cast, overload, Sequence
 import greenlet as gl
 from .intf import Effect, EffectNotHandledError
-from .misc import debug
+from .misc import debug, eff_str
 
 
 @overload
@@ -29,7 +29,7 @@ def effect[**P, R](*args: str | Callable[..., Any]) -> Effect[..., Any] | Callab
 
     if isinstance(args[0], str):
         # create a new Effect
-        return _Effect[..., Any](args[0])
+        return _make_effect(args[0])
 
     # create an effect-set decorator
 
@@ -40,6 +40,32 @@ def effect[**P, R](*args: str | Callable[..., Any]) -> Effect[..., Any] | Callab
     args = cast(tuple[Callable[..., Any]], args)
     decorator = _create_effect_annotator(args)
     return decorator
+
+
+def _make_effect(name: str) -> Effect[..., Any]:
+    """Create a new effect as a plain Python function.
+
+    The returned object is a real ``PyFunctionObject`` so that calling it
+    triggers CPython's ``CALL_PY_EXACT_ARGS`` (or ``CALL_PY_GENERAL``)
+    specialisation.  This path saves the caller frame's ``stacktop``
+    before entering the callee — essential for multi-shot continuation
+    snapshots that need to preserve value-stack items such as loop
+    iterators.
+
+    A class instance with ``__call__`` would go through ``tp_call``
+    (C function), which does **not** save ``stacktop``.
+    """
+
+    def perform(*args: Any, **kwargs: Any) -> Any:
+        debug(f"||> perform <effect {name}>")
+        handler_gl = gl.getcurrent().parent
+        if handler_gl is None:
+            raise EffectNotHandledError(eff)
+        return handler_gl.switch(EffectContext(eff, args, kwargs))
+
+    perform.name = name  # pyright: ignore[reportFunctionMemberAccess]
+    eff = cast(Effect[..., Any], perform)
+    return eff
 
 
 def _create_effect_annotator[**P, R](
@@ -73,25 +99,4 @@ class EffectContext[**P, R]:
     kwargs: dict[str, Any] = field(default_factory=dict[str, Any])
 
     def __repr__(self) -> str:
-        return f"({self.effect} | args={self.args!r}, kwargs={self.kwargs!r})"
-
-
-class _Effect[**P, R](Effect[P, R]):
-    def __init__(self, name: str):
-        self._name = name
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    def __call__[V](self, *args: P.args, **kwargs: P.kwargs) -> R:
-        debug(f"||> perform {self}")
-
-        # pass to the main greenlet
-        handler_gl = gl.getcurrent().parent
-        if handler_gl is None:
-            raise EffectNotHandledError(self)
-        return handler_gl.switch(EffectContext(self, args, kwargs))
-
-    def __str__(self) -> str:
-        return f"<effect {self.name}>"
+        return f"({eff_str(self.effect)} | args={self.args!r}, kwargs={self.kwargs!r})"

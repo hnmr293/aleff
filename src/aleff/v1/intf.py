@@ -127,5 +127,6 @@ class EffectNotHandledError[**P, R](RuntimeError):
     """Raised when an effect is invoked but no handler is active for it."""
 
     def __init__(self, effect: Effect[P, R]):
-        super().__init__(f"no handler for the effect: {effect}")
+        from .misc import eff_str
+        super().__init__(f"no handler for the effect: {eff_str(effect)}")
         self.effect = effect

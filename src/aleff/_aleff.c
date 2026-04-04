@@ -368,27 +368,38 @@ inject_resume_value(_aleff_frame_t *frame, PyObject *value)
     #define CALL_TOTAL_SIZE 4
 
     if (opcode == CALL_OPCODE) {
-        /* Generic CALL path: stack has callable + args at indices
-         * value_stack_base .. value_stack_base + oparg + 1.
-         * Pop them all. */
+        /* Generic CALL path: stack has callable + self_or_null + args
+         * at the TOP of the value stack.  Items below (e.g. loop
+         * iterators, partially-evaluated expressions) must be preserved.
+         *
+         * Pop only the CALL arguments from the top, not the whole stack. */
         uint8_t oparg = (*frame->prev_instr >> 8) & 0xFF;
         int call_items = oparg + 2;  /* callable + self_or_null + args */
-        for (int i = 0; i < call_items; i++) {
-            Py_XDECREF(frame->localsplus[value_stack_base + i]);
-            frame->localsplus[value_stack_base + i] = nullptr;
+        int new_top = frame->stacktop - call_items;
+        if (new_top < value_stack_base) {
+            new_top = value_stack_base;
         }
+        for (int i = new_top; i < frame->stacktop; i++) {
+            Py_XDECREF(frame->localsplus[i]);
+            frame->localsplus[i] = nullptr;
+        }
+        frame->stacktop = new_top;
 
         /* Advance prev_instr past CALL + CACHE entries. */
         frame->prev_instr += CALL_TOTAL_SIZE - 1;
+    } else {
+        /* Non-CALL opcode (CACHE entry or specialised variant).
+         * If stacktop is valid (>= 0), it was saved by the eval loop
+         * when the frame called a Python function.  Preserve it.
+         * Only reset to value_stack_base when stacktop is -1 (active
+         * frame that went through a C-function call path). */
+        if (frame->stacktop < 0) {
+            frame->stacktop = value_stack_base;
+        }
     }
-    /* else: inline dispatch — stack already shrunk, prev_instr correct */
 
     #undef CALL_OPCODE
     #undef CALL_TOTAL_SIZE
-
-    /* Set stacktop to value stack base (locals are preserved,
-     * value stack is empty after popping CALL args or inline dispatch) */
-    frame->stacktop = value_stack_base;
 
     /* Push the resume value */
     Py_INCREF(value);
@@ -683,6 +694,25 @@ _aleff_snapshot_num_frames([[maybe_unused]] PyObject *self, PyObject *arg)
     return PyLong_FromLong(snapshot->num_frames);
 }
 
+/* Debug helper: return stacktop of internal frame behind a Python frame object */
+PyDoc_STRVAR(debug_frame_stacktop_doc,
+"_debug_frame_stacktop(frame)\n"
+"--\n\n"
+"Return the stacktop value of the internal frame (for debugging).\n");
+
+static PyObject *
+_aleff_debug_frame_stacktop([[maybe_unused]] PyObject *self, PyObject *arg)
+{
+    if (!PyFrame_Check(arg)) {
+        PyErr_SetString(PyExc_TypeError, "expected a frame object");
+        return nullptr;
+    }
+    #define F_FRAME_OFFSET (sizeof(PyObject) + sizeof(PyFrameObject *))
+    _aleff_frame_t *iframe = *(_aleff_frame_t **)((char *)arg + F_FRAME_OFFSET);
+    #undef F_FRAME_OFFSET
+    return PyLong_FromLong(iframe->stacktop);
+}
+
 /* ========================================================================
  * Module definition
  * ======================================================================== */
@@ -692,6 +722,7 @@ static PyMethodDef _aleff_methods[] = {
     {"snapshot_from_frame", _aleff_snapshot_from_frame, METH_VARARGS, snapshot_from_frame_doc},
     {"snapshot_num_frames", _aleff_snapshot_num_frames, METH_O, snapshot_num_frames_doc},
     {"restore_continuation", _aleff_restore_continuation, METH_VARARGS, restore_continuation_doc},
+    {"_debug_frame_stacktop", _aleff_debug_frame_stacktop, METH_O, debug_frame_stacktop_doc},
     {nullptr, nullptr, 0, nullptr}
 };
 

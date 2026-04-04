@@ -15,7 +15,7 @@ from .intf import (
     AsyncHandler,
 )
 from .effects import EffectContext
-from .misc import debug
+from .misc import debug, eff_str
 from .._aleff import FrameSnapshot, restore_continuation, snapshot_from_frame
 
 
@@ -165,15 +165,15 @@ def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
         parent = gl.getcurrent().parent
         if parent is None:
             raise RuntimeError(
-                f"effect {effect} is handled by an async handler, but"
+                f"{eff_str(effect)} is handled by an async handler, but"
                 " cannot be relayed from the current sync context."
                 " The caller passed to the outer async handler should"
                 " be a regular function, not an async def."
             )
-        debug(f"||> relay {effect} to async handler")
+        debug(f"||> relay {eff_str(effect)} to async handler")
         resume_value = parent.switch(value)
         v = caller_gl.switch(resume_value)
-        debug(f"||< relay {effect}")
+        debug(f"||< relay {eff_str(effect)}")
         return _drive(caller_gl, v)
 
     # Take snapshot from the handler greenlet. The caller greenlet is
@@ -186,10 +186,10 @@ def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
     if not caller_gl.dead:
         # resume not called in the handler
         # discard the result
-        debug(f"||< **abort** perform {effect} = {v!r}")
+        debug(f"||< **abort** perform {eff_str(effect)} = {v!r}")
         caller_gl.throw(gl.GreenletExit)
 
-    debug(f"||< perform {effect} = {v!r}")
+    debug(f"||< perform {eff_str(effect)} = {v!r}")
 
     debug("||< @main")
     return v
@@ -252,10 +252,10 @@ async def _drive_async[V](caller_gl: Any, value: V | _AwaitRequest[V] | EffectCo
     if not caller_gl.dead:
         # resume not called in the handler
         # discard the result
-        debug(f"||< **abort** perform {effect} = {v!r}")
+        debug(f"||< **abort** perform {eff_str(effect)} = {v!r}")
         caller_gl.throw(gl.GreenletExit)
 
-    debug(f"||< perform {effect} = {v!r}")
+    debug(f"||< perform {eff_str(effect)} = {v!r}")
 
     debug("||< @main")
     return v
@@ -265,29 +265,27 @@ _num = 0
 
 
 class _handler_base[
-    EffectType,
     EffectHandlerType: Callable[..., Any],
     CallerType: Callable[[], Any],
 ]:
-    def __init__(self, *effects: EffectType):
+    def __init__(self, *effects: Effect[..., Any]):
         global _num
 
         self._effects = tuple(effects)
         self._unbound_effects = set(effects)
-        self._reserved_effects: list[tuple[EffectType, EffectHandlerType]] = []
+        self._reserved_effects: list[tuple[Effect[..., Any], EffectHandlerType]] = []
         self._n = _num
         _num += 1
         debug(f"@ {self}")
 
     def check(self, caller: CallerType) -> None:
         if len(self._unbound_effects) > 0:
-            unboud_effects = ", ".join(str(e) for e in self._unbound_effects)
+            unboud_effects = ", ".join(eff_str(e) for e in self._unbound_effects)
             raise ValueError(f"not all effects are handled: {unboud_effects}")
 
 
 class _Handler[V](
     _handler_base[
-        Effect[..., Any],
         EffectHandler[..., V, Any],
         Caller[V],
     ],
@@ -298,7 +296,7 @@ class _Handler[V](
         return frozenset(self._effects)
 
     def on[**P, R](self, effect: Effect[P, R]) -> Callable[[EffectHandler[P, V, R]], EffectHandler[P, V, R]]:
-        debug(f"|+ {effect} | {self}")
+        debug(f"|+ {eff_str(effect)} | {self}")
 
         def decorator(fn: EffectHandler[P, V, R]) -> EffectHandler[P, V, R]:
             self._reserved_effects.append((effect, fn))
@@ -306,9 +304,9 @@ class _Handler[V](
 
         # raises an error if the same effect is handled multiple times
         if effect not in self._effects:
-            raise ValueError(f"{effect} is not declared in the handler")
+            raise ValueError(f"{eff_str(effect)} is not declared in the handler")
         if effect not in self._unbound_effects:
-            raise ValueError(f"{effect} is already handled")
+            raise ValueError(f"{eff_str(effect)} is already handled")
         self._unbound_effects.remove(effect)
 
         return decorator
@@ -344,7 +342,6 @@ class _Handler[V](
 
 class _AsyncHandler[V](
     _handler_base[
-        Effect[..., Any],
         AsyncEffectHandler[..., V, Any],
         Caller[V | Coroutine[Any, Any, V]],
     ],
@@ -358,7 +355,7 @@ class _AsyncHandler[V](
         self,
         effect: Effect[P, R],
     ) -> Callable[[AsyncEffectHandler[P, V, R]], AsyncEffectHandler[P, V, R]]:
-        debug(f"|+ {effect} | {self}")
+        debug(f"|+ {eff_str(effect)} | {self}")
 
         def decorator(fn: AsyncEffectHandler[P, V, R]) -> AsyncEffectHandler[P, V, R]:
             self._reserved_effects.append((effect, fn))
@@ -366,9 +363,9 @@ class _AsyncHandler[V](
 
         # raises an error if the same effect is handled multiple times
         if effect not in self._effects:
-            raise ValueError(f"{effect} is not declared in the handler")
+            raise ValueError(f"{eff_str(effect)} is not declared in the handler")
         if effect not in self._unbound_effects:
-            raise ValueError(f"{effect} is already handled")
+            raise ValueError(f"{eff_str(effect)} is already handled")
         self._unbound_effects.remove(effect)
 
         return decorator
