@@ -114,7 +114,9 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
 def _pre_drive(
     caller_gl: Any,
     value: EffectContext[..., Any],
-) -> tuple[Effect[..., Any], Callable[..., Any], tuple[Any, ...], dict[str, Any]]:
+) -> tuple[
+    Effect[..., Any], "_handler[Any] | _async_handler[Any]", Callable[..., Any], tuple[Any, ...], dict[str, Any]
+]:
     if not isinstance(value, EffectContext):  # pyright: ignore[reportUnnecessaryIsInstance]
         raise RuntimeError(f"invalid value passed to caller: {value!r}")
 
@@ -130,7 +132,7 @@ def _pre_drive(
 
     debug(f"||> ... found handler {handler} | {fn.__name__}")
 
-    return effect, fn, args, kwargs
+    return effect, handler, fn, args, kwargs
 
 
 def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
@@ -146,7 +148,17 @@ def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
     # effect performed
     # switch to the handler greenlet
 
-    effect, fn, args, kwargs = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
+    effect, handler, fn, args, kwargs = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
+
+    if isinstance(handler, _async_handler):
+        # async handler found in sync context — relay to parent greenlet
+        parent = gl.getcurrent().parent
+        assert parent is not None
+        debug(f"||> relay {effect} to async handler")
+        resume_value = parent.switch(value)
+        v = caller_gl.switch(resume_value)
+        debug(f"||< relay {effect}")
+        return _drive(caller_gl, v)
 
     # Take snapshot from the handler greenlet. The caller greenlet is
     # suspended at this point, so its frames have valid stacktop values.
@@ -184,7 +196,7 @@ async def _drive_async[V](caller_gl: Any, value: V | EffectContext[..., Any]) ->
     # effect performed
     # switch to the handler greenlet
 
-    effect, fn, args, kwargs = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
+    effect, _, fn, args, kwargs = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
 
     snapshot = snapshot_from_frame(caller_gl.gr_frame)
     resume: ResumeAsync[Any, Any] = _ResumeAsync(caller_gl, snapshot)
