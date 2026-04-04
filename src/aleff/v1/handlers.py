@@ -1,5 +1,5 @@
 from asyncio import Lock, iscoroutine
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from inspect import iscoroutinefunction
 from typing import Any, Callable, cast, Coroutine
 import greenlet as gl
@@ -73,6 +73,7 @@ class _Resume[R, V](Resume[R, V]):
             return restore_continuation(ss, value)
 
         new_gl = gl.greenlet(_body)
+        new_gl.gr_context = copy_context()
         v = _drive(new_gl, new_gl.switch())
 
         debug(f"||< @caller (multi-shot) = {v!r}")
@@ -102,6 +103,7 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
             return restore_continuation(ss, value)
 
         new_gl = gl.greenlet(_body)
+        new_gl.gr_context = copy_context()
         v = await _drive_async(new_gl, new_gl.switch())
 
         debug(f"||< @caller (multi-shot async) = {v!r}")
@@ -269,6 +271,7 @@ class _handler[V](
 
         try:
             caller_gl = gl.greenlet(caller)
+            caller_gl.gr_context = copy_context()
 
             debug(f"|> @caller | {self}")
 
@@ -328,6 +331,7 @@ class _async_handler[V](
 
         try:
             caller_gl = gl.greenlet(caller)
+            caller_gl.gr_context = copy_context()
 
             debug(f"|> @caller | {self}")
 
@@ -352,12 +356,17 @@ class _async_handler[V](
 
 type _StackItem[**P, R, V] = tuple[object, _handler[V] | _async_handler[V], Effect[P, R], Callable[P, V]]
 
-_stack: ContextVar[list[_StackItem[..., Any, Any]]] = ContextVar("handler_stack", default=[])
+_stack: ContextVar[list[_StackItem[..., Any, Any]]] = ContextVar("handler_stack")
 _lock = Lock()
 
 
 def _get_stack() -> list[_StackItem[..., Any, Any]]:
-    return _stack.get()
+    try:
+        return _stack.get()
+    except LookupError:
+        stack: list[_StackItem[..., Any, Any]] = []
+        _stack.set(stack)
+        return stack
 
 
 def _set_stack(stack: list[_StackItem[..., Any, Any]]) -> None:
