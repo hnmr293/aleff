@@ -2,7 +2,7 @@
 
 import pytest
 
-from aleff1 import (
+from aleff import (
     effect,
     Effect,
     Resume,

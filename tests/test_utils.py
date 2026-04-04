@@ -1,6 +1,6 @@
 """Tests for effect metadata, get_effects, and unhandled_effects."""
 
-from aleff1 import (
+from aleff import (
     effect,
     Effect,
     Resume,
