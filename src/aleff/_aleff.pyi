@@ -1,10 +1,17 @@
 """Type stubs for the _aleff C extension module."""
 
-class FrameSnapshot:
-    """Snapshot of a Python frame chain for multi-shot continuations."""
+from typing import Any
+
+class FrameSnapshot[R, V]:
+    """Snapshot of a Python frame chain for multi-shot continuations.
+
+    Type parameters:
+        R: The type of the resume value (injected at restoration).
+        V: The type of the computation's final result.
+    """
     ...
 
-def snapshot_frames(depth: int = -1) -> FrameSnapshot:
+def snapshot_frames(depth: int = -1) -> FrameSnapshot[Any, Any]:
     """Capture the current Python frame chain as a FrameSnapshot.
 
     Parameters:
@@ -18,7 +25,7 @@ def snapshot_frames(depth: int = -1) -> FrameSnapshot:
     """
     ...
 
-def snapshot_num_frames(snapshot: FrameSnapshot) -> int:
+def snapshot_num_frames[R, V](snapshot: FrameSnapshot[R, V]) -> int:
     """Return the number of frames in a FrameSnapshot.
 
     Raises:
@@ -26,7 +33,7 @@ def snapshot_num_frames(snapshot: FrameSnapshot) -> int:
     """
     ...
 
-def restore_continuation(snapshot: FrameSnapshot, value: object, skip: int = 1) -> object:
+def restore_continuation[R, V](snapshot: FrameSnapshot[R, V], value: R, skip: int = 1) -> V:
     """Restore a continuation from a FrameSnapshot and resume execution.
 
     Creates a fresh copy of the frame chain from the snapshot,

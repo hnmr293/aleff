@@ -1,10 +1,18 @@
 """Tests for the _aleff C extension (frame snapshot/restore)."""
 
 import sys
+from typing import Any
 
 import pytest
+import greenlet
 
-from aleff._aleff import FrameSnapshot, snapshot_frames, snapshot_num_frames
+from aleff._aleff import (
+    FrameSnapshot,
+    snapshot_frames,
+    snapshot_num_frames,
+    restore_continuation,
+    HAS_RESTORE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +82,7 @@ class TestSnapshotFrames:
     def test_deep_recursion(self):
         """Snapshot works inside deep recursion."""
 
-        def recurse(n: int) -> FrameSnapshot:
+        def recurse(n: int) -> FrameSnapshot[Any, Any]:
             if n == 0:
                 return snapshot_frames()
             return recurse(n - 1)
@@ -164,6 +172,232 @@ class TestSnapshotLifecycle:
         """FrameSnapshot cannot be directly instantiated."""
         with pytest.raises(TypeError):
             FrameSnapshot()
+
+
+# ---------------------------------------------------------------------------
+# restore_continuation: argument validation
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreContinuationErrors:
+    def test_rejects_non_snapshot(self):
+        with pytest.raises(TypeError):
+            restore_continuation("not a snapshot", 42)  # type: ignore
+
+    def test_rejects_missing_value(self):
+        with pytest.raises(TypeError):
+            restore_continuation()  # type: ignore
+
+    def test_skip_too_large_raises(self):
+        """skip >= num_frames means no frames to restore."""
+        snapshot = snapshot_frames(1)
+        n = snapshot_num_frames(snapshot)
+        with pytest.raises(ValueError):
+            restore_continuation(snapshot, 42, n)
+
+    def test_has_restore_flag(self):
+        """HAS_RESTORE indicates _PyEval_EvalFrameDefault availability."""
+        assert isinstance(HAS_RESTORE, int)
+
+
+# ---------------------------------------------------------------------------
+# restore_continuation: greenlet integration
+#
+# These tests use greenlet directly (not aleff1 handlers) to verify
+# that restore_continuation correctly resumes a snapshotted frame chain.
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreContinuationGreenlet:
+    """Test restore_continuation using greenlet + manual perform/resume pattern.
+
+    The pattern:
+      1. A greenlet runs user code that calls `perform()`
+      2. `perform()` snapshots frames and switches back to the main greenlet
+      3. The main greenlet calls `restore_continuation(snapshot, value)` in a
+         new greenlet to resume the computation with `value`
+    """
+
+    @staticmethod
+    def _perform(tag: str) -> Any:
+        """Simulate an effect: snapshot frames and switch to parent.
+
+        From the main greenlet's perspective, this returns (tag, snapshot).
+        From the caller's perspective (after resume), this returns the resume value.
+        """
+        snapshot = snapshot_frames()
+        main_gl = greenlet.getcurrent().parent
+        assert main_gl is not None
+        # Switch to main with (tag, snapshot); main will resume us or create a new greenlet
+        return main_gl.switch((tag, snapshot))
+
+    def test_basic_resume(self):
+        """restore_continuation resumes from a snapshot with a value."""
+        if not HAS_RESTORE:
+            pytest.skip("_PyEval_EvalFrameDefault not available")
+
+        def user_code() -> str:
+            val: str = self._perform("get")
+            return f"got:{val}"
+
+        # Run in a greenlet
+        gl = greenlet.greenlet(user_code)
+        tag, snapshot = gl.switch()
+        assert tag == "get"
+
+        # First resume: normal greenlet switch (one-shot)
+        result = gl.switch("hello")
+        assert result == "got:hello"
+
+        # Second resume: restore_continuation in a new greenlet
+        def resume_body() -> str:
+            return restore_continuation(snapshot, "world")
+
+        gl2 = greenlet.greenlet(resume_body)
+        result2 = gl2.switch()
+        assert result2 == "got:world"
+
+    def test_resume_multiple_times(self):
+        """Same snapshot can be restored multiple times with different values."""
+        if not HAS_RESTORE:
+            pytest.skip("_PyEval_EvalFrameDefault not available")
+
+        def user_code() -> int:
+            x: int = self._perform("choose")
+            return x * 10
+
+        gl = greenlet.greenlet(user_code)
+        tag, snapshot = gl.switch()
+        assert tag == "choose"
+
+        # First: one-shot
+        result1 = gl.switch(1)
+        assert result1 == 10
+
+        # Multiple restores from same snapshot
+        results: list[int] = []
+        for v in [2, 3, 4]:
+
+            def body(val: int = v) -> int:
+                return restore_continuation(snapshot, val)
+
+            g = greenlet.greenlet(body)
+            results.append(g.switch())
+
+        assert results == [20, 30, 40]
+
+    def test_resume_with_nested_calls(self):
+        """restore_continuation works when perform is called through nested functions."""
+        if not HAS_RESTORE:
+            pytest.skip("_PyEval_EvalFrameDefault not available")
+
+        def inner() -> int:
+            return self._perform("val")
+
+        def middle() -> int:
+            return inner() + 100
+
+        def outer() -> int:
+            return middle() + 1000
+
+        gl = greenlet.greenlet(outer)
+        _tag, snapshot = gl.switch()
+
+        # One-shot
+        result1 = gl.switch(5)
+        assert result1 == 1105
+
+        # Multi-shot
+        def body() -> int:
+            return restore_continuation(snapshot, 9)
+
+        gl2 = greenlet.greenlet(body)
+        result2 = gl2.switch()
+        assert result2 == 1109
+
+    def test_local_mutable_state_is_shared(self):
+        """Mutable objects in locals are shared (Scheme continuation semantics).
+
+        The frame copy shares the same list object, so mutations accumulate.
+        This matches Scheme's call/cc behavior: continuations share the heap.
+        """
+        if not HAS_RESTORE:
+            pytest.skip("_PyEval_EvalFrameDefault not available")
+
+        def user_code() -> list[int]:
+            items: list[int] = []
+            v: int = self._perform("choose")
+            items.append(v)
+            return items
+
+        gl = greenlet.greenlet(user_code)
+        _tag, snapshot = gl.switch()
+
+        result1 = gl.switch(1)
+        assert result1 == [1]
+
+        def body(val: int) -> list[int]:
+            return restore_continuation(snapshot, val)
+
+        gl2 = greenlet.greenlet(lambda: body(2))
+        result2 = gl2.switch()
+        assert result2 == [1, 2]  # shared list
+
+        gl3 = greenlet.greenlet(lambda: body(3))
+        result3 = gl3.switch()
+        assert result3 == [1, 2, 3]  # continues accumulating
+
+    def test_heap_shared_between_shots(self):
+        """Objects from outside the continuation are shared (Scheme semantics)."""
+        if not HAS_RESTORE:
+            pytest.skip("_PyEval_EvalFrameDefault not available")
+
+        shared: list[int] = []
+
+        def user_code() -> list[int]:
+            v: int = self._perform("choose")
+            shared.append(v)
+            return list(shared)
+
+        gl = greenlet.greenlet(user_code)
+        _tag, snapshot = gl.switch()
+
+        result1 = gl.switch(1)
+        assert result1 == [1]
+
+        def body() -> list[int]:
+            return restore_continuation(snapshot, 2)
+
+        gl2 = greenlet.greenlet(body)
+        result2 = gl2.switch()
+        # shared is outside the continuation, so mutations accumulate
+        assert result2 == [1, 2]
+
+    def test_exception_in_restored_continuation(self):
+        """Exceptions in restored continuations propagate normally."""
+        if not HAS_RESTORE:
+            pytest.skip("_PyEval_EvalFrameDefault not available")
+
+        def user_code() -> int:
+            v: int = self._perform("choose")
+            if v < 0:
+                raise ValueError("negative")
+            return v
+
+        gl = greenlet.greenlet(user_code)
+        _tag, snapshot = gl.switch()
+
+        # Normal
+        result = gl.switch(42)
+        assert result == 42
+
+        # Exception in restore
+        def body() -> int:
+            return restore_continuation(snapshot, -1)
+
+        gl2 = greenlet.greenlet(body)
+        with pytest.raises(ValueError, match="negative"):
+            gl2.switch()
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <frameobject.h>
+#include <dlfcn.h>
 
 #if PY_VERSION_HEX < 0x030c0000
 #error "_aleff requires Python 3.12 or later"
@@ -105,6 +106,19 @@ FrameSnapshot_dealloc(FrameSnapshotObject *self)
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
+static PyObject *
+FrameSnapshot_class_getitem([[maybe_unused]] PyObject *cls, [[maybe_unused]] PyObject *args)
+{
+    /* FrameSnapshot[R, V] */
+    Py_INCREF(cls);
+    return cls;
+}
+
+static PyMethodDef FrameSnapshot_methods[] = {
+    {"__class_getitem__", FrameSnapshot_class_getitem, METH_O | METH_CLASS, NULL},
+    {NULL, NULL, 0, NULL}
+};
+
 static PyTypeObject FrameSnapshotType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "_aleff.FrameSnapshot",
@@ -112,6 +126,7 @@ static PyTypeObject FrameSnapshotType = {
     .tp_basicsize = sizeof(FrameSnapshotObject),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_dealloc = (destructor)FrameSnapshot_dealloc,
+    .tp_methods = FrameSnapshot_methods,
 };
 
 /* ========================================================================
@@ -161,9 +176,15 @@ copy_single_frame(_aleff_frame_t *src)
     /* owner: mark as owned by thread (will be cleaned up manually) */
     dst->owner = FRAME_OWNED_BY_THREAD;
 
-    /* INCREF all localsplus entries */
-    for (int i = 0; i < num_slots; i++) {
+    /* INCREF only valid localsplus entries (0..stacktop-1).
+     * Slots from stacktop onward are the unused portion of the value stack
+     * and may contain stale/dangling pointers (CPython's POP() doesn't null them). */
+    int stacktop = dst->stacktop;
+    for (int i = 0; i < stacktop; i++) {
         Py_XINCREF(dst->localsplus[i]);
+    }
+    for (int i = stacktop; i < num_slots; i++) {
+        dst->localsplus[i] = NULL;
     }
 
     result.frame = dst;
@@ -283,6 +304,119 @@ create_snapshot(PyFrameObject *boundary_frame, int max_depth)
 }
 
 /* ========================================================================
+ * _PyEval_EvalFrameDefault lookup
+ * ======================================================================== */
+
+typedef PyObject *(*evalframe_fn_t)(PyThreadState *, void *, int);
+static evalframe_fn_t _evalframe = NULL;
+
+/* ========================================================================
+ * Frame chain restoration and continuation resume
+ * ======================================================================== */
+
+/*
+ * Inject resume value into a frame, simulating the return from a CALL.
+ *
+ * The frame was suspended mid-CALL (calling the effect).
+ * Two CALL dispatch paths leave the frame in different states:
+ *
+ * 1. Inline dispatch (CALL_PY_EXACT_ARGS, for plain function calls):
+ *    - Stack already shrunk (callable + args removed)
+ *    - prev_instr at last CACHE entry (opcode 0)
+ *    - Just push the resume value.
+ *
+ * 2. Generic CALL (for __call__ objects, bound methods, etc.):
+ *    - Stack still has callable + self_or_null + args
+ *    - prev_instr at the CALL instruction itself (opcode 171)
+ *    - Pop args, advance prev_instr, push resume value.
+ *
+ * We distinguish the two by checking the opcode at prev_instr.
+ */
+static void
+inject_resume_value(_aleff_frame_t *frame, PyObject *value)
+{
+    uint8_t opcode = (*frame->prev_instr) & 0xFF;
+
+    /* CALL opcode in CPython 3.12 = 171 */
+    /* CALL instruction size: 1 (CALL) + 3 (CACHE entries) = 4 codeunits */
+    #define CALL_TOTAL_SIZE 4
+
+    if (opcode == 171) {
+        /* Generic CALL path: stack has callable + args, prev_instr at CALL */
+        uint8_t oparg = (*frame->prev_instr >> 8) & 0xFF;
+        int items_to_pop = oparg + 2;  /* callable + self_or_null + args */
+
+        /* Pop CALL arguments from the stack */
+        for (int i = 0; i < items_to_pop; i++) {
+            int idx = frame->stacktop - items_to_pop + i;
+            if (idx >= 0) {
+                Py_XDECREF(frame->localsplus[idx]);
+                frame->localsplus[idx] = NULL;
+            }
+        }
+        frame->stacktop -= items_to_pop;
+
+        /* Advance prev_instr past CALL + CACHE entries.
+         * Generic CALL may not set return_offset, so we use the known
+         * instruction size (CALL + 3 CACHE = 4 codeunits).
+         * eval loop resumes at prev_instr + 1. */
+        frame->prev_instr += CALL_TOTAL_SIZE - 1;
+    }
+    /* else: inline dispatch path — stack and prev_instr already correct */
+
+    #undef CALL_TOTAL_SIZE
+
+    /* Push the resume value */
+    Py_INCREF(value);
+    frame->localsplus[frame->stacktop] = value;
+    frame->stacktop++;
+}
+
+/*
+ * Copy a frame onto the thread data stack.
+ * Returns a pointer to the frame on the data stack, or NULL on error.
+ * The caller must ensure there's enough space (or handle growth).
+ */
+static _aleff_frame_t *
+push_frame_to_datastack(PyThreadState *tstate, _aleff_frame_t *src, int num_slots)
+{
+    size_t frame_size = sizeof(_aleff_frame_t)
+                      + (num_slots - 1) * sizeof(PyObject *);
+    size_t nslots = (frame_size + sizeof(PyObject *) - 1) / sizeof(PyObject *);
+
+    /* Check if we have space; if not, we can't easily grow the stack
+     * from outside the interpreter. For now, check and error. */
+    if (tstate->datastack_top + nslots > tstate->datastack_limit) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "thread data stack too small for frame restoration");
+        return NULL;
+    }
+
+    _aleff_frame_t *dst = (_aleff_frame_t *)tstate->datastack_top;
+    memcpy(dst, src, frame_size);
+    tstate->datastack_top += nslots;
+
+    /* INCREF all references (the copy shares objects with the snapshot copy) */
+    Py_XINCREF(dst->f_executable);
+    Py_XINCREF(dst->f_funcobj);
+    Py_XINCREF(dst->f_globals);
+    Py_XINCREF(dst->f_builtins);
+    Py_XINCREF(dst->f_locals);
+    dst->frame_obj = NULL;
+    dst->owner = FRAME_OWNED_BY_THREAD;
+
+    int stacktop = dst->stacktop;
+    for (int i = 0; i < stacktop; i++) {
+        Py_XINCREF(dst->localsplus[i]);
+    }
+    for (int i = stacktop; i < num_slots; i++) {
+        dst->localsplus[i] = NULL;
+    }
+
+    return dst;
+}
+
+/* ========================================================================
  * Python-facing functions
  * ======================================================================== */
 
@@ -311,6 +445,122 @@ _aleff_snapshot_frames([[maybe_unused]] PyObject *self, PyObject *args)
     return (PyObject *)snapshot;
 }
 
+PyDoc_STRVAR(restore_continuation_doc,
+"restore_continuation(snapshot, value, skip=1)\n"
+"--\n\n"
+"Restore a continuation from a FrameSnapshot and resume execution.\n"
+"\n"
+"Creates a fresh copy of the frame chain from the snapshot,\n"
+"injects `value` as the return value of the effect call,\n"
+"and resumes execution via _PyEval_EvalFrameDefault.\n"
+"\n"
+"Parameters:\n"
+"  snapshot: A FrameSnapshot object.\n"
+"  value: The value to resume the continuation with.\n"
+"  skip: Number of innermost frames to skip (default 1 for _Effect.__call__).\n"
+"\n"
+"Returns the result of the resumed computation.\n"
+"This function should be called inside a greenlet.\n");
+
+static PyObject *
+_aleff_restore_continuation([[maybe_unused]] PyObject *self, PyObject *args)
+{
+    FrameSnapshotObject *snapshot;
+    PyObject *value;
+    int skip = 1;
+
+    if (!PyArg_ParseTuple(args, "O!O|i", &FrameSnapshotType, &snapshot, &value, &skip))
+        return NULL;
+
+    if (_evalframe == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "_PyEval_EvalFrameDefault not available (dlsym failed at init)");
+        return NULL;
+    }
+
+    int num = snapshot->num_frames - skip;
+    if (num <= 0) {
+        PyErr_SetString(PyExc_ValueError, "no frames to restore");
+        return NULL;
+    }
+
+    PyThreadState *tstate = PyThreadState_Get();
+
+    /* Save the data stack top so we can restore it on cleanup.
+     * All frames we push will be between saved_top and the new top. */
+    PyObject **saved_datastack_top = tstate->datastack_top;
+
+    /* Push frames onto the thread data stack from outermost to innermost.
+     * This matches the stack growth direction: outermost at lower address. */
+    _aleff_frame_t *frames_on_stack[128];  /* reasonable limit */
+    if (num > 128) {
+        PyErr_SetString(PyExc_RuntimeError, "frame chain too deep (>128)");
+        return NULL;
+    }
+
+    for (int i = num - 1; i >= 0; i--) {
+        _aleff_frame_copy_t *src = &snapshot->frames[i + skip];
+        _aleff_frame_t *f = push_frame_to_datastack(tstate, src->frame, src->num_slots);
+        if (f == NULL) {
+            /* Restore data stack and bail */
+            tstate->datastack_top = saved_datastack_top;
+            return NULL;
+        }
+        frames_on_stack[i] = f;
+    }
+
+    /* Link previous pointers on the data-stack copies */
+    for (int i = 0; i < num - 1; i++) {
+        frames_on_stack[i]->previous = frames_on_stack[i + 1];
+    }
+    /* Outermost frame's previous = NULL (eval will set it to entry_frame) */
+    frames_on_stack[num - 1]->previous = NULL;
+
+    /* Inject the resume value into the innermost frame */
+    inject_resume_value(frames_on_stack[0], value);
+
+    /* Execute frames one at a time, from innermost to outermost.
+     *
+     * We can't pass the whole chain to a single eval call because
+     * _PyEval_EvalFrameDefault overwrites frame->previous with its
+     * internal entry_frame sentinel.
+     *
+     * Instead, we eval each frame individually and propagate the
+     * return value to the next outer frame by pushing it onto
+     * the outer frame's stack. */
+    PyObject *result = NULL;
+
+    for (int i = 0; i < num; i++) {
+        _aleff_frame_t *frame = frames_on_stack[i];
+
+        /* Disconnect from chain so eval's entry_frame doesn't conflict */
+        frame->previous = NULL;
+
+        result = _evalframe(tstate, frame, 0);
+
+        if (result == NULL) {
+            /* Exception — propagate it */
+            break;
+        }
+
+        /* If there's a next (outer) frame, push result onto its stack */
+        if (i + 1 < num) {
+            _aleff_frame_t *outer = frames_on_stack[i + 1];
+            inject_resume_value(outer, result);
+            Py_DECREF(result);  /* inject_resume_value INCREFs */
+            result = NULL;
+        }
+    }
+
+    /* Restore the data stack top.
+     * The eval loop already popped each frame via _PyThreadState_PopFrame,
+     * but our frames were pushed contiguously, so we restore to the
+     * saved position to be safe. */
+    tstate->datastack_top = saved_datastack_top;
+
+    return result;
+}
+
 PyDoc_STRVAR(snapshot_num_frames_doc,
 "snapshot_num_frames(snapshot)\n"
 "--\n\n"
@@ -334,6 +584,7 @@ _aleff_snapshot_num_frames([[maybe_unused]] PyObject *self, PyObject *arg)
 static PyMethodDef _aleff_methods[] = {
     {"snapshot_frames", _aleff_snapshot_frames, METH_VARARGS, snapshot_frames_doc},
     {"snapshot_num_frames", _aleff_snapshot_num_frames, METH_O, snapshot_num_frames_doc},
+    {"restore_continuation", _aleff_restore_continuation, METH_VARARGS, restore_continuation_doc},
     {NULL, NULL, 0, NULL}
 };
 
@@ -349,18 +600,31 @@ static struct PyModuleDef _aleff_module = {
 PyMODINIT_FUNC
 PyInit__aleff(void)
 {
-    PyObject *m;
+    /* Look up _PyEval_EvalFrameDefault via dlsym.
+     * POSIX guarantees dlsym returns a valid function pointer via void*,
+     * but ISO C forbids the cast. Suppress the warning here. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+    _evalframe = (evalframe_fn_t)dlsym(RTLD_DEFAULT, "_PyEval_EvalFrameDefault");
+#pragma GCC diagnostic pop
+    /* Not fatal if not found — restore_continuation will raise at call time */
 
     if (PyType_Ready(&FrameSnapshotType) < 0)
         return NULL;
 
-    m = PyModule_Create(&_aleff_module);
+    PyObject *m = PyModule_Create(&_aleff_module);
     if (m == NULL)
         return NULL;
 
     Py_INCREF(&FrameSnapshotType);
     if (PyModule_AddObject(m, "FrameSnapshot", (PyObject *)&FrameSnapshotType) < 0) {
         Py_DECREF(&FrameSnapshotType);
+        Py_DECREF(m);
+        return NULL;
+    }
+
+    /* Export whether restore_continuation is available */
+    if (PyModule_AddIntConstant(m, "HAS_RESTORE", _evalframe != NULL) < 0) {
         Py_DECREF(m);
         return NULL;
     }
