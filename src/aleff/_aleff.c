@@ -22,6 +22,14 @@
 #error "_aleff requires Python 3.12 or later"
 #endif
 
+/* CALL opcode value differs between versions (171 in 3.12, 53 in 3.13+). */
+#if PY_VERSION_HEX >= 0x030d0000
+#include <opcode_ids.h>
+#else
+#include <opcode.h>
+#endif
+#define CALL_OPCODE CALL
+
 /* ========================================================================
  * _PyInterpreterFrame layout for Python 3.12
  *
@@ -363,8 +371,8 @@ inject_resume_value(_aleff_frame_t *frame, PyObject *value)
     int value_stack_base = code->co_nlocalsplus;
     uint8_t opcode = (*frame->prev_instr) & 0xFF;
 
-    /* CALL instruction size: 1 (CALL) + 3 (CACHE entries) = 4 codeunits */
-    #define CALL_OPCODE 171
+    /* CALL instruction size: 1 (CALL) + 3 (CACHE entries) = 4 codeunits.
+     * Same in both 3.12 and 3.13. */
     #define CALL_TOTAL_SIZE 4
 
     if (opcode == CALL_OPCODE) {
@@ -385,8 +393,17 @@ inject_resume_value(_aleff_frame_t *frame, PyObject *value)
         }
         frame->stacktop = new_top;
 
-        /* Advance prev_instr past CALL + CACHE entries. */
+        /* Advance instruction pointer past CALL + CACHE entries.
+         *
+         * 3.12 (prev_instr): points to the LAST executed instruction.
+         *   Eval loop resumes at prev_instr + 1, so advance by SIZE - 1.
+         * 3.13+ (instr_ptr): points to the NEXT instruction to execute.
+         *   Eval loop resumes at instr_ptr directly, so advance by SIZE. */
+#if PY_VERSION_HEX >= 0x030d0000
+        frame->prev_instr += CALL_TOTAL_SIZE;
+#else
         frame->prev_instr += CALL_TOTAL_SIZE - 1;
+#endif
     } else {
         /* Non-CALL opcode (CACHE entry or specialised variant).
          * If stacktop is valid (>= 0), it was saved by the eval loop
@@ -398,7 +415,6 @@ inject_resume_value(_aleff_frame_t *frame, PyObject *value)
         }
     }
 
-    #undef CALL_OPCODE
     #undef CALL_TOTAL_SIZE
 
     /* Push the resume value */
