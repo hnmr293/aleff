@@ -386,16 +386,19 @@ def _set_caller(g: Any) -> None:
 # (runner, effect, handler)
 type _StackItem[**P, R, V] = tuple[object, _handler[V] | _async_handler[V], Effect[P, R], Callable[P, V]]
 
-_stack = ContextVar[list[_StackItem[..., Any, Any]]]("handler_stask", default=[])
+_stack = ContextVar[list[_StackItem[..., Any, Any]]]("handler_stask")
 _lock = Lock()
 
 
 def _get_stack() -> list[_StackItem[..., Any, Any]]:
-    return _stack.get()
+    try:
+        return list(_stack.get())
+    except LookupError:
+        return []
 
 
 def _set_stack(stack: list[_StackItem[..., Any, Any]]) -> None:
-    _stack.set(stack)
+    _stack.set(list(stack))
 
 
 def _get_item[**P, R](

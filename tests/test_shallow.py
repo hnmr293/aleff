@@ -743,3 +743,30 @@ class TestShallowMixedNesting:
 
         result = await h_deep(lambda: h_shallow(run))
         assert result == 21
+
+    @pytest.mark.asyncio
+    async def test_sync_shallow_inside_async_deep(self):
+        """Sync shallow handler inside async deep handler for the same effect.
+        After the shallow handler is removed, the second effect should be
+        relayed to the async deep handler."""
+        e: Effect[[], int] = effect("e")
+
+        h_deep: AsyncHandler[int] = create_async_handler(e)
+
+        @h_deep.on(e)
+        async def _deep(k: ResumeAsync[int, int]):
+            return await k(100)
+
+        h_shallow: Handler[int] = create_handler(e, shallow=True)
+
+        @h_shallow.on(e)
+        def _shallow(k: Resume[int, int]):
+            return k(1)
+
+        def run():
+            a = e()  # caught by shallow -> 1
+            b = e()  # shallow gone, caught by deep -> 100
+            return a + b
+
+        result = await h_deep(lambda: h_shallow(run))
+        assert result == 101
