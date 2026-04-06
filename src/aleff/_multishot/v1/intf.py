@@ -138,5 +138,6 @@ class EffectNotHandledError[**P, R](RuntimeError):
 
     def __init__(self, effect: Effect[P, R]):
         from .misc import eff_str
+
         super().__init__(f"no handler for the effect: {eff_str(effect)}")
         self.effect = effect

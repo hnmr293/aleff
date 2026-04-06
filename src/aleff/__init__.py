@@ -7,8 +7,7 @@ try:
     from .multishot import *
 except ImportError:
     _warnings.warn(
-        "aleff.multishot is not available in this environment.\n"
-        "Use 'import aleff.oneshot' for one-shot handlers.",
+        "aleff.multishot is not available in this environment.\nUse 'import aleff.oneshot' for one-shot handlers.",
         ImportWarning,
         stacklevel=1,
     )
