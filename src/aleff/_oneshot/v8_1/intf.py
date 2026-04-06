@@ -74,6 +74,11 @@ class Handler[V](Protocol):
         """The effects declared for this handler."""
         ...
 
+    @property
+    def shallow(self) -> bool:
+        """Whether this is a shallow handler."""
+        ...
+
     def on[**P, R](self, effect: Effect[P, R]) -> Callable[[EffectHandler[P, V, R]], Callable[P, V]]:
         """Register a handler function for *effect*.  Returns a decorator."""
         ...
@@ -105,6 +110,11 @@ class AsyncHandler[V](Protocol):
     @property
     def effects(self) -> frozenset[Effect[..., Any]]:
         """The effects declared for this handler."""
+        ...
+
+    @property
+    def shallow(self) -> bool:
+        """Whether this is a shallow handler."""
         ...
 
     def on[**P, R](

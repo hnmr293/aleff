@@ -1,5 +1,6 @@
 from asyncio import Lock, iscoroutine
 from contextvars import ContextVar, copy_context
+from dataclasses import dataclass
 from inspect import iscoroutinefunction
 from typing import Any, Awaitable, Callable, cast, Coroutine
 import greenlet as gl
@@ -19,23 +20,30 @@ from .misc import debug, eff_str
 from ._aleff import FrameSnapshot, restore_continuation, snapshot_from_frame
 
 
-def create_handler(*effects: Effect[..., Any]) -> Handler[Any]:
+def create_handler(*effects: Effect[..., Any], shallow: bool = False) -> Handler[Any]:
     """Create a synchronous handler that handles the given effects.
 
     Register implementations with :meth:`handler.on`, then call the handler
     with a caller function to run the computation.
+
+    If *shallow* is ``True``, the handler is removed from the handler stack
+    after handling one effect occurrence.  Subsequent occurrences of the
+    same effect will not be caught by this handler.
     """
-    return _Handler[Any](*effects)
+    return _Handler[Any](*effects, shallow=shallow)
 
 
-def create_async_handler(*effects: Effect[..., Any]) -> AsyncHandler[Any]:
+def create_async_handler(*effects: Effect[..., Any], shallow: bool = False) -> AsyncHandler[Any]:
     """Create an asynchronous handler that handles the given effects.
 
     Handler functions are ``async def`` and receive :class:`ResumeAsync`.
     The caller function runs in a greenlet; effect invocations are
     synchronous from the caller's perspective.
+
+    If *shallow* is ``True``, the handler is removed from the handler stack
+    after handling one effect occurrence.
     """
-    return _AsyncHandler[Any](*effects)
+    return _AsyncHandler[Any](*effects, shallow=shallow)
 
 
 ##
@@ -61,7 +69,24 @@ class _Resume[R, V](Resume[R, V]):
 
         if not caller_gl.dead:
             debug("||> @caller (one-shot)")
-            v = caller_gl.switch(value)
+
+            # Redirect caller_gl.parent so that effect invocations
+            # (which do ``gl.getcurrent().parent.switch(...)``) arrive
+            # at the greenlet that is currently driving the handler,
+            # not the one that originally created caller_gl.
+            # This is essential for shallow handler re-installation:
+            # when a handler does ``h(lambda: k(value))``, k() is
+            # called from a *new* handler greenlet, and the caller
+            # must switch back to it — not to the original root.
+            old_parent = caller_gl.parent
+            caller_gl.parent = gl.getcurrent()
+            try:
+                v = caller_gl.switch(value)
+            finally:
+                if not caller_gl.dead:
+                    assert old_parent is not None
+                    caller_gl.parent = old_parent
+
             debug(f"||< @caller = {v!r}")
             return _drive(caller_gl, v)
 
@@ -91,7 +116,16 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
 
         if not caller_gl.dead:
             debug("||> @caller (one-shot async)")
-            v = caller_gl.switch(value)
+
+            # See _Resume.__call__ for why the parent is redirected.
+            old_parent = caller_gl.parent
+            caller_gl.parent = gl.getcurrent()
+            try:
+                v = caller_gl.switch(value)
+            finally:
+                if not caller_gl.dead:
+                    assert old_parent is not None
+                    caller_gl.parent = old_parent
             debug(f"||< @caller = {v!r}")
             return await _drive_async(caller_gl, v)
 
@@ -111,10 +145,22 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
         return v
 
 
+@dataclass(frozen=True, slots=True)
+class _EffectDispatch:
+    """Result of looking up a handler for a performed effect."""
+
+    effect: Effect[..., Any]
+    token: object
+    handler: "_Handler[Any] | _AsyncHandler[Any]"
+    fn: Callable[..., Any]
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
 def _pre_drive(
     caller_gl: Any,
     value: EffectContext[..., Any],
-) -> tuple[Effect[..., Any], "_Handler[Any] | _AsyncHandler[Any]", Callable[..., Any], tuple[Any, ...], dict[str, Any]]:
+) -> _EffectDispatch:
     if not isinstance(value, EffectContext):  # pyright: ignore[reportUnnecessaryIsInstance]
         raise RuntimeError(f"invalid value passed to caller: {value!r}")
 
@@ -126,11 +172,11 @@ def _pre_drive(
     if found is None:
         raise EffectNotHandledError(effect)
 
-    handler, fn = found
+    token, handler, fn = found
 
     debug(f"||> ... found handler {handler} | {fn.__name__}")
 
-    return effect, handler, fn, args, kwargs
+    return _EffectDispatch(effect, token, handler, fn, args, kwargs)
 
 
 def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
@@ -146,9 +192,9 @@ def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
     # effect performed
     # switch to the handler greenlet
 
-    effect, handler, fn, args, kwargs = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
+    d = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
 
-    if isinstance(handler, _AsyncHandler):
+    if isinstance(d.handler, _AsyncHandler):
         # async handler found in sync context — relay to parent greenlet.
         #
         # Normally, when a sync handler is nested inside an async handler,
@@ -165,31 +211,36 @@ def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
         parent = gl.getcurrent().parent
         if parent is None:
             raise RuntimeError(
-                f"{eff_str(effect)} is handled by an async handler, but"
+                f"{eff_str(d.effect)} is handled by an async handler, but"
                 " cannot be relayed from the current sync context."
                 " The caller passed to the outer async handler should"
                 " be a regular function, not an async def."
             )
-        debug(f"||> relay {eff_str(effect)} to async handler")
+        debug(f"||> relay {eff_str(d.effect)} to async handler")
         resume_value = parent.switch(value)
         v = caller_gl.switch(resume_value)
-        debug(f"||< relay {eff_str(effect)}")
+        debug(f"||< relay {eff_str(d.effect)}")
         return _drive(caller_gl, v)
+
+    # For shallow handlers, remove all entries before calling fn so that
+    # resumed computation will not find this handler on the stack.
+    if d.handler.shallow:
+        _remove_all_handlers(d.token)
 
     # Take snapshot from the handler greenlet. The caller greenlet is
     # suspended at this point, so its frames have valid stacktop values.
     snapshot = snapshot_from_frame(caller_gl.gr_frame)
 
     resume: Resume[Any, Any] = _Resume(caller_gl, snapshot)
-    v = fn(resume, *args, **kwargs)
+    v = d.fn(resume, *d.args, **d.kwargs)
 
     if not caller_gl.dead:
         # resume not called in the handler
         # discard the result
-        debug(f"||< **abort** perform {eff_str(effect)} = {v!r}")
+        debug(f"||< **abort** perform {eff_str(d.effect)} = {v!r}")
         caller_gl.throw(gl.GreenletExit)
 
-    debug(f"||< perform {eff_str(effect)} = {v!r}")
+    debug(f"||< perform {eff_str(d.effect)} = {v!r}")
 
     debug("||< @main")
     return v
@@ -239,23 +290,28 @@ async def _drive_async[V](caller_gl: Any, value: V | _AwaitRequest[V] | EffectCo
     # effect performed
     # switch to the handler greenlet
 
-    effect, _, fn, args, kwargs = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
+    d = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
+
+    # For shallow handlers, remove all entries before calling fn so that
+    # resumed computation will not find this handler on the stack.
+    if d.handler.shallow:
+        _remove_all_handlers(d.token)
 
     snapshot = snapshot_from_frame(caller_gl.gr_frame)
     resume: ResumeAsync[Any, Any] = _ResumeAsync(caller_gl, snapshot)
 
-    if iscoroutinefunction(fn):
-        v = await fn(resume, *args, **kwargs)
+    if iscoroutinefunction(d.fn):
+        v = await d.fn(resume, *d.args, **d.kwargs)
     else:
-        v = fn(resume, *args, **kwargs)
+        v = d.fn(resume, *d.args, **d.kwargs)
 
     if not caller_gl.dead:
         # resume not called in the handler
         # discard the result
-        debug(f"||< **abort** perform {eff_str(effect)} = {v!r}")
+        debug(f"||< **abort** perform {eff_str(d.effect)} = {v!r}")
         caller_gl.throw(gl.GreenletExit)
 
-    debug(f"||< perform {eff_str(effect)} = {v!r}")
+    debug(f"||< perform {eff_str(d.effect)} = {v!r}")
 
     debug("||< @main")
     return v
@@ -268,15 +324,20 @@ class _handler_base[
     EffectHandlerType: Callable[..., Any],
     CallerType: Callable[[], Any],
 ]:
-    def __init__(self, *effects: Effect[..., Any]):
+    def __init__(self, *effects: Effect[..., Any], shallow: bool = False):
         global _num
 
         self._effects = tuple(effects)
         self._unbound_effects = set(effects)
         self._reserved_effects: list[tuple[Effect[..., Any], EffectHandlerType]] = []
+        self._shallow = shallow
         self._n = _num
         _num += 1
         debug(f"@ {self}")
+
+    @property
+    def shallow(self) -> bool:
+        return self._shallow
 
     def check(self, caller: CallerType) -> None:
         if len(self._unbound_effects) > 0:
@@ -447,11 +508,13 @@ def _set_stack(stack: list[_StackItem[..., Any, Any]]) -> None:
     _stack.set(stack)
 
 
-def _get_item[**P, R](effect: Effect[P, R]) -> tuple[_Handler[Any] | _AsyncHandler[Any], Callable[P, Any]] | None:
+def _get_item[**P, R](
+    effect: Effect[P, R],
+) -> tuple[object, _Handler[Any] | _AsyncHandler[Any], Callable[P, Any]] | None:
     s = _get_stack()
-    for _, h, e, f in reversed(s):
+    for token, h, e, f in reversed(s):
         if e is effect:
-            return h, f
+            return token, h, f
     return None
 
 
