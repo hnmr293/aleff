@@ -1,5 +1,15 @@
 {
     "typeCheckingMode": "strict",
     "pythonVersion": "3.12",
-    "reportUnusedFunction": false
+    "reportUnusedFunction": false,
+    "ignore": [
+        "src/aleff/_oneshot/v1",
+        "src/aleff/_oneshot/v2",
+        "src/aleff/_oneshot/v3",
+        "src/aleff/_oneshot/v4",
+        "src/aleff/_oneshot/v5",
+        "src/aleff/_oneshot/v6",
+        "src/aleff/_oneshot/v7",
+        "debug_*.py"
+    ]
 }

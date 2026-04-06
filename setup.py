@@ -1,9 +1,10 @@
+import os
 import sys
 import sysconfig
-from setuptools import setup, Extension
+from setuptools import setup, Extension  # pyright: ignore[reportMissingModuleSource]
 
 header_dir = sysconfig.get_path("include")
-if header_dir is None or not __import__("os").path.isfile(__import__("os").path.join(header_dir, "Python.h")):
+if not os.path.isfile(os.path.join(header_dir, "Python.h")):
     v = f"{sys.version_info.major}.{sys.version_info.minor}"
     sys.exit(
         f"error: Python.h not found for Python {v}.\n"
