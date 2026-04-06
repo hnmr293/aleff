@@ -1,7 +1,7 @@
 [project]
 name = "aleff1"
 version = "0.1.0"
-description = "Algebraic effects for Python — deep, stateful, one-shot handlers via greenlet-based delimited continuations"
+description = "Algebraic effects for Python — deep, stateful, multi-shot handlers via greenlet-based delimited continuations"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
