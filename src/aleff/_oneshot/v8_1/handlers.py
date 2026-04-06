@@ -110,6 +110,7 @@ class _EffectDispatch:
     """Result of looking up a handler for a performed effect."""
 
     effect: Effect[..., Any]
+    handler: "_handler[Any] | _async_handler[Any]"
     fn: Callable[..., Any]
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
@@ -137,7 +138,7 @@ def _pre_drive[V](caller_gl: Any, value: EffectContext[..., Any]) -> _EffectDisp
 
     _set_caller(caller_gl)
 
-    return _EffectDispatch(effect, fn, args, kwargs)
+    return _EffectDispatch(effect, handler, fn, args, kwargs)
 
 
 def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
@@ -154,6 +155,23 @@ def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
     # switch to the handler greenlet
 
     d = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
+
+    if isinstance(d.handler, _async_handler):
+        # async handler found in sync context — relay to parent greenlet.
+        parent = gl.getcurrent().parent
+        if parent is None:
+            raise RuntimeError(
+                f"{d.effect} is handled by an async handler, but"
+                " cannot be relayed from the current sync context."
+                " The caller passed to the outer async handler should"
+                " be a regular function, not an async def."
+            )
+        debug(f"||> relay {d.effect} to async handler")
+        resume_value = parent.switch(value)
+        v = caller_gl.switch(resume_value)
+        debug(f"||< relay {d.effect}")
+        return _drive(caller_gl, v)
+
     v = d.fn(*d.args, **d.kwargs)
 
     if not caller_gl.dead:
@@ -386,16 +404,19 @@ def _set_caller(g: Any) -> None:
 # (runner, effect, handler)
 type _StackItem[**P, R, V] = tuple[object, _handler[V] | _async_handler[V], Effect[P, R], Callable[P, V]]
 
-_stack = ContextVar[list[_StackItem[..., Any, Any]]]("handler_stask", default=[])
+_stack = ContextVar[list[_StackItem[..., Any, Any]]]("handler_stask")
 _lock = Lock()
 
 
 def _get_stack() -> list[_StackItem[..., Any, Any]]:
-    return _stack.get()
+    try:
+        return list(_stack.get())
+    except LookupError:
+        return []
 
 
 def _set_stack(stack: list[_StackItem[..., Any, Any]]) -> None:
-    _stack.set(stack)
+    _stack.set(list(stack))
 
 
 def _get_item[**P, R](

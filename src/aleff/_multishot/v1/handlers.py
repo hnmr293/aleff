@@ -497,15 +497,13 @@ _lock = Lock()
 
 def _get_stack() -> list[_StackItem[..., Any, Any]]:
     try:
-        return _stack.get()
+        return list(_stack.get())
     except LookupError:
-        stack: list[_StackItem[..., Any, Any]] = []
-        _stack.set(stack)
-        return stack
+        return []
 
 
 def _set_stack(stack: list[_StackItem[..., Any, Any]]) -> None:
-    _stack.set(stack)
+    _stack.set(list(stack))
 
 
 def _get_item[**P, R](
