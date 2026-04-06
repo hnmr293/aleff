@@ -55,3 +55,24 @@ Reverse-mode AD on the same math expressions and effects as the forward-mode dem
 Comparison with forward-mode AD:
 - forward-mode: each handler propagates `k(Dual(...))` with value and derivative simultaneously. Best for single-variable differentiation.
 - reverse-mode: forward/backward separated by code before/after `k()`. Best for multi-variable/multi-parameter differentiation (one backward pass yields all gradients).
+
+### demo_shallow_state.py — State Machine (shallow handlers)
+
+Implements mutable state (`get`/`put`) and a traffic light controller using **shallow handlers**.
+
+- **State effect**: each `get`/`put` is handled once, then the handler re-installs itself with the (potentially updated) state value — state is encoded in the handler, not in mutable variables
+- **Deep handler comparison**: the same state effect implemented with a deep handler and a mutable variable, showing the two approaches side by side
+- **Traffic light**: RED → GREEN → YELLOW → RED state transitions, where each `next_signal()` is handled by a shallow handler that re-installs the next state
+
+### demo_shift_reset.py — shift/reset and shift0/reset0
+
+Delimited continuations implemented via algebraic effect handlers, demonstrating the correspondence:
+
+- **shift/reset** = deep handler (handler stays installed across `k`)
+- **shift0/reset0** = shallow handler (handler removed before `k` resumes)
+
+Examples:
+- `k(k(10))` with deep handler: both `k` calls run under the same delimiter
+- Multiple shifts with shallow handler: each `k(v)` must be wrapped in `reset0()` to re-delimit
+- **Abort**: discarding the continuation (both deep and shallow)
+- **Generator**: `yield` via `shift0`/`reset0` — the consumer calls `k` inside a fresh `reset0` to pull the next value
