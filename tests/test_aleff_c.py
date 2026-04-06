@@ -233,8 +233,7 @@ class TestRestoreContinuationGreenlet:
 
     def test_basic_resume(self):
         """restore_continuation resumes from a snapshot with a value."""
-        if not HAS_RESTORE:
-            pytest.skip("_PyEval_EvalFrameDefault not available")
+        assert HAS_RESTORE, "_PyEval_EvalFrameDefault not available"
 
         def user_code() -> str:
             val: str = self._perform("get")
@@ -259,8 +258,7 @@ class TestRestoreContinuationGreenlet:
 
     def test_resume_multiple_times(self):
         """Same snapshot can be restored multiple times with different values."""
-        if not HAS_RESTORE:
-            pytest.skip("_PyEval_EvalFrameDefault not available")
+        assert HAS_RESTORE, "_PyEval_EvalFrameDefault not available"
 
         def user_code() -> int:
             x: int = self._perform("choose")
@@ -288,8 +286,7 @@ class TestRestoreContinuationGreenlet:
 
     def test_resume_with_nested_calls(self):
         """restore_continuation works when perform is called through nested functions."""
-        if not HAS_RESTORE:
-            pytest.skip("_PyEval_EvalFrameDefault not available")
+        assert HAS_RESTORE, "_PyEval_EvalFrameDefault not available"
 
         def inner() -> int:
             return self._perform("val")
@@ -321,8 +318,7 @@ class TestRestoreContinuationGreenlet:
         The frame copy shares the same list object, so mutations accumulate.
         This matches Scheme's call/cc behavior: continuations share the heap.
         """
-        if not HAS_RESTORE:
-            pytest.skip("_PyEval_EvalFrameDefault not available")
+        assert HAS_RESTORE, "_PyEval_EvalFrameDefault not available"
 
         def user_code() -> list[int]:
             items: list[int] = []
@@ -349,8 +345,7 @@ class TestRestoreContinuationGreenlet:
 
     def test_heap_shared_between_shots(self):
         """Objects from outside the continuation are shared (Scheme semantics)."""
-        if not HAS_RESTORE:
-            pytest.skip("_PyEval_EvalFrameDefault not available")
+        assert HAS_RESTORE, "_PyEval_EvalFrameDefault not available"
 
         shared: list[int] = []
 
@@ -375,8 +370,7 @@ class TestRestoreContinuationGreenlet:
 
     def test_exception_in_restored_continuation(self):
         """Exceptions in restored continuations propagate normally."""
-        if not HAS_RESTORE:
-            pytest.skip("_PyEval_EvalFrameDefault not available")
+        assert HAS_RESTORE, "_PyEval_EvalFrameDefault not available"
 
         def user_code() -> int:
             v: int = self._perform("choose")
