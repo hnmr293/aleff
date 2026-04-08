@@ -1,0 +1,42 @@
+--- Scenario 1: Normal payroll ---
+=== Auto-commit ===
+  [LOG] payroll: Acme Corp -> 3 employees, total=6500
+  [LOG] company balance: 10000
+  [LOG]   transfer 2000 to Alice
+  [LOG]   transfer 3000 to Bob
+  [LOG]   transfer 1500 to Charlie
+  [LOG] payroll complete. remaining balance: 3500
+  result: ok
+  db: {'Acme Corp': 3500, 'Alice': 2500, 'Bob': 3300, 'Charlie': 1700}
+
+--- Scenario 2: Insufficient funds (business logic) ---
+=== Transactional ===
+  [LOG] payroll: Acme Corp -> 3 employees, total=12000
+  [LOG] company balance: 10000
+  [LOG] insufficient funds: 10000 < 12000
+  [TXN] rolling back (0 operations discarded)
+  result: error: insufficient funds
+  db: {'Acme Corp': 10000, 'Alice': 500, 'Bob': 300, 'Charlie': 200}
+
+--- Scenario 3: Normal payroll, transactional ---
+=== Transactional ===
+  [LOG] payroll: Acme Corp -> 3 employees, total=6500
+  [LOG] company balance: 10000
+  [LOG]   transfer 2000 to Alice
+  [LOG]   transfer 3000 to Bob
+  [LOG]   transfer 1500 to Charlie
+  [LOG] payroll complete. remaining balance: 3500
+  [TXN] committing 3 operations
+  result: ok
+  db: {'Acme Corp': 3500, 'Alice': 2500, 'Bob': 3300, 'Charlie': 1700}
+
+--- Scenario 4: Per-transfer validation with abort ---
+=== Transactional + validation ===
+  [LOG] payroll: Acme Corp -> 3 employees, total=12000
+  [LOG] company balance: 10000
+  [LOG] insufficient funds: 10000 < 12000
+  [TXN] rolling back (0 operations discarded)
+  result: error: insufficient funds
+  db: {'Acme Corp': 10000, 'Alice': 500, 'Bob': 300, 'Charlie': 200}
+
+All transaction demos passed.

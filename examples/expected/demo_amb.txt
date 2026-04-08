@@ -1,0 +1,20 @@
+=== Pythagorean triples (1..10) ===
+  3^2 + 4^2 = 5^2  (9 + 16 = 25)
+  6^2 + 8^2 = 10^2  (36 + 64 = 100)
+  [OK]
+
+=== SICP dwelling puzzle ===
+       Baker: floor 3
+      Cooper: floor 2
+    Fletcher: floor 4
+      Miller: floor 5
+       Smith: floor 1
+
+  [OK]
+
+=== Map coloring (Australia, 3 colors) ===
+  18 valid colorings found
+  Example: {'WA': 'red', 'NT': 'green', 'SA': 'blue', 'Q': 'red', 'NSW': 'green', 'V': 'red', 'T': 'red'}
+  [OK]
+
+All amb demos passed.

@@ -1,0 +1,16 @@
+=== shift/reset (deep handler) ===
+  reset(1 + shift(k -> k(k(10))))  = 12
+  reset(shift(k->k(1)+k(2)); shift(k->k(a*10)))  = 30
+
+=== shift0/reset0 (shallow handler) ===
+  reset0(1 + shift0(k -> k(10)))   = 11
+  reset0(shift0(k->reset0(k(1))+reset0(k(2))); shift0(...))  = 30
+
+=== Abort (both) ===
+  reset(1 + shift(_ -> 42))   = 42
+  reset0(1 + shift0(_ -> 42)) = 42
+
+=== Generator via shift0/reset0 ===
+  generator yields = [1, 2, 3]
+
+All demos passed.

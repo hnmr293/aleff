@@ -181,6 +181,9 @@ typedef struct _aleff_frame {
     PyFrameObject *frame_obj;
     _aleff_codeunit *instr_ptr;          /* instruction pointer (3.13+ name) */
     _aleff_stackref *stackpointer;       /* pointer into localsplus */
+#ifdef Py_GIL_DISABLED
+    int32_t tlbc_index;                  /* thread-local bytecode index */
+#endif
     uint16_t return_offset;
     char owner;
     uint8_t visited;
@@ -204,7 +207,7 @@ _aleff_obj_to_stackref(PyObject *obj)
 {
     /* Replicate PyStackRef_FromPyObjectSteal: immortal objects get the
      * Py_TAG_REFCNT (1) tag bit set via ob_flags. */
-    if (obj == nullptr) return 0;
+    if (obj == nullptr) return _ALEFF_TAG_BITS;  /* PyStackRef_NULL.bits */
     unsigned int tag = ((PyObject *)obj)->ob_flags & _ALEFF_TAG_BITS;
     return (_aleff_stackref)((uintptr_t)obj | tag);
 }
@@ -1029,6 +1032,10 @@ PyInit__aleff(void)
     PyObject *m = PyModule_Create(&_aleff_module);
     if (m == nullptr)
         return nullptr;
+
+#ifdef Py_GIL_DISABLED
+    PyUnstable_Module_SetGIL(m, Py_MOD_GIL_NOT_USED);
+#endif
 
     Py_INCREF(&FrameSnapshotType);
     if (PyModule_AddObject(m, "FrameSnapshot", (PyObject *)&FrameSnapshotType) < 0) {

@@ -1,0 +1,145 @@
+=== Record: Tokyo ===
+  [LOG] fetching weather for Tokyo
+  [API] GET temperature(Tokyo) -> 28.5
+  [API] GET humidity(Tokyo) -> 65.0
+  [LOG] report: 28.5°C, 65.0%, comfortable
+  -> WeatherReport(city='Tokyo', temperature=28.5, humidity=65.0, comfort='comfortable')
+
+=== Recorded log (Tokyo) ===
+[
+  {
+    "effect": "log",
+    "args": [
+      "fetching weather for Tokyo"
+    ],
+    "result": null
+  },
+  {
+    "effect": "get_temperature",
+    "args": [
+      "Tokyo"
+    ],
+    "result": 28.5
+  },
+  {
+    "effect": "get_humidity",
+    "args": [
+      "Tokyo"
+    ],
+    "result": 65.0
+  },
+  {
+    "effect": "log",
+    "args": [
+      "report: 28.5\u00b0C, 65.0%, comfortable"
+    ],
+    "result": null
+  }
+]
+
+=== Replay: Tokyo ===
+  [REPLAY] log('fetching weather for Tokyo')
+  [REPLAY] get_temperature(Tokyo) -> 28.5
+  [REPLAY] get_humidity(Tokyo) -> 65.0
+  [REPLAY] log('report: 28.5°C, 65.0%, comfortable')
+  -> WeatherReport(city='Tokyo', temperature=28.5, humidity=65.0, comfort='comfortable')
+
+  [OK] Tokyo: record and replay match
+
+=== Record: London ===
+  [LOG] fetching weather for London
+  [API] GET temperature(London) -> 12.3
+  [API] GET humidity(London) -> 88.0
+  [LOG] report: 12.3°C, 88.0%, cold
+  -> WeatherReport(city='London', temperature=12.3, humidity=88.0, comfort='cold')
+
+=== Recorded log (London) ===
+[
+  {
+    "effect": "log",
+    "args": [
+      "fetching weather for London"
+    ],
+    "result": null
+  },
+  {
+    "effect": "get_temperature",
+    "args": [
+      "London"
+    ],
+    "result": 12.3
+  },
+  {
+    "effect": "get_humidity",
+    "args": [
+      "London"
+    ],
+    "result": 88.0
+  },
+  {
+    "effect": "log",
+    "args": [
+      "report: 12.3\u00b0C, 88.0%, cold"
+    ],
+    "result": null
+  }
+]
+
+=== Replay: London ===
+  [REPLAY] log('fetching weather for London')
+  [REPLAY] get_temperature(London) -> 12.3
+  [REPLAY] get_humidity(London) -> 88.0
+  [REPLAY] log('report: 12.3°C, 88.0%, cold')
+  -> WeatherReport(city='London', temperature=12.3, humidity=88.0, comfort='cold')
+
+  [OK] London: record and replay match
+
+=== Record: Dubai ===
+  [LOG] fetching weather for Dubai
+  [API] GET temperature(Dubai) -> 42.1
+  [API] GET humidity(Dubai) -> 30.0
+  [LOG] report: 42.1°C, 30.0%, hot
+  -> WeatherReport(city='Dubai', temperature=42.1, humidity=30.0, comfort='hot')
+
+=== Recorded log (Dubai) ===
+[
+  {
+    "effect": "log",
+    "args": [
+      "fetching weather for Dubai"
+    ],
+    "result": null
+  },
+  {
+    "effect": "get_temperature",
+    "args": [
+      "Dubai"
+    ],
+    "result": 42.1
+  },
+  {
+    "effect": "get_humidity",
+    "args": [
+      "Dubai"
+    ],
+    "result": 30.0
+  },
+  {
+    "effect": "log",
+    "args": [
+      "report: 42.1\u00b0C, 30.0%, hot"
+    ],
+    "result": null
+  }
+]
+
+=== Replay: Dubai ===
+  [REPLAY] log('fetching weather for Dubai')
+  [REPLAY] get_temperature(Dubai) -> 42.1
+  [REPLAY] get_humidity(Dubai) -> 30.0
+  [REPLAY] log('report: 42.1°C, 30.0%, hot')
+  -> WeatherReport(city='Dubai', temperature=42.1, humidity=30.0, comfort='hot')
+
+  [OK] Dubai: record and replay match
+
+All record/replay demos passed.
