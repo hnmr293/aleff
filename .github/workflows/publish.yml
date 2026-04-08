@@ -50,6 +50,7 @@ jobs:
           name: dist
           path: dist/*.tar.gz
           if-no-files-found: error
+          retention-days: 1
 
   publish-testpypi:
     name: Publish to TestPyPI
