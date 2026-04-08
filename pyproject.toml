@@ -77,6 +77,7 @@ test-requires = ["pytest", "pytest-asyncio", "greenlet>=3.3.2"]
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
+manylinux-x86_64-image = "manylinux_2_28"
 
 [tool.cibuildwheel.macos]
 archs = ["x86_64", "arm64"]
