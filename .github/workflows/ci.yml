@@ -13,6 +13,8 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          cache-suffix: lint
 
       - name: Pyright
         run: uv run pyright src/ tests/
@@ -32,6 +34,8 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: astral-sh/setup-uv@v8.0.0
+        with:
+          cache-suffix: "test-${{ matrix.python-version }}"
 
       - name: Run tests
         run: ./run_tests_one.sh "${{ matrix.python-version }}"
