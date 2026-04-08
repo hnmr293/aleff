@@ -28,6 +28,10 @@ Algebraic effects for Python — deep and shallow, stateful, composable, multi-s
 
 ## Installation
 
+```sh
+pip install aleff
+```
+
 From source:
 
 ```sh
