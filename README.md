@@ -17,10 +17,9 @@ Algebraic effects for Python — deep and shallow, stateful, composable, multi-s
 
 ## Requirements
 
-- CPython 3.12, 3.13, or 3.14 (CPython-specific C extension)
+- CPython 3.12.13, 3.13.12, 3.14.3, 3.14.3t (free-threaded)
 - greenlet >= 3.3.2
 - Linux / macOS (Windows not yet supported — see [#1](https://github.com/hnmr293/aleff/issues/1))
-- **Note**: Free-threaded (no-GIL) builds are not supported — see [#3](https://github.com/hnmr293/aleff/issues/3)
 
 ## Installation
 
