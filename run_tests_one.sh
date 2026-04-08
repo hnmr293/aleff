@@ -11,7 +11,15 @@ ver="$1"
 echo "===== Python $ver ====="
 
 # Build C extension
-PYTHON="uv run --python $ver python" make debug
+case "$(uname -s)" in
+    MINGW*|MSYS*)
+        # Windows: use setuptools (MSVC) via build_ext --inplace
+        uv run --python "$ver" python setup.py build_ext --inplace
+        ;;
+    *)
+        PYTHON="uv run --python $ver python" make debug
+        ;;
+esac
 
 # Run tests
 uv run --quiet --python "$ver" pytest tests/ -q

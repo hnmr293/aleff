@@ -17,10 +17,20 @@
 #include <Python.h>
 #include <frameobject.h>
 #include <stddef.h>
-#include <dlfcn.h>
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#else
+#  include <dlfcn.h>
+#endif
 
 #if PY_VERSION_HEX < 0x030c0000
 #error "_aleff requires Python 3.12 or later"
+#endif
+
+/* MSVC does not support C23 nullptr in C mode. */
+#if defined(_MSC_VER) && !defined(__cplusplus)
+#  define nullptr NULL
 #endif
 
 /* Opcode metadata: we need a deopt table to map specialized opcodes
@@ -1017,14 +1027,27 @@ PyInit__aleff(void)
 {
     _aleff_init_opcode_deopt();
 
-    /* Look up _PyEval_EvalFrameDefault via dlsym.
-     * POSIX guarantees dlsym returns a valid function pointer via void*,
+    /* Look up _PyEval_EvalFrameDefault.
+     * Not fatal if not found — restore_continuation will raise at call time. */
+#ifdef _WIN32
+    {
+        char dllname[32];
+        snprintf(dllname, sizeof(dllname), "python%d%d.dll",
+                 PY_MAJOR_VERSION, PY_MINOR_VERSION);
+        HMODULE hmod = GetModuleHandleA(dllname);
+        if (hmod) {
+            _evalframe = (evalframe_fn_t)(void *)GetProcAddress(
+                hmod, "_PyEval_EvalFrameDefault");
+        }
+    }
+#else
+    /* POSIX guarantees dlsym returns a valid function pointer via void*,
      * but ISO C forbids the cast. Suppress the warning here. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wpedantic"
     _evalframe = (evalframe_fn_t)dlsym(RTLD_DEFAULT, "_PyEval_EvalFrameDefault");
-#pragma GCC diagnostic pop
-    /* Not fatal if not found — restore_continuation will raise at call time */
+#  pragma GCC diagnostic pop
+#endif
 
     if (PyType_Ready(&FrameSnapshotType) < 0)
         return nullptr;
