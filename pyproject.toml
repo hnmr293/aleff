@@ -73,5 +73,8 @@ archs = ["x86_64"]
 [tool.cibuildwheel.macos]
 archs = ["x86_64", "arm64"]
 
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
+
 [tool.uv.sources]
 gdb-mcp = { git = "https://github.com/hnmr293/gdb-mcp" }
