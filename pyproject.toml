@@ -1,14 +1,26 @@
 [project]
 name = "aleff"
 version = "0.1.0"
-description = "Algebraic effects for Python — deep and shallow, stateful, multi-shot handlers via greenlet-based delimited continuations"
+description = "Algebraic effects for Python — deep and shallow, stateful, composable, multi-shot handlers"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 authors = [
     { name = "hnmr" },
 ]
-keywords = ["Python", "algebraic-effects", "effects", "greenlet", "delimited-continuations", "multi-shot continuations", "stateful handlers", "deep handlers", "shallow handlers"]
+keywords = [
+    "Python",
+    "greenlet",
+    "algebraic-effects",
+    "effects",
+    "effect systems",
+    "delimited-continuations",
+    "multi-shot continuations",
+    "stateful handlers",
+    "deep handlers",
+    "shallow handlers",
+    "composable handlers",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

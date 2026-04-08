@@ -1,6 +1,6 @@
 # aleff
 
-Algebraic effects for Python — deep and shallow, stateful, multi-shot handlers via greenlet-based delimited continuations.
+Algebraic effects for Python — deep and shallow, stateful, composable, multi-shot handlers.
 
 ## Features
 
@@ -9,7 +9,8 @@ Algebraic effects for Python — deep and shallow, stateful, multi-shot handlers
 - **Stateful handlers** — handler functions can execute code after `resume`, enabling patterns like transactions and reverse-mode AD
 - **Multi-shot continuations** — `resume` can be called multiple times in a single handler, enabling backtracking search, non-determinism, and other advanced patterns
 - **Sync and async** — both synchronous (`Handler`) and asynchronous (`AsyncHandler`) handlers are supported, with transparent bridging between the two
-- **Effect composition** — `@effect(step1, step2)` collects effect sets transitively from decorated functions
+- **Effect composition** — handler functions can perform effects themselves, dispatched to enclosing handlers; enables layered architectures and modular effect stacking
+- **Effect annotation** — `@effect(step1, step2)` collects effect sets transitively from decorated functions
 - **Introspection** — `effects(fn)` and `unhandled_effects(fn, h)` for querying and validating effect coverage
 - **Typed** — effect parameters and return types are checked by type checkers (pyright, ty)
 - **No macros, no code generation** — pure Python library built on [greenlet](https://github.com/python-greenlet/greenlet) and a small CPython C extension
@@ -85,6 +86,37 @@ def computation():
 
 result = h(computation)
 print(result)  # [0, 1, 10, 11, 20, 21]
+```
+
+### Effect composition
+
+Handler functions can perform effects that are handled by enclosing handlers:
+
+```python
+from aleff import effect, Effect, Resume, create_handler
+
+log: Effect[[str], None] = effect("log")
+parse: Effect[[str], int] = effect("parse")
+
+# Outer handler: logging
+h_log = create_handler(log)
+
+@h_log.on(log)
+def _log(k: Resume[None, int], msg: str):
+    print(f"[LOG] {msg}")
+    return k(None)
+
+# Inner handler: parsing with logging
+h_parse = create_handler(parse)
+
+@h_parse.on(parse)
+def _parse(k: Resume[int, int], s: str):
+    log(f"parsing: {s}")       # handled by the outer handler
+    return k(int(s))
+
+result = h_log(lambda: h_parse(lambda: parse("42") + 1))
+# prints: [LOG] parsing: 42
+print(result)  # 43
 ```
 
 ## How it works
