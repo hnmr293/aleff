@@ -1,0 +1,101 @@
+N=1: 1 solutions
+  --- solution 1 ---
+   Q
+
+  [OK]
+
+N=4: 2 solutions
+  --- solution 1 ---
+   . Q . .
+   . . . Q
+   Q . . .
+   . . Q .
+
+  --- solution 2 ---
+   . . Q .
+   Q . . .
+   . . . Q
+   . Q . .
+
+  [OK]
+
+N=5: 10 solutions
+  --- solution 1 ---
+   Q . . . .
+   . . Q . .
+   . . . . Q
+   . Q . . .
+   . . . Q .
+
+  --- solution 2 ---
+   Q . . . .
+   . . . Q .
+   . Q . . .
+   . . . . Q
+   . . Q . .
+
+  --- solution 3 ---
+   . Q . . .
+   . . . Q .
+   Q . . . .
+   . . Q . .
+   . . . . Q
+
+  --- solution 4 ---
+   . Q . . .
+   . . . . Q
+   . . Q . .
+   Q . . . .
+   . . . Q .
+
+  --- solution 5 ---
+   . . Q . .
+   Q . . . .
+   . . . Q .
+   . Q . . .
+   . . . . Q
+
+  --- solution 6 ---
+   . . Q . .
+   . . . . Q
+   . Q . . .
+   . . . Q .
+   Q . . . .
+
+  --- solution 7 ---
+   . . . Q .
+   Q . . . .
+   . . Q . .
+   . . . . Q
+   . Q . . .
+
+  --- solution 8 ---
+   . . . Q .
+   . Q . . .
+   . . . . Q
+   . . Q . .
+   Q . . . .
+
+  --- solution 9 ---
+   . . . . Q
+   . Q . . .
+   . . . Q .
+   Q . . . .
+   . . Q . .
+
+  --- solution 10 ---
+   . . . . Q
+   . . Q . .
+   Q . . . .
+   . . . Q .
+   . Q . . .
+
+  [OK]
+
+N=6: 4 solutions
+  [OK]
+
+N=8: 92 solutions
+  [OK]
+
+All N-Queens demos passed.

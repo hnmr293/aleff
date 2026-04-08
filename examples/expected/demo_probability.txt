@@ -1,0 +1,29 @@
+=== Single fair coin ===
+                 heads: 0.5000  ####################
+                 tails: 0.5000  ####################
+
+  [OK]
+=== Two fair coins ===
+               0_heads: 0.2500  ##########
+               1_heads: 0.5000  ####################
+               2_heads: 0.2500  ##########
+
+  [OK]
+=== Three coins, at least 2 heads ===
+                    no: 0.5000  ####################
+                   yes: 0.5000  ####################
+
+  [OK]
+=== Biased coin (p=0.7), two flips ===
+               0_heads: 0.0900  ###
+               1_heads: 0.4200  ################
+               2_heads: 0.4900  ###################
+
+  [OK]
+=== Bayesian diagnosis (given positive test) ===
+  P(positive test) = 0.0585
+  P(disease | positive) = 0.1538
+  P(healthy | positive) = 0.8462
+  [OK]
+
+All probability demos passed.

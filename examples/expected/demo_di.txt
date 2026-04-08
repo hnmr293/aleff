@@ -1,0 +1,24 @@
+=== In-memory handler ===
+  [LOG] registering user: Alice <alice@example.com>
+  [LOG] user created: 1
+  [LOG] welcome email sent to alice@example.com
+  result: UserRecord(id=1, name='Alice', email='alice@example.com')
+  [LOG] registering user: Alice2 <alice@example.com>
+  [LOG] user already exists: 1
+  result: UserRecord(id=1, name='Alice', email='alice@example.com')
+  db: {'alice@example.com': UserRecord(id=1, name='Alice', email='alice@example.com')}
+  emails sent: 1
+
+=== Async handler ===
+  [LOG] registering user: Bob <bob@example.com>
+  [DB] SELECT * FROM users WHERE email = 'bob@example.com'
+  [DB] INSERT INTO users ... -> id=42
+  [LOG] user created: 42
+  [SMTP] To: bob@example.com, Subject: Welcome!
+  [LOG] welcome email sent to bob@example.com
+  result: UserRecord(id=42, name='Bob', email='bob@example.com')
+
+=== Abort handler (validation) ===
+  result: error: user already exists
+
+All demos passed.

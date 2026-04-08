@@ -1,0 +1,16 @@
+=== Shallow handler: counter ===
+  counter()  = [0, 1, 2]
+  final state = 3
+
+=== Deep handler: counter (for comparison) ===
+  counter()  = [0, 1, 2]
+  final state = 3
+
+=== Shallow handler: factorial ===
+  factorial(5) = 120
+  final state  = 120
+
+=== Shallow handler: traffic light ===
+  signals = ['RED', 'GREEN', 'YELLOW', 'RED', 'GREEN', 'YELLOW', 'RED', 'GREEN']
+
+All demos passed.
