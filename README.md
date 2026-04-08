@@ -29,15 +29,11 @@ Algebraic effects for Python — deep and shallow, stateful, composable, multi-s
 ## Installation
 
 ```sh
+# uv
+uv add aleff
+
+# pip
 pip install aleff
-```
-
-From source:
-
-```sh
-git clone https://github.com/hnmr293/aleff.git
-cd aleff
-pip install .
 ```
 
 ## Quick start
@@ -184,6 +180,14 @@ See [`examples/`](examples/) for demonstrations:
 | `ResumeAsync[R, V]` | Async continuation (`await k(value) -> V`) |
 
 ## Development
+
+From source:
+
+```sh
+git clone https://github.com/hnmr293/aleff.git
+cd aleff
+uv sync
+```
 
 ```sh
 # Run tests
