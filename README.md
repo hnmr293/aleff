@@ -24,7 +24,7 @@ Algebraic effects for Python — deep and shallow, stateful, composable, multi-s
     - 3.14.3
     - 3.14.3t (free-threaded)
 - greenlet >= 3.3.2
-- Linux / macOS (Windows not yet supported — see [#1](https://github.com/hnmr293/aleff/issues/1))
+- Linux / macOS / Windows
 
 ## Installation
 
