@@ -39,11 +39,11 @@ for f in examples/demo_*.py; do
         continue
     fi
     actual=$(PYTHONIOENCODING=utf-8 uv run --quiet --python "$ver" python "$f" 2>&1 | tr -d '\r')
-    if diff -u "$expected" <(echo "$actual") > /dev/null 2>&1; then
+    if diff -u --strip-trailing-cr "$expected" <(echo "$actual") > /dev/null 2>&1; then
         success=$((success + 1))
     else
         echo "  FAIL $name"
-        diff -u "$expected" <(echo "$actual") || true
+        diff -u --strip-trailing-cr "$expected" <(echo "$actual") || true
         fail=1
     fi
 done
