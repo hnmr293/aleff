@@ -1,6 +1,8 @@
 {
     "typeCheckingMode": "strict",
     "pythonVersion": "3.12",
+    "venvPath": ".",
+    "venv": ".venv",
     "reportUnusedFunction": false,
     "ignore": [
         "src/aleff/_oneshot/v1",
@@ -10,6 +12,7 @@
         "src/aleff/_oneshot/v5",
         "src/aleff/_oneshot/v6",
         "src/aleff/_oneshot/v7",
+        "src/aleff/_oneshot/v8",
         "debug_*.py"
     ]
 }
