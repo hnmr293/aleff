@@ -28,9 +28,12 @@
 #error "_aleff requires Python 3.12 or later"
 #endif
 
-/* MSVC does not support C23 nullptr in C mode. */
+/* MSVC /std:c17 does not support C23 [[maybe_unused]] or nullptr. */
 #if defined(_MSC_VER) && !defined(__cplusplus)
 #  define nullptr NULL
+#  define _ALEFF_UNUSED
+#else
+#  define _ALEFF_UNUSED [[maybe_unused]]
 #endif
 
 /* Opcode metadata: we need a deopt table to map specialized opcodes
@@ -364,7 +367,7 @@ FrameSnapshot_dealloc(FrameSnapshotObject *self)
 }
 
 static PyObject *
-FrameSnapshot_class_getitem([[maybe_unused]] PyObject *cls, [[maybe_unused]] PyObject *args)
+FrameSnapshot_class_getitem(_ALEFF_UNUSED PyObject *cls, _ALEFF_UNUSED PyObject *args)
 {
     /* FrameSnapshot[R, V] */
     Py_INCREF(cls);
@@ -750,7 +753,7 @@ PyDoc_STRVAR(snapshot_frames_doc,
 "  depth: Maximum number of frames to capture. -1 for all frames.\n");
 
 static PyObject *
-_aleff_snapshot_frames([[maybe_unused]] PyObject *self, PyObject *args)
+_aleff_snapshot_frames(_ALEFF_UNUSED PyObject *self, PyObject *args)
 {
     int depth = -1;
     if (!PyArg_ParseTuple(args, "|i", &depth)) {
@@ -783,7 +786,7 @@ PyDoc_STRVAR(restore_continuation_doc,
 "This function should be called inside a greenlet.\n");
 
 static PyObject *
-_aleff_restore_continuation([[maybe_unused]] PyObject *self, PyObject *args)
+_aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
 {
     FrameSnapshotObject *snapshot;
     PyObject *value;
@@ -886,7 +889,7 @@ PyDoc_STRVAR(snapshot_from_frame_doc,
 "  depth: Maximum number of frames to capture. -1 for all.\n");
 
 static PyObject *
-_aleff_snapshot_from_frame([[maybe_unused]] PyObject *self, PyObject *args)
+_aleff_snapshot_from_frame(_ALEFF_UNUSED PyObject *self, PyObject *args)
 {
     PyFrameObject *start_frame;
     int depth = -1;
@@ -971,7 +974,7 @@ PyDoc_STRVAR(snapshot_num_frames_doc,
 "Return the number of frames in a FrameSnapshot.\n");
 
 static PyObject *
-_aleff_snapshot_num_frames([[maybe_unused]] PyObject *self, PyObject *arg)
+_aleff_snapshot_num_frames(_ALEFF_UNUSED PyObject *self, PyObject *arg)
 {
     if (!Py_IS_TYPE(arg, &FrameSnapshotType)) {
         PyErr_SetString(PyExc_TypeError, "expected a FrameSnapshot");
@@ -988,7 +991,7 @@ PyDoc_STRVAR(debug_frame_stacktop_doc,
 "Return the stacktop value of the internal frame (for debugging).\n");
 
 static PyObject *
-_aleff_debug_frame_stacktop([[maybe_unused]] PyObject *self, PyObject *arg)
+_aleff_debug_frame_stacktop(_ALEFF_UNUSED PyObject *self, PyObject *arg)
 {
     if (!PyFrame_Check(arg)) {
         PyErr_SetString(PyExc_TypeError, "expected a frame object");
@@ -1032,8 +1035,13 @@ PyInit__aleff(void)
 #ifdef _WIN32
     {
         char dllname[32];
+#ifdef Py_GIL_DISABLED
+        snprintf(dllname, sizeof(dllname), "python%d%dt.dll",
+                 PY_MAJOR_VERSION, PY_MINOR_VERSION);
+#else
         snprintf(dllname, sizeof(dllname), "python%d%d.dll",
                  PY_MAJOR_VERSION, PY_MINOR_VERSION);
+#endif
         HMODULE hmod = GetModuleHandleA(dllname);
         if (hmod) {
             _evalframe = (evalframe_fn_t)(void *)GetProcAddress(

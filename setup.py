@@ -17,7 +17,7 @@ class BuildExt(build_ext):
     def build_extensions(self):
         if self.compiler.compiler_type == "msvc":
             for ext in self.extensions:
-                ext.extra_compile_args = ["/std:clatest"]
+                ext.extra_compile_args = ["/std:c17"]
         else:
             for ext in self.extensions:
                 ext.extra_compile_args = ["-std=c2x"]

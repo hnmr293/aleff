@@ -14,7 +14,7 @@ echo "===== Python $ver ====="
 case "$(uname -s)" in
     MINGW*|MSYS*)
         # Windows: use setuptools (MSVC) via build_ext --inplace
-        uv run --python "$ver" python setup.py build_ext --inplace
+        uv run --python "$ver" --with setuptools python setup.py build_ext --inplace
         ;;
     *)
         PYTHON="uv run --python $ver python" make debug
@@ -38,12 +38,12 @@ for f in examples/demo_*.py; do
         skipped=$((skipped + 1))
         continue
     fi
-    actual=$(uv run --quiet --python "$ver" python "$f" 2>&1)
-    if diff -u "$expected" <(echo "$actual") > /dev/null 2>&1; then
+    actual=$(PYTHONIOENCODING=utf-8 uv run --quiet --python "$ver" python "$f" 2>&1 | tr -d '\r')
+    if diff -u --strip-trailing-cr "$expected" <(echo "$actual") > /dev/null 2>&1; then
         success=$((success + 1))
     else
         echo "  FAIL $name"
-        diff -u "$expected" <(echo "$actual") || true
+        diff -u --strip-trailing-cr "$expected" <(echo "$actual") || true
         fail=1
     fi
 done
