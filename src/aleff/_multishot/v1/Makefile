@@ -5,6 +5,11 @@ CC ?= cc
 CFLAGS ?= -std=c2x -Wall -Wextra -Wpedantic -O2 -fPIC
 DEBUG_CFLAGS = -std=c2x -Wall -Wextra -Wpedantic -O0 -g3 -fPIC
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  LDFLAGS += -undefined dynamic_lookup
+endif
+
 TARGET = _aleff$(EXT_SUFFIX)
 SRC = _aleff.c
 
@@ -13,10 +18,10 @@ SRC = _aleff.c
 build: $(TARGET)
 
 debug: $(SRC)
-	$(CC) $(DEBUG_CFLAGS) -shared -I$(INCLUDE) -o $(TARGET) $<
+	$(CC) $(DEBUG_CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $(TARGET) $<
 
 $(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -shared -I$(INCLUDE) -o $@ $<
+	$(CC) $(CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $@ $<
 
 clean:
 	rm -f _aleff*.so

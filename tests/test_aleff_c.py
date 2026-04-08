@@ -199,6 +199,12 @@ class TestRestoreContinuationErrors:
         """HAS_RESTORE indicates _PyEval_EvalFrameDefault availability."""
         assert isinstance(HAS_RESTORE, int)
 
+    def test_has_restore_is_true(self):
+        """_PyEval_EvalFrameDefault must be found on all supported platforms."""
+        assert HAS_RESTORE == 1, (
+            "_PyEval_EvalFrameDefault was not found; restore_continuation will not work on this platform"
+        )
+
 
 # ---------------------------------------------------------------------------
 # restore_continuation: greenlet integration

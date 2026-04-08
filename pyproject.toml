@@ -1,6 +1,6 @@
 [project]
 name = "aleff"
-version = "0.1.0"
+version = "0.2.0"
 description = "Algebraic effects for Python — deep and shallow, stateful, composable, multi-shot handlers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -27,11 +27,19 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
     "Typing :: Typed",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "greenlet>=3.3.2",
+    # greenlet 3.4.0 does not provide cp314t wheels for Windows.
+    # Pin <3.4.0 on Windows + Python 3.14+ until greenlet ships those wheels.
+    "greenlet>=3.3.2,<3.4.0; sys_platform == 'win32' and python_version >= '3.14'",
+    "greenlet>=3.3.2; sys_platform != 'win32' or python_version < '3.14'",
 ]
 
 [project.urls]
@@ -41,7 +49,7 @@ Issues = "https://github.com/hnmr293/aleff/issues"
 
 [dependency-groups]
 dev = [
-    "gdb-mcp",
+    "gdb-mcp; sys_platform != 'win32'",
     "pyright>=1.1.408",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
@@ -58,6 +66,23 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 120
+
+[tool.cibuildwheel]
+build = ["cp312-*", "cp313-*", "cp314-*"]
+skip = ["*-manylinux_i686", "*-musllinux_*", "*-win32", "cp313t-*"]
+enable = ["cpython-freethreading"]
+build-frontend = "build[uv]"
+test-command = "pytest {project}/tests -q"
+test-requires = ["pytest", "pytest-asyncio", "greenlet>=3.3.2"]
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
 
 [tool.uv.sources]
 gdb-mcp = { git = "https://github.com/hnmr293/gdb-mcp" }

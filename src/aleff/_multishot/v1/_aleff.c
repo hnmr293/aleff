@@ -17,10 +17,23 @@
 #include <Python.h>
 #include <frameobject.h>
 #include <stddef.h>
-#include <dlfcn.h>
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#else
+#  include <dlfcn.h>
+#endif
 
 #if PY_VERSION_HEX < 0x030c0000
 #error "_aleff requires Python 3.12 or later"
+#endif
+
+/* MSVC /std:c17 does not support C23 [[maybe_unused]] or nullptr. */
+#if defined(_MSC_VER) && !defined(__cplusplus)
+#  define nullptr NULL
+#  define _ALEFF_UNUSED
+#else
+#  define _ALEFF_UNUSED [[maybe_unused]]
 #endif
 
 /* Opcode metadata: we need a deopt table to map specialized opcodes
@@ -354,7 +367,7 @@ FrameSnapshot_dealloc(FrameSnapshotObject *self)
 }
 
 static PyObject *
-FrameSnapshot_class_getitem([[maybe_unused]] PyObject *cls, [[maybe_unused]] PyObject *args)
+FrameSnapshot_class_getitem(_ALEFF_UNUSED PyObject *cls, _ALEFF_UNUSED PyObject *args)
 {
     /* FrameSnapshot[R, V] */
     Py_INCREF(cls);
@@ -740,7 +753,7 @@ PyDoc_STRVAR(snapshot_frames_doc,
 "  depth: Maximum number of frames to capture. -1 for all frames.\n");
 
 static PyObject *
-_aleff_snapshot_frames([[maybe_unused]] PyObject *self, PyObject *args)
+_aleff_snapshot_frames(_ALEFF_UNUSED PyObject *self, PyObject *args)
 {
     int depth = -1;
     if (!PyArg_ParseTuple(args, "|i", &depth)) {
@@ -773,7 +786,7 @@ PyDoc_STRVAR(restore_continuation_doc,
 "This function should be called inside a greenlet.\n");
 
 static PyObject *
-_aleff_restore_continuation([[maybe_unused]] PyObject *self, PyObject *args)
+_aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
 {
     FrameSnapshotObject *snapshot;
     PyObject *value;
@@ -876,7 +889,7 @@ PyDoc_STRVAR(snapshot_from_frame_doc,
 "  depth: Maximum number of frames to capture. -1 for all.\n");
 
 static PyObject *
-_aleff_snapshot_from_frame([[maybe_unused]] PyObject *self, PyObject *args)
+_aleff_snapshot_from_frame(_ALEFF_UNUSED PyObject *self, PyObject *args)
 {
     PyFrameObject *start_frame;
     int depth = -1;
@@ -961,7 +974,7 @@ PyDoc_STRVAR(snapshot_num_frames_doc,
 "Return the number of frames in a FrameSnapshot.\n");
 
 static PyObject *
-_aleff_snapshot_num_frames([[maybe_unused]] PyObject *self, PyObject *arg)
+_aleff_snapshot_num_frames(_ALEFF_UNUSED PyObject *self, PyObject *arg)
 {
     if (!Py_IS_TYPE(arg, &FrameSnapshotType)) {
         PyErr_SetString(PyExc_TypeError, "expected a FrameSnapshot");
@@ -978,7 +991,7 @@ PyDoc_STRVAR(debug_frame_stacktop_doc,
 "Return the stacktop value of the internal frame (for debugging).\n");
 
 static PyObject *
-_aleff_debug_frame_stacktop([[maybe_unused]] PyObject *self, PyObject *arg)
+_aleff_debug_frame_stacktop(_ALEFF_UNUSED PyObject *self, PyObject *arg)
 {
     if (!PyFrame_Check(arg)) {
         PyErr_SetString(PyExc_TypeError, "expected a frame object");
@@ -1017,14 +1030,32 @@ PyInit__aleff(void)
 {
     _aleff_init_opcode_deopt();
 
-    /* Look up _PyEval_EvalFrameDefault via dlsym.
-     * POSIX guarantees dlsym returns a valid function pointer via void*,
+    /* Look up _PyEval_EvalFrameDefault.
+     * Not fatal if not found — restore_continuation will raise at call time. */
+#ifdef _WIN32
+    {
+        char dllname[32];
+#ifdef Py_GIL_DISABLED
+        snprintf(dllname, sizeof(dllname), "python%d%dt.dll",
+                 PY_MAJOR_VERSION, PY_MINOR_VERSION);
+#else
+        snprintf(dllname, sizeof(dllname), "python%d%d.dll",
+                 PY_MAJOR_VERSION, PY_MINOR_VERSION);
+#endif
+        HMODULE hmod = GetModuleHandleA(dllname);
+        if (hmod) {
+            _evalframe = (evalframe_fn_t)(void *)GetProcAddress(
+                hmod, "_PyEval_EvalFrameDefault");
+        }
+    }
+#else
+    /* POSIX guarantees dlsym returns a valid function pointer via void*,
      * but ISO C forbids the cast. Suppress the warning here. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wpedantic"
     _evalframe = (evalframe_fn_t)dlsym(RTLD_DEFAULT, "_PyEval_EvalFrameDefault");
-#pragma GCC diagnostic pop
-    /* Not fatal if not found — restore_continuation will raise at call time */
+#  pragma GCC diagnostic pop
+#endif
 
     if (PyType_Ready(&FrameSnapshotType) < 0)
         return nullptr;
