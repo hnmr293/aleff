@@ -326,8 +326,14 @@ class TestWindRangeMultiShot:
         result = h(run)
         # range(0,6,2) = [0,2,4], 3 iterations, 2^3 = 8 leaves
         assert result == [
-            (0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1),
-            (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1),
+            (0, 0, 0),
+            (0, 0, 1),
+            (0, 1, 0),
+            (0, 1, 1),
+            (1, 0, 0),
+            (1, 0, 1),
+            (1, 1, 0),
+            (1, 1, 1),
         ]
 
     def test_loop_index_available(self):

@@ -293,28 +293,28 @@ class wind_range(WindBase["wind_range", int]):
     @property
     def start(self) -> int:
         return self._start
-    
+
     @property
     def stop(self) -> int:
         return self._stop
-    
+
     @property
     def step(self) -> int:
         return self._step
-    
+
     @overload
     def __init__(self, stop: int, /) -> None: ...
-    
+
     @overload
     def __init__(self, start: int, stop: int, step: int = 1, /) -> None: ...
-    
+
     def __init__(self, start: int, stop: int | None = None, step: int = 1) -> None:
         if stop is None:
             # wind_range(stop) form: start=0, stop=start
             start, stop = 0, start
         if step == 0:
             raise ValueError("step must not be zero")
-        
+
         self._start = start
         self._stop = stop
         self._step = step
