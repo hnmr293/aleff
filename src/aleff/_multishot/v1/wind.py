@@ -3,51 +3,56 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 import inspect
 from contextvars import ContextVar
-from typing import Any, Callable, cast, overload, TypeGuard
+from typing import Any, Callable, cast, Literal, overload, TypeGuard
 from types import TracebackType
 import greenlet as gl
-from .intf import Ref
+from .intf import Ref, Wind
 
 
 @overload
-def wind[T](
-    before: Callable[[], AbstractContextManager[T]],
+def wind[T, B: bool | None](
+    before: Callable[[], AbstractContextManager[T, B]],
     after: Callable[..., Any] | None = None,
     *,
-    auto_exit: bool = True,
-) -> "WindBase[Ref[T], None]": ...
+    auto_exit: Literal[True] = True,
+) -> Wind[T, B]: ...
+
+
+@overload
+def wind[T, B: bool | None](
+    before: Callable[[], AbstractContextManager[T, B]],
+    after: Callable[..., Any] | None = None,
+    *,
+    auto_exit: Literal[False],
+) -> Wind[T, Literal[False]]: ...
 
 
 @overload
 def wind[T](
     before: Callable[[], T],
     after: Callable[..., Any] | None = None,
-    *,
-    auto_exit: bool = True,
-) -> "WindBase[Ref[T], None]": ...
+) -> Wind[T, Literal[False]]: ...
 
 
 @overload
 def wind(
     before: None = None,
     after: Callable[..., Any] | None = None,
-    *,
-    auto_exit: bool = True,
-) -> "WindBase[Ref[None], None]": ...
+) -> Wind[None, Literal[False]]: ...
 
 
-def wind[T](
-    before: Callable[[], AbstractContextManager[T]] | Callable[[], T] | None = None,
+def wind[T, B: bool | None](  # pyright: ignore[reportInconsistentOverload]
+    before: Callable[[], AbstractContextManager[T, B]] | Callable[[], T] | None = None,
     after: Callable[..., Any] | None = None,
     *,
     auto_exit: bool = True,
-) -> "WindBase[Ref[T], None]":
+) -> Wind[T, B]:
     if before is None:
         # T is None
         before = cast(Callable[[], T], lambda: None)
     if after is None:
         after = lambda: None
-    return _Wind[T](before, after, auto_exit=auto_exit)
+    return _Wind[T](before, after, auto_exit=auto_exit)  # pyright: ignore[reportReturnType]
 
 
 def wind_range(stop: int) -> "_WindRange":
@@ -102,11 +107,11 @@ class WindBase[T, S](ABC):
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: Any,
+        exc_value: BaseException | None,
+        traceback: Any,
     ) -> bool:
         _pop_wind_entry()
-        return self._wind_exit(exc_type, exc_val, exc_tb)
+        return self._wind_exit(exc_type, exc_value, traceback)
 
     @abstractmethod
     def _wind_enter(self) -> T: ...

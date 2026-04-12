@@ -1,4 +1,5 @@
 from typing import Any, Callable, Concatenate, Coroutine, Protocol, runtime_checkable
+from types import TracebackType
 
 
 ##
@@ -151,6 +152,20 @@ class Ref[T](Protocol):
     """
 
     def unwrap(self) -> T: ...
+
+
+@runtime_checkable
+class Wind[T, B: bool | None](Protocol):
+    """Protocol for the ``wind`` context manager."""
+
+    def __enter__(self) -> Ref[T]: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> B: ...
 
 
 class EffectNotHandledError[**P, R](RuntimeError):

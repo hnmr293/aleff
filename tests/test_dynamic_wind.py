@@ -304,7 +304,6 @@ class TestWindOneShotEffect:
         def run() -> int:
             with wind(lambda: log.append("before"), lambda: log.append("after")):
                 return get_val() * 2
-            assert False, "unreachable"
 
         result = h(run)
         assert result == 20
@@ -329,7 +328,6 @@ class TestWindOneShotEffect:
                 a = read()
                 b = read()
                 return a + b
-            assert False, "unreachable"
 
         result = h(run)
         assert result == 3  # 1 + 2
@@ -350,7 +348,6 @@ class TestWindOneShotEffect:
             v = get_val()
             with wind(lambda: log.append("before"), lambda: log.append("after")):
                 return v * 10
-            assert False, "unreachable"
 
         result = h(run)
         assert result == 50
@@ -371,7 +368,6 @@ class TestWindOneShotEffect:
             with wind(lambda: log.append("outer-before"), lambda: log.append("outer-after")):
                 with wind(lambda: log.append("inner-before"), lambda: log.append("inner-after")):
                     return get_val()
-            assert False, "unreachable"
 
         result = h(run)
         assert result == 7
@@ -403,7 +399,6 @@ class TestWindMultiShot:
         def run() -> list[int]:
             with wind(lambda: log.append("before"), lambda: log.append("after")):
                 return [choose() * 10]
-            assert False, "unreachable"
 
         result = h(run)
         assert result == [10, 20]
@@ -423,7 +418,6 @@ class TestWindMultiShot:
         def run() -> list[int]:
             with wind(lambda: log.append("before"), lambda: log.append("after")):
                 return [choose()]
-            assert False, "unreachable"
 
         result = h(run)
         assert result == [1, 2, 3]
@@ -444,7 +438,6 @@ class TestWindMultiShot:
             with wind(lambda: log.append("outer-before"), lambda: log.append("outer-after")):
                 with wind(lambda: log.append("inner-before"), lambda: log.append("inner-after")):
                     return [choose()]
-            assert False, "unreachable"
 
         result = h(run)
         assert result == [1, 2]
@@ -476,7 +469,6 @@ class TestWindMultiShot:
             v = choose()
             with wind(lambda: log.append("before"), lambda: log.append("after")):
                 return [v * 10]
-            assert False, "unreachable"
 
         result = h(run)
         assert result == [10, 20]
@@ -498,7 +490,6 @@ class TestWindMultiShot:
                 v = choose()
                 log.append(f"body-{v}")
                 return [v]
-            assert False, "unreachable"
 
         result = h(run)
         assert result == [10, 20]
@@ -531,7 +522,6 @@ class TestWindMultiShot:
             with wind(before) as ref:
                 choose()
                 return [ref.unwrap()]
-            assert False, "unreachable"
 
         result = h(run)
         # Shot 1 (one-shot): before() returns 1, ref.unwrap() == 1, result [1]
@@ -560,7 +550,6 @@ class TestWindAbort:
         def run() -> int:
             with wind(lambda: log.append("before"), lambda: log.append("after")):
                 return e()
-            assert False, "unreachable"
 
         result = h(run, check=False)
         assert result == -1
@@ -581,7 +570,6 @@ class TestWindAbort:
             with wind(lambda: log.append("outer-before"), lambda: log.append("outer-after")):
                 with wind(lambda: log.append("inner-before"), lambda: log.append("inner-after")):
                     return e()
-            assert False, "unreachable"
 
         result = h(run, check=False)
         assert result == -1
@@ -619,12 +607,10 @@ class TestWindCrossExtent:
         def caller() -> list[int]:
             with wind(lambda: log.append("inner-before"), lambda: log.append("inner-after")):
                 return [choose()]
-            assert False, "unreachable"
 
         def run() -> list[int]:
             with wind(lambda: log.append("outer-before"), lambda: log.append("outer-after")):
                 return h(caller)
-            assert False, "unreachable"
 
         result = run()
         assert result == [1, 2]
@@ -668,7 +654,6 @@ class TestWindMultiShotException:
                 if v == 1:
                     raise ValueError("bad")
                 return v * 10
-            assert False, "unreachable"
 
         result = h(run)
         assert result == -1 + 20
@@ -750,7 +735,6 @@ class TestWindStackCleanup:
         def run() -> int:
             with wind(lambda: None, lambda: None):
                 return get_val()
-            assert False, "unreachable"
 
         h(run)
         assert _get_wind_stack() == []
@@ -767,7 +751,6 @@ class TestWindStackCleanup:
         def run() -> int:
             with wind(lambda: None, lambda: None):
                 return e()
-            assert False, "unreachable"
 
         h(run, check=False)
         assert _get_wind_stack() == []
@@ -784,7 +767,6 @@ class TestWindStackCleanup:
         def run() -> list[int]:
             with wind(lambda: None, lambda: None):
                 return [choose()]
-            assert False, "unreachable"
 
         h(run)
         assert _get_wind_stack() == []
@@ -808,7 +790,6 @@ class TestWindStackCleanup:
                 if v == 1:
                     raise ValueError("bad")
                 return v
-            assert False, "unreachable"
 
         h(run)
         assert _get_wind_stack() == []
@@ -831,7 +812,6 @@ class TestWindHandlerInteraction:
         def _handle(k: Resume[int, int]) -> int:
             with wind(lambda: log.append("handler-before"), lambda: log.append("handler-after")):
                 return k(42)
-            assert False, "unreachable"
 
         def run():
             return e()
@@ -852,12 +832,10 @@ class TestWindHandlerInteraction:
         def _handle(k: Resume[int, int]) -> int:
             with wind(lambda: log.append("handler-before"), lambda: log.append("handler-after")):
                 return k(10)
-            assert False, "unreachable"
 
         def run() -> int:
             with wind(lambda: log.append("caller-before"), lambda: log.append("caller-after")):
                 return e() * 2
-            assert False, "unreachable"
 
         result = h(run)
         assert result == 20
@@ -884,7 +862,6 @@ class TestWindHandlerInteraction:
         def run() -> int:
             with wind(lambda: None, lambda: None):
                 return e()
-            assert False, "unreachable"
 
         h(run)
         # The handler greenlet has no wind entries of its own
@@ -915,7 +892,6 @@ class TestWindHandlerInteraction:
                 with wind(lambda: log.append("wind-2-before"), lambda: log.append("wind-2-after")):
                     b = h_inner(lambda: inner_e())
                     return a + b
-            assert False, "unreachable"
 
         result = h_outer(run)
         assert result == 110
@@ -993,7 +969,6 @@ class TestRefCornerCases:
                 choose()
                 ref_ids.append(id(ref))
                 return [ref.unwrap()]
-            assert False, "unreachable"
 
         h(run)
         # Both shots should see the same Ref object (heap-shared)
