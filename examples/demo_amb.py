@@ -18,7 +18,7 @@ Multi-shot pattern:
 
 from typing import Any, Callable
 
-from aleff import effect, Effect, Handler, Resume, create_handler
+from aleff import effect, Effect, Handler, Resume, create_handler, wind_range
 
 
 # ---------------------------------------------------------------------------
@@ -43,10 +43,9 @@ def run_amb(computation: Callable[[], list[Any]]) -> list[Any]:
     @h.on(amb)
     def _amb(k: Resume[int, list[Any]], values: list[int]) -> list[Any]:
         results: list[Any] = []
-        i = 0
-        while i < len(values):
-            results.extend(k(values[i]))
-            i += 1
+        with wind_range(len(values)) as r:
+            for i in r:
+                results.extend(k(values[i]))
         return results
 
     @h.on(require)
