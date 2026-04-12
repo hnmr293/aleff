@@ -7,8 +7,6 @@ Implement transaction semantics via effect handlers.
 - Abort (no resume) allows the handler to cancel the entire transaction
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 
 from aleff import (

@@ -1,4 +1,5 @@
 from typing import Any, Callable, Concatenate, Coroutine, Protocol, runtime_checkable
+from types import TracebackType
 
 
 ##
@@ -131,6 +132,40 @@ class AsyncHandler[V](Protocol):
     async def __call__(self, caller: Caller[V | Coroutine[Any, Any, V]], *, check: bool = True) -> V:
         """Run *caller* with the registered async effect handlers active."""
         ...
+
+
+@runtime_checkable
+class Ref[T](Protocol):
+    """Indirect reference returned by :class:`wind` context manager.
+
+    ``wind`` wraps the return value of ``before()`` in a ``Ref`` so that
+    multi-shot continuation resumes can update the underlying value.
+    Use :meth:`unwrap` to retrieve the current value::
+
+        with wind(lambda: open("path.txt")) as ref:
+            ref.unwrap().read()
+
+    On multi-shot re-entry, ``before()`` is called again and the same
+    ``Ref`` object is updated with the new return value.  Because the
+    ``Ref`` is a heap object shared across shots, ``unwrap()`` always
+    returns the latest value even after frame restoration.
+    """
+
+    def unwrap(self) -> T: ...
+
+
+@runtime_checkable
+class Wind[T, B: bool | None](Protocol):
+    """Protocol for the ``wind`` context manager."""
+
+    def __enter__(self) -> Ref[T]: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> B: ...
 
 
 class EffectNotHandledError[**P, R](RuntimeError):

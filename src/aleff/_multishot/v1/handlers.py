@@ -18,6 +18,7 @@ from .intf import (
 from .effects import EffectContext, ABORT, EffectAborted
 from .misc import debug, eff_str
 from ._aleff import FrameSnapshot, restore_continuation, snapshot_from_frame
+from .wind import capture_wind_stack, rewind
 
 
 def create_handler(*effects: Effect[..., Any], shallow: bool = False) -> Handler[Any]:
@@ -71,6 +72,7 @@ class _Resume[R, V](Resume[R, V]):
         self._snapshot = snapshot
         self._token = token
         self._handler = handler
+        self._winds = capture_wind_stack(caller_gl)
 
     def __call__(self, value: R) -> V:
         caller_gl = self._caller_gl
@@ -101,8 +103,10 @@ class _Resume[R, V](Resume[R, V]):
         debug("||> @caller (multi-shot)")
 
         ss = self._snapshot
+        winds = self._winds
 
         def _body() -> V:
+            rewind(winds)
             return restore_continuation(ss, value)
 
         new_gl = gl.greenlet(_body)
@@ -126,6 +130,7 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
         self._snapshot = snapshot
         self._token = token
         self._handler = handler
+        self._winds = capture_wind_stack(caller_gl)
 
     async def __call__(self, value: R) -> V:
         caller_gl = self._caller_gl
@@ -148,8 +153,10 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
         debug("||> @caller (multi-shot async)")
 
         ss = self._snapshot
+        winds = self._winds
 
         def _body() -> V:
+            rewind(winds)
             return restore_continuation(ss, value)
 
         new_gl = gl.greenlet(_body)

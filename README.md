@@ -10,6 +10,7 @@ Algebraic effects for Python — deep and shallow, stateful, composable, multi-s
 - **Multi-shot continuations** — `resume` can be called multiple times in a single handler, enabling backtracking search, non-determinism, and other advanced patterns
 - **Sync and async** — both synchronous (`Handler`) and asynchronous (`AsyncHandler`) handlers are supported, with transparent bridging between the two
 - **Effect composition** — handler functions can perform effects themselves, dispatched to enclosing handlers; enables layered architectures and modular effect stacking
+- **Dynamic wind** — `wind` context manager establishes before/after guards that are re-invoked on multi-shot re-entry, with optional auto-management of context managers returned by `before`
 - **Effect annotation** — `@effect(step1, step2)` collects effect sets transitively from decorated functions
 - **Introspection** — `effects(fn)` and `unhandled_effects(fn, h)` for querying and validating effect coverage
 - **Typed** — effect parameters and return types are checked by type checkers (pyright, ty)
@@ -123,6 +124,48 @@ result = h_log(lambda: h_parse(lambda: parse("42") + 1))
 print(result)  # 43
 ```
 
+### Dynamic wind
+
+The `wind` context manager establishes before/after guards around a dynamic extent. When a multi-shot continuation captured inside the `with` block is resumed, the `before` thunk is called again; when it exits, the `after` thunk runs.
+
+```python
+from aleff import effect, Effect, Resume, Handler, create_handler, wind
+
+choose: Effect[[], int] = effect("choose")
+h: Handler[list[int]] = create_handler(choose)
+
+@h.on(choose)
+def _choose(k: Resume[int, list[int]]):
+    return k(1) + k(2)
+
+log: list[str] = []
+
+def run() -> list[int]:
+    with wind(lambda: log.append("before"), lambda: log.append("after")):
+        return [choose() * 10]
+    assert False, "unreachable"
+
+result = h(run)
+print(result)  # [10, 20]
+print(log)     # ['before', 'after', 'before', 'after']
+```
+
+If `before` returns a context manager and `auto_exit=True` (the default), `__enter__` and `__exit__` are called automatically:
+
+```python
+with wind(lambda: open("data.txt")) as ref:
+    ref.unwrap().read()
+# file is closed on exit
+```
+
+`wind_range` is a multi-shot-safe replacement for `range()` in `for` loops. Python's `range()` iterator is shared across shots and exhausted after the first; `wind_range` saves and restores the iterator position automatically:
+
+```python
+with wind_range(n) as r:
+    for i in r:
+        v = choose()  # multi-shot safe
+```
+
 ## How it works
 
 Effects are declared as typed values and invoked like regular function calls. A `Handler` intercepts these calls via greenlet-based context switching:
@@ -178,6 +221,9 @@ See [`examples/`](examples/) for demonstrations:
 | `AsyncHandler[V]` | Async handler protocol |
 | `Resume[R, V]` | Sync continuation (`k(value) -> V`) |
 | `ResumeAsync[R, V]` | Async continuation (`await k(value) -> V`) |
+| `wind(before, after, *, auto_exit=True)` | Dynamic wind context manager |
+| `wind_range(stop)` / `wind_range(start, stop, step)` | Multi-shot-safe `range()` for `for` loops |
+| `Ref[T]` | Reference wrapper returned by `wind`; call `unwrap()` to get the value |
 
 ## Development
 

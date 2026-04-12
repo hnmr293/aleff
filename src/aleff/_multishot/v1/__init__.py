@@ -13,6 +13,7 @@ from .intf import (
     ResumeAsync,
     Handler,
     AsyncHandler,
+    Ref,
 )
 
 from .effects import (
@@ -31,6 +32,12 @@ from .utils import (
 
 from .misc import loglevel
 
+from .wind import (
+    WindBase,
+    wind,
+    wind_range,
+)
+
 __all__ = [
     "Effect",
     "EffectNotHandledError",
@@ -44,4 +51,8 @@ __all__ = [
     "effects",
     "unhandled_effects",
     "loglevel",
+    "WindBase",
+    "wind",
+    "wind_range",
+    "Ref",
 ]

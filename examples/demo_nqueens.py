@@ -12,7 +12,7 @@ Multi-shot pattern:
   independent local state.
 """
 
-from aleff import effect, Effect, Handler, Resume, create_handler
+from aleff import effect, Effect, Handler, Resume, create_handler, wind_range
 
 
 # ---------------------------------------------------------------------------
@@ -41,20 +41,19 @@ def solve(n: int) -> list[list[int]]:
     Returns a list of solutions.  Each solution is a list of column indices,
     one per row (e.g. [1, 3, 0, 2] means row0->col1, row1->col3, ...).
 
-    Uses a while loop instead of ``for row in range(n)`` because the
-    range iterator is a mutable object shared across multi-shot
-    continuations (Scheme semantics).  An int counter is immutable and
-    independent per shot.
+    Uses ``wind_range`` instead of ``range()`` because the range iterator
+    is a mutable object shared across multi-shot continuations.
+    ``wind_range`` saves and restores the iterator position via the wind
+    snapshot/restore mechanism.
     """
     queens: tuple[int, ...] = ()
-    row = 0
 
-    while row < n:
-        col = choose_col(n)
-        if not is_safe(queens, row, col):
-            return []  # dead end -- prune this branch
-        queens = (*queens, col)
-        row += 1
+    with wind_range(n) as rows:
+        for row in rows:
+            col = choose_col(n)
+            if not is_safe(queens, row, col):
+                return []  # dead end -- prune this branch
+            queens = (*queens, col)
 
     return [list(queens)]
 

@@ -15,7 +15,7 @@ Multi-shot pattern:
 
 from typing import Callable
 
-from aleff import effect, Effect, Handler, Resume, create_handler
+from aleff import effect, Effect, Handler, Resume, create_handler, wind_range
 
 
 # ---------------------------------------------------------------------------
@@ -72,11 +72,10 @@ def two_coins() -> Dist:
 def three_coins_at_least_two() -> Dist:
     """Probability of getting at least 2 heads in 3 fair flips."""
     count = 0
-    i = 0
-    while i < 3:
-        if flip(0.5):
-            count += 1
-        i += 1
+    with wind_range(3) as r:
+        for _ in r:
+            if flip(0.5):
+                count += 1
     return {"yes": 1.0} if count >= 2 else {"no": 1.0}
 
 

@@ -10,8 +10,6 @@ primitive operations via effects. If the handler passes floats, it's normal
 evaluation. If it passes Dual numbers, derivatives propagate automatically.
 """
 
-from __future__ import annotations
-
 import math
 from dataclasses import dataclass
 from typing import Any, Callable
