@@ -78,7 +78,7 @@ class EffectEntry:
         return {"effect": self.effect_name, "args": list(self.args), "result": self.result}
 
     @staticmethod
-    def from_dict(d: dict[str, Any]) -> EffectEntry:
+    def from_dict(d: dict[str, Any]) -> "EffectEntry":
         return EffectEntry(effect_name=d["effect"], args=tuple(d["args"]), result=d["result"])
 
 
@@ -107,7 +107,7 @@ class EffectLog:
         return json.dumps([e.to_dict() for e in self._entries], indent=2)
 
     @staticmethod
-    def from_json(s: str) -> EffectLog:
+    def from_json(s: str) -> "EffectLog":
         log = EffectLog()
         for d in json.loads(s):
             entry = EffectEntry.from_dict(d)
