@@ -133,6 +133,26 @@ class AsyncHandler[V](Protocol):
         ...
 
 
+@runtime_checkable
+class Ref[T](Protocol):
+    """Indirect reference returned by :class:`wind` context manager.
+
+    ``wind`` wraps the return value of ``before()`` in a ``Ref`` so that
+    multi-shot continuation resumes can update the underlying value.
+    Use :meth:`unwrap` to retrieve the current value::
+
+        with wind(lambda: open("path.txt")) as ref:
+            ref.unwrap().read()
+
+    On multi-shot re-entry, ``before()`` is called again and the same
+    ``Ref`` object is updated with the new return value.  Because the
+    ``Ref`` is a heap object shared across shots, ``unwrap()`` always
+    returns the latest value even after frame restoration.
+    """
+
+    def unwrap(self) -> T: ...
+
+
 class EffectNotHandledError[**P, R](RuntimeError):
     """Raised when an effect is invoked but no handler is active for it."""
 
