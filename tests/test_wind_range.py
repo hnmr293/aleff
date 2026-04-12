@@ -70,6 +70,82 @@ class TestWindRangeBasic:
                 total += i
         assert total == sum(range(10))
 
+    # -- start, stop, step interface --
+
+    def test_start_stop(self):
+        """wind_range(start, stop) produces values from start to stop-1."""
+        result: list[int] = []
+        with wind_range(2, 6) as r:
+            for i in r:
+                result.append(i)
+        assert result == list(range(2, 6))
+
+    def test_start_stop_step(self):
+        """wind_range(start, stop, step) produces values with stride."""
+        result: list[int] = []
+        with wind_range(1, 10, 3) as r:
+            for i in r:
+                result.append(i)
+        assert result == list(range(1, 10, 3))
+
+    def test_negative_step(self):
+        """wind_range with negative step counts downward."""
+        result: list[int] = []
+        with wind_range(10, 0, -2) as r:
+            for i in r:
+                result.append(i)
+        assert result == list(range(10, 0, -2))
+
+    def test_step_positive_empty(self):
+        """wind_range(5, 2) with positive step produces no values."""
+        result: list[int] = []
+        with wind_range(5, 2) as r:
+            for i in r:
+                result.append(i)
+        assert result == []
+
+    def test_step_negative_empty(self):
+        """wind_range(2, 5, -1) produces no values."""
+        result: list[int] = []
+        with wind_range(2, 5, -1) as r:
+            for i in r:
+                result.append(i)
+        assert result == []
+
+    def test_step_zero_raises(self):
+        """wind_range with step=0 raises ValueError like range()."""
+        with pytest.raises(ValueError):
+            wind_range(0, 10, 0)
+
+    def test_single_arg_matches_range(self):
+        """wind_range(n) matches range(n) for various n."""
+        for n in [0, 1, 5, 10]:
+            result: list[int] = []
+            with wind_range(n) as r:
+                for i in r:
+                    result.append(i)
+            assert result == list(range(n))
+
+    def test_two_arg_matches_range(self):
+        """wind_range(a, b) matches range(a, b) for various a, b."""
+        cases = [(0, 5), (3, 3), (5, 2), (-3, 3), (0, 0)]
+        for a, b in cases:
+            result: list[int] = []
+            with wind_range(a, b) as r:
+                for i in r:
+                    result.append(i)
+            assert result == list(range(a, b)), f"wind_range({a}, {b})"
+
+    def test_three_arg_matches_range(self):
+        """wind_range(a, b, c) matches range(a, b, c) for various a, b, c."""
+        cases = [(0, 10, 2), (10, 0, -1), (0, 10, 3), (-5, 5, 2), (5, -5, -3)]
+        for a, b, c in cases:
+            result: list[int] = []
+            with wind_range(a, b, c) as r:
+                for i in r:
+                    result.append(i)
+            assert result == list(range(a, b, c)), f"wind_range({a}, {b}, {c})"
+
 
 # ---------------------------------------------------------------------------
 # Multi-shot
@@ -203,6 +279,55 @@ class TestWindRangeMultiShot:
             (2, 0),
             (2, 1),
             (2, 2),
+        ]
+
+    def test_start_stop_multishot(self):
+        """Multi-shot with wind_range(start, stop) restores position correctly."""
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[int]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[int]]):
+            return k(100) + k(200)
+
+        def run() -> list[int]:
+            total = 0
+            with wind_range(5, 8) as r:
+                for i in r:
+                    if i == 6:
+                        total += choose()
+                    else:
+                        total += i
+            return [total]
+
+        result = h(run)
+        # range(5,8) = [5,6,7]. choose at i=6, total=5 at that point.
+        # Shot 1: 5 + 100 + 7 = 112
+        # Shot 2: 5 + 200 + 7 = 212
+        assert result == [112, 212]
+
+    def test_step_multishot(self):
+        """Multi-shot with wind_range(start, stop, step) restores correctly."""
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[tuple[int, ...]]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[tuple[int, ...]]]):
+            return k(0) + k(1)
+
+        def run() -> list[tuple[int, ...]]:
+            choices: tuple[int, ...] = ()
+            with wind_range(0, 6, 2) as r:
+                for _ in r:
+                    v = choose()
+                    choices = choices + (v,)
+            return [choices]
+
+        result = h(run)
+        # range(0,6,2) = [0,2,4], 3 iterations, 2^3 = 8 leaves
+        assert result == [
+            (0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1),
+            (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1),
         ]
 
     def test_loop_index_available(self):

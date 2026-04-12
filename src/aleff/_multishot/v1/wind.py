@@ -55,10 +55,6 @@ def wind[T, B: bool | None](  # pyright: ignore[reportInconsistentOverload]
     return _Wind[T](before, after, auto_exit=auto_exit)  # pyright: ignore[reportReturnType]
 
 
-def wind_range(stop: int) -> "_WindRange":
-    return _WindRange(stop)
-
-
 class _Ref[T](Ref[T]):
     __slots__ = ("value",)
 
@@ -280,7 +276,7 @@ class _Wind[T](WindBase[Ref[T], None]):
         return self._ref
 
 
-class _WindRange(WindBase["_WindRange", int]):
+class wind_range(WindBase["wind_range", int]):
     """Context manager providing multi-shot-safe range iteration.
 
     Usage::
@@ -294,11 +290,37 @@ class _WindRange(WindBase["_WindRange", int]):
     from the correct position.
     """
 
-    def __init__(self, stop: int) -> None:
+    @property
+    def start(self) -> int:
+        return self._start
+    
+    @property
+    def stop(self) -> int:
+        return self._stop
+    
+    @property
+    def step(self) -> int:
+        return self._step
+    
+    @overload
+    def __init__(self, stop: int, /) -> None: ...
+    
+    @overload
+    def __init__(self, start: int, stop: int, step: int = 1, /) -> None: ...
+    
+    def __init__(self, start: int, stop: int | None = None, step: int = 1) -> None:
+        if stop is None:
+            # wind_range(stop) form: start=0, stop=start
+            start, stop = 0, start
+        if step == 0:
+            raise ValueError("step must not be zero")
+        
+        self._start = start
         self._stop = stop
-        self._pos = 0
+        self._step = step
+        self._pos = start
 
-    def _wind_enter(self) -> "_WindRange":
+    def _wind_enter(self) -> "wind_range":
         return self
 
     def _wind_snapshot(self) -> int:
@@ -307,14 +329,16 @@ class _WindRange(WindBase["_WindRange", int]):
     def _wind_restore(self, state: int) -> None:
         self._pos = state
 
-    def __iter__(self) -> "_WindRange":
+    def __iter__(self) -> "wind_range":
         return self
 
     def __next__(self) -> int:
-        if self._pos >= self._stop:
+        sign = 1 if self._step > 0 else -1
+        ended = sign * self._pos >= sign * self._stop
+        if ended:
             raise StopIteration
         val = self._pos
-        self._pos += 1
+        self._pos += self._step
         return val
 
 
