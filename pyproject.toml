@@ -68,7 +68,7 @@ where = ["src"]
 line-length = 120
 
 [tool.cibuildwheel]
-build = ["cp312-*", "cp313-*", "cp314-*"]
+build = ["cp312-*", "cp313-*", "cp314-*", "cp314t-*"]
 skip = ["*-manylinux_i686", "*-musllinux_*", "*-win32", "cp313t-*"]
 build-frontend = "build[uv]"
 test-command = "pytest {project}/tests -q"
