@@ -33,7 +33,9 @@ from .utils import (
 from .misc import loglevel
 
 from .wind import (
+    WindBase,
     wind,
+    wind_range,
 )
 
 __all__ = [
@@ -49,6 +51,8 @@ __all__ = [
     "effects",
     "unhandled_effects",
     "loglevel",
+    "WindBase",
     "wind",
+    "wind_range",
     "Ref",
 ]

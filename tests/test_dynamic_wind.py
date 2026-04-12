@@ -198,9 +198,9 @@ class TestWindAutoExit:
 
     def test_after_with_argument_receives_before_result(self):
         """after(value) receives before()'s return value when it accepts an argument."""
-        received: list[object] = []
+        received: list[int] = []
 
-        def after_fn(v: object) -> None:
+        def after_fn(v: int) -> None:
             received.append(v)
 
         with wind(lambda: 42, after_fn):
