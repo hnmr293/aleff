@@ -13,6 +13,7 @@
         "src/aleff/_oneshot/v6",
         "src/aleff/_oneshot/v7",
         "src/aleff/_oneshot/v8",
-        "debug_*.py"
+        "debug_*.py",
+        "docs/"
     ]
 }

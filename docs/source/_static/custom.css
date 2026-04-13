@@ -1,0 +1,62 @@
+/* Ensure all signatures use monospace font, smaller size */
+.rst-content dl dt.sig {
+    font-family: 'Consolas', 'Menlo', 'DejaVu Sans Mono', 'Bitstream Vera Sans Mono', monospace;
+    font-size: 0.85em;
+}
+
+/* Add space before return arrow in signatures */
+.sig-return-icon {
+    margin-left: 0.3em;
+}
+
+/* Remove extra vertical margin from wrapped signature parameters */
+dt.sig dl {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+dt.sig dl dd {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.document h2 {
+    font-family: 'Consolas', 'Menlo', 'DejaVu Sans Mono', 'Bitstream Vera Sans Mono', monospace;
+}
+
+/* Dim def/class keywords in section headings */
+.heading-keyword {
+    color: #999;
+    font-weight: normal;
+    font-size: 0.85em;
+}
+
+/* Fix property/method dl elements: block display, consistent spacing */
+/*.rst-content dl.py.property,
+.rst-content dl.py.method {
+    display: block;
+    width: 100%;
+    height: 2em;
+    margin-bottom: 0em !important;
+}*/
+
+.rst-content dl.py.property > dt::before {
+    content: "property";
+    font-style: italic;
+}
+.rst-content dl.py.property > dt > .property > .k,
+.rst-content dl.py.property > dt > .property > .w {
+    display: none !important;
+}
+.rst-content dl.py.property > dt > .property > .p::after {
+    content: " ";
+}
+.rst-content dl.py.method > dt::before {
+    content: "def ";
+    font-style: italic;
+}
+
+/* Bases line: render brackets and commas in monospace to match code elements */
+.rst-content dl dd > p:first-child {
+    font-family: 'Consolas', 'Menlo', 'DejaVu Sans Mono', 'Bitstream Vera Sans Mono', monospace;
+    font-size: 0.85em;
+}
