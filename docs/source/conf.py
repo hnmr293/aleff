@@ -174,10 +174,12 @@ def _caller_to_arrow(s):
             depth = 1
             start = i
             while i < len(s) and depth > 0:
-                if s[i] == "[": depth += 1
-                elif s[i] == "]": depth -= 1
+                if s[i] == "[":
+                    depth += 1
+                elif s[i] == "]":
+                    depth -= 1
                 i += 1
-            inner = s[start:i - 1]
+            inner = s[start : i - 1]
             result.append(f"() \u2192 {_caller_to_arrow(inner)}")
         elif s[i:].startswith("Caller"):
             # Bare Caller without []
@@ -243,6 +245,7 @@ def _rewrite_callable_in_html(app, exception):
             text,
             flags=re.DOTALL,
         )
+
         # Match parameter annotations inside <em class="sig-param">:
         # The <span class="n"> containing Callable/Caller may not be the first
         # child (e.g. *args has <span class="o">*</span> before it).

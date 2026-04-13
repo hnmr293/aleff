@@ -23,7 +23,7 @@ class Effect[**P, R](Protocol):
     ```python
     # effect: () -> str
     read: Effect[[], str] = effect("read")
-    
+
     # effect: str -> int
     write: Effect[[str], int] = effect("write")
 
