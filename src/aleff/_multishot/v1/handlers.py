@@ -18,7 +18,7 @@ from .intf import (
 from .effects import EffectContext, ABORT, EffectAborted
 from .misc import debug, eff_str
 from ._aleff import FrameSnapshot, restore_continuation, snapshot_from_frame
-from .wind import capture_wind_stack, rewind
+from .winds import capture_wind_stack, rewind
 
 
 def create_handler(*effects: Effect[..., Any], shallow: bool = False) -> Handler[Any]:

@@ -195,16 +195,18 @@ class WindBase[T, S](ABC):
 class _Wind[T](WindBase[Ref[T], None]):
     """Context manager that establishes a dynamic-wind guard.
 
-    Usage::
+    Usage:
 
-        with wind(lambda: open("f.txt")) as ref:
-            ref.unwrap().read()
+    ```python
+    with wind(lambda: open("f.txt")) as ref:
+        ref.unwrap().read()
 
-        with wind(lambda: log("before"), lambda: log("after")):
-            ...
+    with wind(lambda: log("before"), lambda: log("after")):
+        ...
 
-        with wind(after=lambda: cleanup()):
-            ...
+    with wind(after=lambda: cleanup()):
+        ...
+    ```
     """
 
     def __init__(
@@ -279,11 +281,13 @@ class _Wind[T](WindBase[Ref[T], None]):
 class wind_range(WindBase["wind_range", int]):
     """Context manager providing multi-shot-safe range iteration.
 
-    Usage::
+    Usage:
 
-        with wind_range(10) as r:
-            for i in r:
-                v = choose()   # multi-shot safe
+    ```python
+    with wind_range(10) as r:
+        for i in r:
+            v = choose()   # multi-shot safe
+    ```
 
     On multi-shot re-entry, the iterator position is restored to the value
     it had when the continuation was captured, so the ``for`` loop resumes

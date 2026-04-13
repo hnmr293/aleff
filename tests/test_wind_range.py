@@ -19,7 +19,7 @@ from aleff import (
     wind,
     wind_range,
 )
-from aleff._multishot.v1.wind import _get_wind_stack  # pyright: ignore[reportPrivateUsage]
+from aleff._multishot.v1.winds import _get_wind_stack  # pyright: ignore[reportPrivateUsage]
 
 
 # ---------------------------------------------------------------------------

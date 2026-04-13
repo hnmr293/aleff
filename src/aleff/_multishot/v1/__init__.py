@@ -32,7 +32,7 @@ from .utils import (
 
 from .misc import loglevel
 
-from .wind import (
+from .winds import (
     WindBase,
     wind,
     wind_range,

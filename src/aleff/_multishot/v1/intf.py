@@ -57,17 +57,19 @@ type AsyncEffectHandler[**P, V, R] = Callable[Concatenate[ResumeAsync[R, V], P],
 class Handler[V](Protocol):
     """Protocol for synchronous effect handlers.
 
-    Create instances via :func:`create_handler`.  Register effect
-    implementations with :meth:`on`, then invoke the handler with a
-    caller function::
+    Create instances via ``create_handler``.  Register effect
+    implementations with ``on``, then invoke the handler with a
+    caller function:
 
-        h = create_handler(read, write)
+    ```python
+    h = create_handler(read, write)
 
-        @h.on(read)
-        def _read(k: Resume[str, int]):
-            return k("data")
+    @h.on(read)
+    def _read(k: Resume[str, int]):
+        return k("data")
 
-        result = h(lambda: read())
+    result = h(lambda: read())
+    ```
     """
 
     @property
@@ -96,16 +98,18 @@ class Handler[V](Protocol):
 class AsyncHandler[V](Protocol):
     """Protocol for asynchronous effect handlers.
 
-    Create instances via :func:`create_async_handler`.  Handler functions
-    are ``async def`` and receive a :class:`ResumeAsync` continuation::
+    Create instances via ``create_async_handler``.  Handler functions
+    are ``async def`` and receive a ``ResumeAsync`` continuation:
 
-        h = create_async_handler(read)
+    ```python
+    h = create_async_handler(read)
 
-        @h.on(read)
-        async def _read(k: ResumeAsync[str, int]):
-            return await k("data")
+    @h.on(read)
+    async def _read(k: ResumeAsync[str, int]):
+        return await k("data")
 
-        result = await h(lambda: read())
+    result = await h(lambda: read())
+    ```
     """
 
     @property
@@ -136,14 +140,16 @@ class AsyncHandler[V](Protocol):
 
 @runtime_checkable
 class Ref[T](Protocol):
-    """Indirect reference returned by :class:`wind` context manager.
+    """Indirect reference returned by ``wind`` context manager.
 
     ``wind`` wraps the return value of ``before()`` in a ``Ref`` so that
     multi-shot continuation resumes can update the underlying value.
-    Use :meth:`unwrap` to retrieve the current value::
+    Use ``unwrap()`` to retrieve the current value:
 
-        with wind(lambda: open("path.txt")) as ref:
-            ref.unwrap().read()
+    ```python
+    with wind(lambda: open("path.txt")) as ref:
+        ref.unwrap().read()
+    ```
 
     On multi-shot re-entry, ``before()`` is called again and the same
     ``Ref`` object is updated with the new return value.  Because the
