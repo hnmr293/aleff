@@ -69,6 +69,15 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 120
+# Apply the exclusions below even when a file is named on the command line, so that
+# checking a single file from an editor gives the same answer as CI.
+force-exclude = true
+
+[tool.ruff.lint]
+# Archived one-shot implementations, kept as development history and unreachable from
+# the public API (`_oneshot/__init__.py` exposes only `v8_1`, which stays in scope).
+# Keep in sync with the `ignore` list in pyrightconfig.json.
+exclude = ["src/aleff/_oneshot/v[1-8]/**"]
 
 [tool.cibuildwheel]
 build = ["cp312-*", "cp313-*", "cp314-*", "cp314t-*"]
