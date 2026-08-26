@@ -8,7 +8,6 @@ by this handler unless it is explicitly re-installed.
 import asyncio
 
 import pytest
-import pytest_asyncio  # pyright: ignore[reportUnusedImport]
 
 from aleff import (
     effect,

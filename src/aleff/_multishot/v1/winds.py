@@ -9,6 +9,11 @@ import greenlet as gl
 from .intf import Ref, Wind
 
 
+def _noop() -> None:
+    """Default `before`/`after` for a wind that only marks a dynamic extent."""
+    return None
+
+
 @overload
 def wind[T, B: bool | None](
     before: Callable[[], AbstractContextManager[T, B]],
@@ -49,9 +54,9 @@ def wind[T, B: bool | None](  # pyright: ignore[reportInconsistentOverload]
 ) -> Wind[T, B]:
     if before is None:
         # T is None
-        before = cast(Callable[[], T], lambda: None)
+        before = cast(Callable[[], T], _noop)
     if after is None:
-        after = lambda: None
+        after = _noop
     return _Wind[T](before, after, auto_exit=auto_exit)  # pyright: ignore[reportReturnType]
 
 

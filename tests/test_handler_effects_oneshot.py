@@ -3,10 +3,7 @@
 Oneshot-specific variant — imports from aleff.oneshot.
 """
 
-import asyncio  # pyright: ignore[reportUnusedImport]
-
 import pytest
-import pytest_asyncio  # pyright: ignore[reportUnusedImport]
 
 from aleff.oneshot import (
     effect,

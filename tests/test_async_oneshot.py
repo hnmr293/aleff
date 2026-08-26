@@ -1,7 +1,6 @@
 import asyncio
 
 import pytest
-import pytest_asyncio  # pyright: ignore[reportUnusedImport]
 
 from aleff.oneshot import (
     effect,
@@ -83,37 +82,42 @@ class TestAsyncHandler:
 
     @pytest.mark.asyncio
     async def test_nested_handlers(self):
+        """An inner async handler runs to completion inside the outer handler fn.
+
+        The `order` list is a contract, not an artefact of the current implementation:
+        nesting means the inner handler finishes before the outer continuation resumes.
+        """
         inner_eff: Effect[[], str] = effect("inner")
         outer_eff: Effect[[], int] = effect("outer")
+        order: list[str] = []
 
         async def run_inner():
             h: AsyncHandler[str] = create_async_handler(inner_eff)
 
             @h.on(inner_eff)
             async def _handle(k: ResumeAsync[str, str]):
+                order.append("inner_handle")
                 return await k("from_inner")
 
-            return await h(lambda: inner_eff())
+            order.append("inner_enter")
+            result = await h(lambda: inner_eff())
+            order.append("inner_exit")
+            return result
 
         async def run_outer():
             h: AsyncHandler[int] = create_async_handler(outer_eff)
 
             @h.on(outer_eff)
             async def _handle(k: ResumeAsync[int, int]):
-                return await k(99)
+                order.append("outer_handle")
+                result = await k(len(await run_inner()))
+                order.append("outer_resumed")
+                return result
 
-            def body():
-                run_inner_result = run_inner()  # pyright: ignore[reportUnusedVariable]
-                # run_inner returns a coroutine; it will be awaited by _drive_async
-                # But we need the inner handler to complete first.
-                # For nesting, inner must be sync or handled differently.
-                return outer_eff()
+            return await h(lambda: outer_eff())
 
-            return await h(body)
-
-        # Nested async handlers require the inner to complete before outer effect.
-        # Use a different pattern: inner as sync handler.
-        pass
+        assert await run_outer() == 10
+        assert order == ["outer_handle", "inner_enter", "inner_handle", "inner_exit", "outer_resumed"]
 
     @pytest.mark.asyncio
     async def test_effect_with_arguments(self):

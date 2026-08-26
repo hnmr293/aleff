@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.abspath("../../src"))
@@ -51,8 +52,6 @@ intersphinx_mapping = {
 
 
 # -- Convert markdown code blocks in docstrings to reST
-import re
-
 _CODE_BLOCK_RE = re.compile(
     r"^(?P<indent>\s*)```(?P<lang>\w*)\s*\n(?P<code>.*?)^(?P=indent)```\s*$",
     re.MULTILINE | re.DOTALL,
