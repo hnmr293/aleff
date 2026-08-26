@@ -11,7 +11,6 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 import pytest
-import pytest_asyncio  # pyright: ignore[reportUnusedImport]
 
 from aleff import (
     effect,

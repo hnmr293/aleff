@@ -8,7 +8,6 @@ import asyncio
 from typing import Any
 
 import pytest
-import pytest_asyncio  # pyright: ignore[reportUnusedImport]
 
 from aleff import (
     effect,
