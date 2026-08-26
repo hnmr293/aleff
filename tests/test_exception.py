@@ -323,10 +323,16 @@ class TestAbortOnHandlerException:
                 missing()
                 return v
 
-        with pytest.raises(EffectNotHandledError) as excinfo:
+        # EffectNotHandledError is generic, so pytest.raises cannot type it;
+        # catch it directly and hold it for the same reason as above.
+        raised: list[BaseException] = []
+        try:
             h(caller)
+        except BaseException as ex:
+            raised.append(ex)
 
-        assert excinfo.value.__traceback__ is not None
+        assert len(raised) == 1
+        assert isinstance(raised[0], EffectNotHandledError)
         assert log == ["before", "after"]
 
     def test_nested_handler_exception_unwinds_both_callers(self):
@@ -444,7 +450,9 @@ class TestAsyncAbortOnHandlerException:
 
         log: list[str] = []
 
-        @h.on(e)
+        # An async handler accepts a sync handler fn at runtime -- it is run via
+        # _run_handler_fn_in_greenlet -- but AsyncEffectHandler requires async.
+        @h.on(e)  # pyright: ignore[reportArgumentType]
         def _handle(k: ResumeAsync[int, int]) -> int:
             raise ValueError("handler error")
 
@@ -456,6 +464,40 @@ class TestAsyncAbortOnHandlerException:
             await h(caller)
 
         assert excinfo.value.__traceback__ is not None
+        assert log == ["before", "after"]
+
+    @pytest.mark.asyncio
+    async def test_async_unhandled_effect_in_continuation_unwinds_caller(self):
+        """The abort must reach the caller across the bridge greenlet.
+
+        Here the abort is driven from the handler fn's greenlet, which is not
+        caller_gl.parent, so the unwinding exception has to be routed back to
+        the aborting greenlet rather than to the caller's original parent.
+        """
+        e: Effect[[], int] = effect("e")
+        missing: Effect[[], int] = effect("missing")
+        h: AsyncHandler[int] = create_async_handler(e)
+
+        log: list[str] = []
+
+        @h.on(e)
+        async def _handle(k: ResumeAsync[int, int]) -> int:
+            return await k(1)
+
+        def caller() -> int:
+            with wind(lambda: log.append("before"), lambda: log.append("after")):
+                v = e()
+                missing()
+                return v
+
+        raised: list[BaseException] = []
+        try:
+            await h(caller)
+        except BaseException as ex:
+            raised.append(ex)
+
+        assert len(raised) == 1
+        assert isinstance(raised[0], EffectNotHandledError)
         assert log == ["before", "after"]
 
 

@@ -239,8 +239,24 @@ def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
 
     # effect performed
     # switch to the handler greenlet
+    #
+    # From here the caller is suspended mid-effect.  Whatever happens next --
+    # the handler returning without resuming, the handler raising, or dispatch
+    # failing outright -- it must not be left that way: its finally blocks and
+    # wind guards are still pending.  _abort_caller in the finally below makes
+    # that a single invariant of this function.
+    ctx = cast(EffectContext[..., Any], value)
+    try:
+        return _drive_effect(caller_gl, ctx)
+    finally:
+        if not caller_gl.dead:
+            debug(f"||< **abort** perform {eff_str(ctx.effect)}")
+            _abort_caller(caller_gl)
 
-    d = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
+
+def _drive_effect(caller_gl: Any, value: EffectContext[..., Any]) -> Any:
+    """Dispatch one performed effect.  The caller is suspended throughout."""
+    d = _pre_drive(caller_gl, value)
 
     if isinstance(d.handler, _AsyncHandler):
         # async handler found in sync context — relay to parent greenlet.
@@ -282,12 +298,6 @@ def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
     resume: Resume[Any, Any] = _Resume(caller_gl, snapshot, d.token, d.handler)
     v = d.fn(resume, *d.args, **d.kwargs)
 
-    if not caller_gl.dead:
-        # resume not called in the handler
-        # discard the result
-        debug(f"||< **abort** perform {eff_str(d.effect)} = {v!r}")
-        _abort_caller(caller_gl)
-
     debug(f"||< perform {eff_str(d.effect)} = {v!r}")
 
     debug("||< @main")
@@ -303,18 +313,29 @@ def _abort_caller(caller_gl: Any) -> None:
     blocks but is not caught by ``except Exception``.
     """
 
+    # A dying greenlet hands its exception to its *parent*, not to whoever
+    # switched into it.  Redirect the parent here so that EffectAborted -- and
+    # any exception the caller's cleanup raises -- surfaces in this greenlet
+    # rather than in whichever one happens to be caller_gl.parent.
+    # (See _Resume.__call__ for the same redirection.)
+    old_parent = caller_gl.parent
+    caller_gl.parent = gl.getcurrent()
     try:
-        abort_v = caller_gl.switch(ABORT)
-    except EffectAborted:
-        return
-    while not caller_gl.dead:
-        if isinstance(abort_v, EffectContext):
-            try:
-                abort_v = caller_gl.switch(ABORT)
-            except EffectAborted:
-                return
-        else:
-            break
+        try:
+            abort_v = caller_gl.switch(ABORT)
+        except EffectAborted:
+            return
+        while not caller_gl.dead:
+            if isinstance(abort_v, EffectContext):
+                try:
+                    abort_v = caller_gl.switch(ABORT)
+                except EffectAborted:
+                    return
+            else:
+                break
+    finally:
+        if not caller_gl.dead:
+            caller_gl.parent = old_parent
 
 
 class _AwaitRequest[V]:
@@ -439,8 +460,23 @@ async def _drive_async[V](
 
     # effect performed
     # switch to the handler greenlet
+    # See _drive for why the abort belongs in a finally.
+    ctx = cast(EffectContext[..., Any], value)
+    try:
+        return await _drive_effect_async(caller_gl, ctx, exclude_token)
+    finally:
+        if not caller_gl.dead:
+            debug(f"||< **abort** perform {eff_str(ctx.effect)}")
+            _abort_caller(caller_gl)
 
-    d = _pre_drive(caller_gl, cast(EffectContext[..., Any], value), exclude_token=exclude_token)
+
+async def _drive_effect_async(
+    caller_gl: Any,
+    value: EffectContext[..., Any],
+    exclude_token: object | None,
+) -> Any:
+    """Dispatch one performed effect.  The caller is suspended throughout."""
+    d = _pre_drive(caller_gl, value, exclude_token=exclude_token)
 
     # For shallow handlers, remove all entries before calling fn so that
     # resumed computation will not find this handler on the stack.
@@ -468,12 +504,6 @@ async def _drive_async[V](
             d.kwargs,
             _exclude,
         )
-
-    if not caller_gl.dead:
-        # resume not called in the handler
-        # discard the result
-        debug(f"||< **abort** perform {eff_str(d.effect)} = {v!r}")
-        _abort_caller(caller_gl)
 
     debug(f"||< perform {eff_str(d.effect)} = {v!r}")
 
