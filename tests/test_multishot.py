@@ -5,7 +5,10 @@ each time resuming from the same suspension point with independent state.
 """
 
 import asyncio
+import subprocess
 import sys
+import textwrap
+import types
 from typing import Any
 
 import pytest
@@ -77,6 +80,35 @@ class TestMultiShotBasic:
                 return [(value, inner_exception, type(exc).__name__)]
 
         assert h(run) == [(1, "KeyError", "ValueError"), (2, "KeyError", "ValueError")]
+
+    def test_sync_generator_frame_is_restored_with_generator_ownership(self):
+        code = textwrap.dedent(
+            """
+            from aleff import Handler, Resume, create_handler, effect
+
+            choose = effect("choose")
+            handler = create_handler(choose)
+
+            @handler.on(choose)
+            def handle_choose(k):
+                return k(1) + k(2)
+
+            def values():
+                value = choose()
+                yield value
+                yield value + 10
+
+            def run():
+                iterator = values()
+                return [next(iterator), next(iterator)]
+
+            assert handler(run) == [1, 11, 2, 12]
+            """
+        )
+
+        result = subprocess.run([sys.executable, "-c", code], text=True, capture_output=True)
+
+        assert result.returncode == 0, result.stderr
 
     def test_resume_twice(self):
         """k can be called twice, each resuming from the same point."""
@@ -764,6 +796,27 @@ class TestMultiShotAsync:
         assert await h(run) == [(1, "KeyError", "ValueError"), (2, "KeyError", "ValueError")]
 
     @pytest.mark.asyncio
+    async def test_inner_handled_exception_does_not_leak_to_outer_coroutine(self):
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[tuple[int, BaseException | None]]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[tuple[int, BaseException | None]]]):
+            return await k(1) + await k(2)
+
+        async def inner() -> int:
+            try:
+                raise KeyError("inner")
+            except KeyError:
+                return choose()
+
+        async def run() -> list[tuple[int, BaseException | None]]:
+            value = await inner()
+            return [(value, sys.exception())]
+
+        assert await h(run) == [(1, None), (2, None)]
+
+    @pytest.mark.asyncio
     async def test_nested_coroutine_inherits_outer_handled_exception(self):
         """A restored inner coroutine sees an exception handled by its awaiter."""
         choose: Effect[[], int] = effect("choose")
@@ -816,6 +869,80 @@ class TestMultiShotAsync:
                 return [(value, inner_exception, type(exc).__name__)]
 
         assert await h(run) == [(1, "KeyError", "ValueError"), (2, "KeyError", "ValueError")]
+
+    @pytest.mark.asyncio
+    async def test_generator_based_coroutine_returns_after_effect_per_shot(self):
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]):
+            return await k(1) + await k(2)
+
+        @types.coroutine
+        def inner():
+            value = choose()
+            if False:
+                yield None
+            return value
+
+        async def run() -> list[int]:
+            return [await inner()]
+
+        assert await h(run) == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_generator_based_coroutine_bare_yield_after_effect_per_shot(self):
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]):
+            return await k(1) + await k(2)
+
+        @types.coroutine
+        def inner():
+            value = choose()
+            yield None
+            return value
+
+        async def run() -> list[int]:
+            return [await inner()]
+
+        assert await h(run) == [1, 2]
+
+    def test_async_generator_frame_is_restored_with_async_generator_ownership(self):
+        code = textwrap.dedent(
+            """
+            import asyncio
+            from aleff import create_async_handler, effect
+
+            choose = effect("choose")
+            handler = create_async_handler(choose)
+
+            @handler.on(choose)
+            async def handle_choose(k):
+                return await k(1) + await k(2)
+
+            async def values():
+                value = choose()
+                yield value
+                yield value + 10
+
+            async def run():
+                iterator = values()
+                return [await anext(iterator), await anext(iterator)]
+
+            async def main():
+                assert await handler(run) == [1, 11, 2, 12]
+
+            asyncio.run(main())
+            """
+        )
+
+        result = subprocess.run([sys.executable, "-c", code], text=True, capture_output=True)
+
+        assert result.returncode == 0, result.stderr
 
     @pytest.mark.asyncio
     async def test_async_caller_preserves_implicit_exception_chaining(self):

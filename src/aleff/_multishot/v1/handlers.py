@@ -421,6 +421,7 @@ def _run_restored_async_continuation[R, V](snapshot: FrameSnapshot[R, V], value:
     is_exception = False
     from_coroutine = False
     next_frame = 1
+    replacements: dict[object, object] = {}
 
     while True:
         done, payload, next_frame, initial, initial_is_exception = restore_async_continuation(
@@ -429,6 +430,7 @@ def _run_restored_async_continuation[R, V](snapshot: FrameSnapshot[R, V], value:
             next_frame,
             is_exception,
             from_coroutine,
+            replacements,
         )
         if done:
             return cast(V, payload)

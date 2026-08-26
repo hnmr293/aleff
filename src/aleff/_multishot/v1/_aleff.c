@@ -279,11 +279,11 @@ typedef struct {
     int8_t cr_frame_state;
 } _aleff_coro_prefix_t;
 
-#define ALEFF_SET_CORO_FRAME_STATE(coro, state) \
-    (((_aleff_coro_prefix_t *)(coro))->cr_frame_state = (state))
-#define ALEFF_CORO_EXC_STATE(coro) \
-    (&((_aleff_coro_prefix_t *)(coro))->cr_exc_state)
-#define ALEFF_CORO_FROM_FRAME(frame) \
+#define ALEFF_SET_GEN_FRAME_STATE(owner, state) \
+    (((_aleff_coro_prefix_t *)(owner))->cr_frame_state = (state))
+#define ALEFF_GEN_EXC_STATE(owner) \
+    (&((_aleff_coro_prefix_t *)(owner))->cr_exc_state)
+#define ALEFF_GEN_FROM_FRAME(frame) \
     ((_aleff_coro_prefix_t *)((char *)(frame) - sizeof(_aleff_coro_prefix_t)))
 
 #else
@@ -325,11 +325,11 @@ _aleff_frame_set_stacktop(_aleff_frame_t *frame, int top)
 #define FRAME_OWNED_BY_FRAME_OBJECT 2
 #define FRAME_OWNED_BY_CSTACK 3
 
-#define ALEFF_SET_CORO_FRAME_STATE(coro, state) \
-    (((PyCoroObject *)(coro))->cr_frame_state = (state))
-#define ALEFF_CORO_EXC_STATE(coro) \
-    (&((PyCoroObject *)(coro))->cr_exc_state)
-#define ALEFF_CORO_FROM_FRAME(frame) \
+#define ALEFF_SET_GEN_FRAME_STATE(owner, state) \
+    (((PyCoroObject *)(owner))->cr_frame_state = (state))
+#define ALEFF_GEN_EXC_STATE(owner) \
+    (&((PyCoroObject *)(owner))->cr_exc_state)
+#define ALEFF_GEN_FROM_FRAME(frame) \
     ((PyCoroObject *)((char *)(frame) - offsetof(PyCoroObject, cr_iframe)))
 
 #endif /* PY_VERSION_HEX >= 0x030e0000 */
@@ -386,15 +386,20 @@ _aleff_is_exception_instance(PyObject *obj)
 static PyObject *
 _aleff_frame_handled_exception(_aleff_frame_t *frame, PyObject *fallback)
 {
-    PyCodeObject *code = _aleff_frame_get_code(frame);
-    if ((code->co_flags & CO_COROUTINE) && frame->owner == FRAME_OWNED_BY_GENERATOR) {
-        PyObject *coro = (PyObject *)ALEFF_CORO_FROM_FRAME(frame);
-        PyObject *exc = _aleff_effective_handled_exception(ALEFF_CORO_EXC_STATE(coro));
-        if (exc != nullptr) {
-            return exc;
-        }
+    if (frame->owner == FRAME_OWNED_BY_GENERATOR) {
+        PyObject *owner = (PyObject *)ALEFF_GEN_FROM_FRAME(frame);
+        return _aleff_effective_handled_exception(ALEFF_GEN_EXC_STATE(owner));
     }
     return _aleff_is_exception_instance(fallback) ? fallback : nullptr;
+}
+
+static PyObject *
+_aleff_frame_generator_owner(_aleff_frame_t *frame)
+{
+    if (frame->owner != FRAME_OWNED_BY_GENERATOR) {
+        return nullptr;
+    }
+    return (PyObject *)ALEFF_GEN_FROM_FRAME(frame);
 }
 
 static inline int
@@ -411,6 +416,7 @@ typedef struct {
     _aleff_frame_t *frame;  /* deep-copied frame */
     int num_slots;          /* number of localsplus slots */
     PyObject *handled_exception;  /* effective handled exception, or nullptr */
+    PyObject *original_owner;  /* generator/coroutine owner, or nullptr */
 } _aleff_frame_copy_t;
 
 typedef struct {
@@ -435,6 +441,7 @@ FrameSnapshot_dealloc(FrameSnapshotObject *self)
         Py_XDECREF(f->f_builtins);
         Py_XDECREF(f->f_locals);
         Py_XDECREF(fc->handled_exception);
+        Py_XDECREF(fc->original_owner);
         /* Don't decref frame_obj — we set it to nullptr in copies */
 
         for (int j = 0; j < fc->num_slots; j++) {
@@ -482,7 +489,7 @@ static PyTypeObject FrameSnapshotType = {
 static _aleff_frame_copy_t
 copy_single_frame(_aleff_frame_t *src)
 {
-    _aleff_frame_copy_t result = {nullptr, 0, nullptr};
+    _aleff_frame_copy_t result = {nullptr, 0, nullptr, nullptr};
 
     PyCodeObject *code = _aleff_frame_get_code(src);
     int num_slots = _aleff_frame_num_slots(code);
@@ -651,6 +658,9 @@ create_snapshot(PyFrameObject *boundary_frame, int max_depth)
             snapshot->frames[i].handled_exception = Py_XNewRef(
                 _aleff_frame_handled_exception(internal, fallback_exception)
             );
+            snapshot->frames[i].original_owner = Py_XNewRef(
+                _aleff_frame_generator_owner(internal)
+            );
 
             PyFrameObject *prev = PyFrame_GetBack(f);  /* new ref */
             Py_DECREF(f);
@@ -811,13 +821,45 @@ inject_resume_value(_aleff_frame_t *frame, PyObject *value)
     _aleff_frame_set_stacktop(frame, stacktop);
 }
 
+static PyObject *
+replacement_for(PyObject *obj, PyObject *replacements)
+{
+    if (obj == nullptr || replacements == nullptr || replacements == Py_None) {
+        return obj;
+    }
+
+    PyObject *original;
+    PyObject *replacement;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(replacements, &pos, &original, &replacement)) {
+        if (obj == original) {
+            return replacement;
+        }
+    }
+    return obj;
+}
+
+static void
+apply_frame_replacements(_aleff_frame_t *frame, int num_slots, PyObject *replacements)
+{
+    for (int i = 0; i < num_slots; i++) {
+        PyObject *obj = ALEFF_LOCALSPLUS_GET(frame, i);
+        ALEFF_LOCALSPLUS_SET(frame, i, replacement_for(obj, replacements));
+    }
+}
+
 /*
  * Copy a frame onto the thread data stack.
  * Returns a pointer to the frame on the data stack, or nullptr on error.
  * The caller must ensure there's enough space (or handle growth).
  */
 static _aleff_frame_t *
-push_frame_to_datastack(PyThreadState *tstate, _aleff_frame_t *src, int num_slots)
+push_frame_to_datastack(
+    PyThreadState *tstate,
+    _aleff_frame_t *src,
+    int num_slots,
+    PyObject *replacements
+)
 {
     size_t frame_size = sizeof(_aleff_frame_t)
                       + (num_slots - 1) * sizeof(PyObject *);
@@ -843,6 +885,8 @@ push_frame_to_datastack(PyThreadState *tstate, _aleff_frame_t *src, int num_slot
     }
 #endif
 
+    apply_frame_replacements(dst, num_slots, replacements);
+
     /* INCREF all references (the copy shares objects with the snapshot copy) */
     Py_XINCREF(ALEFF_GET_EXECUTABLE(dst));
     Py_XINCREF(ALEFF_GET_FUNCOBJ(dst));
@@ -861,18 +905,20 @@ push_frame_to_datastack(PyThreadState *tstate, _aleff_frame_t *src, int num_slot
     return dst;
 }
 
-/* Build a real coroutine object around a copied suspended coroutine frame.
+/* Build a real generator-family owner around a copied suspended frame.
  *
- * PyCoro_New() only accepts a PyFrameObject.  Create a correctly-sized frame
- * object, replace its freshly initialized interpreter frame with the snapshot
- * state, then let PyCoro_New() move that state into coroutine-owned storage.
+ * The public constructors accept a PyFrameObject.  Create a correctly-sized
+ * frame object, replace its freshly initialized interpreter frame with the
+ * snapshot state, then let the matching constructor move that state into
+ * generator-owned storage.
  */
 static PyObject *
-coroutine_from_frame_copy(
+generator_owner_from_frame_copy(
     PyThreadState *tstate,
     _aleff_frame_copy_t *src_copy,
     int resume_from_coroutine,
-    PyObject *handled_exception
+    PyObject *handled_exception,
+    PyObject *replacements
 )
 {
     _aleff_frame_t *src = src_copy->frame;
@@ -909,6 +955,8 @@ coroutine_from_frame_copy(
     }
 #endif
 
+    apply_frame_replacements(dst, src_copy->num_slots, replacements);
+
     /* Match normal interpreter-frame ownership: executable, function,
      * locals, and localsplus are strong; globals and builtins are borrowed. */
     Py_XINCREF(ALEFF_GET_EXECUTABLE(dst));
@@ -931,17 +979,26 @@ coroutine_from_frame_copy(
         prepare_resume_frame(dst);
     }
 
-    PyObject *coro = PyCoro_New(py_frame, code->co_name, code->co_qualname);
-    if (coro == nullptr) {
+    PyObject *owner;
+    if (code->co_flags & CO_ASYNC_GENERATOR) {
+        owner = PyAsyncGen_New(py_frame, code->co_name, code->co_qualname);
+    }
+    else if (code->co_flags & CO_COROUTINE) {
+        owner = PyCoro_New(py_frame, code->co_name, code->co_qualname);
+    }
+    else {
+        owner = PyGen_NewWithQualName(py_frame, code->co_name, code->co_qualname);
+    }
+    if (owner == nullptr) {
         return nullptr;
     }
 
 #if PY_VERSION_HEX >= 0x030d0000
-    ALEFF_SET_CORO_FRAME_STATE(coro, -2);  /* FRAME_SUSPENDED */
+    ALEFF_SET_GEN_FRAME_STATE(owner, -2);  /* FRAME_SUSPENDED */
 #else
-    ALEFF_SET_CORO_FRAME_STATE(coro, -1);  /* FRAME_SUSPENDED */
+    ALEFF_SET_GEN_FRAME_STATE(owner, -1);  /* FRAME_SUSPENDED */
 #endif
-    _PyErr_StackItem *exc_state = ALEFF_CORO_EXC_STATE(coro);
+    _PyErr_StackItem *exc_state = ALEFF_GEN_EXC_STATE(owner);
     Py_XSETREF(
         exc_state->exc_value,
         _aleff_is_exception_instance(handled_exception)
@@ -949,7 +1006,13 @@ coroutine_from_frame_copy(
             : nullptr
     );
     exc_state->previous_item = nullptr;
-    return coro;
+    if (src_copy->original_owner != nullptr && replacements != nullptr) {
+        if (PyDict_SetItem(replacements, src_copy->original_owner, owner) < 0) {
+            Py_DECREF(owner);
+            return nullptr;
+        }
+    }
+    return owner;
 }
 
 /* ========================================================================
@@ -1036,7 +1099,12 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
 
     for (int i = num - 1; i >= 0; i--) {
         _aleff_frame_copy_t *src = &snapshot->frames[i + skip];
-        _aleff_frame_t *f = push_frame_to_datastack(tstate, src->frame, src->num_slots);
+        _aleff_frame_t *f = push_frame_to_datastack(
+            tstate,
+            src->frame,
+            src->num_slots,
+            Py_None
+        );
         if (f == nullptr) {
             /* Restore data stack and bail */
             tstate->datastack_top = saved_datastack_top;
@@ -1130,7 +1198,7 @@ make_async_restore_stage(
 
 PyDoc_STRVAR(restore_async_continuation_doc,
 "restore_async_continuation(\n"
-"    snapshot, outcome, start=1, is_exception=False, from_coroutine=False\n"
+"    snapshot, outcome, start=1, is_exception=False, from_coroutine=False, replacements=None\n"
 ")\n"
 "--\n\n"
 "Advance a restored frame chain until its next coroutine frame or completion.\n"
@@ -1147,16 +1215,18 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
     int start = 1;
     int is_exception = 0;
     int from_coroutine = 0;
+    PyObject *replacements = Py_None;
 
     if (!PyArg_ParseTuple(
             args,
-            "O!O|ipp",
+            "O!O|ippO",
             &FrameSnapshotType,
             &snapshot,
             &outcome,
             &start,
             &is_exception,
-            &from_coroutine
+            &from_coroutine,
+            &replacements
         )) {
         return nullptr;
     }
@@ -1168,6 +1238,10 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
     }
     if (start < 0 || start > snapshot->num_frames) {
         PyErr_SetString(PyExc_ValueError, "invalid async continuation frame index");
+        return nullptr;
+    }
+    if (replacements != Py_None && !PyDict_Check(replacements)) {
+        PyErr_SetString(PyExc_TypeError, "replacements must be a dict or None");
         return nullptr;
     }
 
@@ -1187,20 +1261,44 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
         _aleff_frame_copy_t *src = &snapshot->frames[i];
         PyCodeObject *code = _aleff_frame_get_code(src->frame);
 
-        if (code->co_flags & CO_COROUTINE) {
-            PyObject *coro = coroutine_from_frame_copy(
+        if (code->co_flags & (CO_COROUTINE | CO_GENERATOR | CO_ASYNC_GENERATOR)) {
+            PyObject *owner = generator_owner_from_frame_copy(
                 tstate,
                 src,
                 from_coroutine && !pending_is_exception,
-                restored_exc_state.exc_value
+                restored_exc_state.exc_value,
+                replacements
             );
-            if (coro == nullptr) {
+            if (owner == nullptr) {
                 Py_DECREF(pending);
                 goto done;
             }
+
+            if (code->co_flags & CO_ASYNC_GENERATOR) {
+                PyObject *operation = PyObject_CallMethod(
+                    owner,
+                    pending_is_exception ? "athrow" : "asend",
+                    "O",
+                    pending
+                );
+                Py_DECREF(owner);
+                Py_DECREF(pending);
+                if (operation == nullptr) {
+                    goto done;
+                }
+                return_value = make_async_restore_stage(
+                    0,
+                    operation,
+                    i + 1,
+                    Py_NewRef(Py_None),
+                    0
+                );
+                goto done;
+            }
+
             return_value = make_async_restore_stage(
                 0,
-                coro,
+                owner,
                 i + 1,
                 pending,
                 pending_is_exception
@@ -1209,7 +1307,12 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
         }
 
         PyObject **saved_datastack_top = tstate->datastack_top;
-        _aleff_frame_t *frame = push_frame_to_datastack(tstate, src->frame, src->num_slots);
+        _aleff_frame_t *frame = push_frame_to_datastack(
+            tstate,
+            src->frame,
+            src->num_slots,
+            replacements
+        );
         if (frame == nullptr) {
             tstate->datastack_top = saved_datastack_top;
             Py_DECREF(pending);
@@ -1350,6 +1453,9 @@ _aleff_snapshot_from_frame(_ALEFF_UNUSED PyObject *self, PyObject *args)
             }
             snapshot->frames[i].handled_exception = Py_XNewRef(
                 _aleff_frame_handled_exception(internal, fallback_exception)
+            );
+            snapshot->frames[i].original_owner = Py_XNewRef(
+                _aleff_frame_generator_owner(internal)
             );
 
             PyFrameObject *prev = PyFrame_GetBack(f);

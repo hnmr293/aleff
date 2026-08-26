@@ -79,6 +79,7 @@ def restore_async_continuation[R, V](
     start: int = 1,
     is_exception: bool = False,
     from_coroutine: bool = False,
+    replacements: dict[object, object] | None = None,
 ) -> tuple[bool, object, int, object, bool]:
     """Advance restored frames to the next coroutine stage or completion."""
     ...
