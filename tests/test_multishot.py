@@ -5,6 +5,7 @@ each time resuming from the same suspension point with independent state.
 """
 
 import asyncio
+from typing import Any
 
 import pytest
 import pytest_asyncio  # pyright: ignore[reportUnusedImport]
@@ -305,6 +306,134 @@ class TestMultiShotDeepCalls:
         # This generates all 2-bit binary numbers
         result = h(lambda: binary_string(2))
         assert result == [0, 1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Multi-shot: call shapes in the captured chain
+# ---------------------------------------------------------------------------
+
+
+class TestMultiShotCallShapes:
+    """Multi-shot across calls that do not compile to a plain CALL.
+
+    A frame suspended mid-call is resumed just past the call opcode, and not
+    every call spells that opcode the same way: ``f(*args)`` and ``f(**kwargs)``
+    compile to CALL_FUNCTION_EX, and on 3.13+ a keyword call compiles to
+    CALL_KW.
+    """
+
+    def test_multishot_through_star_args_call(self):
+        """The continuation crosses a f(*args) call."""
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[int]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[int]]) -> list[int]:
+            return [*k(1), *k(2)]
+
+        def f(a: int) -> list[int]:
+            return [choose() + a]
+
+        args = (10,)
+        assert h(lambda: f(*args)) == [11, 12]
+
+    def test_multishot_through_star_args_call_three_shots(self):
+        """The same frame is re-entered once per shot."""
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[int]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[int]]) -> list[int]:
+            return [*k(1), *k(2), *k(3)]
+
+        def f(a: int) -> list[int]:
+            return [choose() + a]
+
+        args = (10,)
+        assert h(lambda: f(*args)) == [11, 12, 13]
+
+    def test_multishot_through_double_star_kwargs_call(self):
+        """The continuation crosses a f(**kwargs) call."""
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[int]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[int]]) -> list[int]:
+            return [*k(1), *k(2)]
+
+        def f(a: int) -> list[int]:
+            return [choose() + a]
+
+        kwargs = {"a": 10}
+        assert h(lambda: f(**kwargs)) == [11, 12]
+
+    def test_multishot_through_keyword_call(self):
+        """The continuation crosses a keyword call (CALL_KW on 3.13+)."""
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[int]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[int]]) -> list[int]:
+            return [*k(1), *k(2)]
+
+        def f(a: int) -> list[int]:
+            return [choose() + a]
+
+        assert h(lambda: f(a=10)) == [11, 12]
+
+    def test_multishot_through_mixed_star_and_keyword_call(self):
+        """The continuation crosses a f(*args, b=...) call."""
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[int]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[int]]) -> list[int]:
+            return [*k(1), *k(2)]
+
+        def g(a: int, b: int) -> list[int]:
+            return [choose() + a + b]
+
+        args = (10,)
+        assert h(lambda: g(*args, b=100)) == [111, 112]
+
+    def test_multishot_through_nested_handlers(self):
+        """The inner continuation contains the library's own *args dispatch.
+
+        `_drive` calls the handler fn as `d.fn(resume, *d.args, **d.kwargs)`, so
+        a nested handler puts a CALL_FUNCTION_EX frame in the captured chain
+        without any starred call in user code.
+        """
+        inner_e: Effect[[], int] = effect("inner")
+        outer_e: Effect[[int], int] = effect("outer")
+
+        h_outer: Handler[Any] = create_handler(outer_e)
+        h_inner: Handler[Any] = create_handler(inner_e)
+
+        @h_outer.on(outer_e)
+        def _handle_outer(k: Resume[int, Any], v: int) -> list[Any]:
+            return [k(v), k(v + 100)]
+
+        @h_inner.on(inner_e)
+        def _handle_inner(k: Resume[int, Any]) -> Any:
+            return k(outer_e(7))
+
+        assert h_outer(lambda: h_inner(lambda: inner_e())) == [7, 107]
+
+    @pytest.mark.asyncio
+    async def test_async_multishot_through_star_args_call(self):
+        """The async re-entry path resumes the same call shapes."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]) -> list[int]:
+            return [*await k(1), *await k(2)]
+
+        def f(a: int) -> list[int]:
+            return [choose() + a]
+
+        args = (10,)
+        assert await h(lambda: f(*args)) == [11, 12]
 
 
 # ---------------------------------------------------------------------------
