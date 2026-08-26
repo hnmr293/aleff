@@ -5,6 +5,7 @@ each time resuming from the same suspension point with independent state.
 """
 
 import asyncio
+import sys
 from typing import Any
 
 import pytest
@@ -28,6 +29,55 @@ from aleff import (
 
 
 class TestMultiShotBasic:
+    def test_sync_caller_preserves_handled_exception_per_shot(self):
+        """Restored synchronous callers retain their handled exception."""
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[tuple[int, str]]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[tuple[int, str]]]):
+            return k(1) + k(2)
+
+        def run() -> list[tuple[int, str]]:
+            try:
+                raise ValueError("active")
+            except ValueError:
+                value = choose()
+                exc = sys.exception()
+                assert exc is not None
+                return [(value, str(exc))]
+
+        assert h(run) == [(1, "active"), (2, "active")]
+
+    def test_nested_sync_frames_preserve_distinct_handled_exceptions(self):
+        """Each restored synchronous frame retains its own handled exception."""
+        choose: Effect[[], int] = effect("choose")
+        h: Handler[list[tuple[int, str, str]]] = create_handler(choose)
+
+        @h.on(choose)
+        def _choose(k: Resume[int, list[tuple[int, str, str]]]):
+            return k(1) + k(2)
+
+        def inner() -> tuple[int, str]:
+            try:
+                raise KeyError("inner")
+            except KeyError:
+                value = choose()
+                exc = sys.exception()
+                assert exc is not None
+                return value, type(exc).__name__
+
+        def run() -> list[tuple[int, str, str]]:
+            try:
+                raise ValueError("outer")
+            except ValueError:
+                value, inner_exception = inner()
+                exc = sys.exception()
+                assert exc is not None
+                return [(value, inner_exception, type(exc).__name__)]
+
+        assert h(run) == [(1, "KeyError", "ValueError"), (2, "KeyError", "ValueError")]
+
     def test_resume_twice(self):
         """k can be called twice, each resuming from the same point."""
         choose: Effect[[], int] = effect("choose")
@@ -618,6 +668,393 @@ class TestMultiShotEdgeCases:
 
 
 class TestMultiShotAsync:
+    @pytest.mark.asyncio
+    async def test_async_caller_preserves_handled_exception_per_shot(self):
+        """Each restored shot retains the caller's handled exception."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[tuple[int, str]]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[tuple[int, str]]]):
+            return await k(1) + await k(2) + await k(3)
+
+        async def run() -> list[tuple[int, str]]:
+            try:
+                raise ValueError("active")
+            except ValueError:
+                value = choose()
+                exc = sys.exception()
+                assert exc is not None
+                return [(value, str(exc))]
+
+        assert await h(run) == [(1, "active"), (2, "active"), (3, "active")]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_bare_raise_uses_handled_exception_per_shot(self):
+        """A bare raise after resume re-raises the caller's active exception."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[str]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[str]]):
+            messages: list[str] = []
+            for value in (1, 2):
+                try:
+                    await k(value)
+                except ValueError as exc:
+                    messages.append(str(exc))
+            return messages
+
+        async def run() -> list[str]:
+            try:
+                raise ValueError("active")
+            except ValueError:
+                choose()
+                raise
+
+        assert await h(run) == ["active", "active"]
+
+    @pytest.mark.asyncio
+    async def test_handler_exception_context_does_not_leak_into_caller(self):
+        """A handler's active exception is not inherited by restored callers."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[BaseException | None]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[BaseException | None]]):
+            try:
+                raise ValueError("handler")
+            except ValueError:
+                return await k(1) + await k(2)
+
+        async def run() -> list[BaseException | None]:
+            choose()
+            return [sys.exception()]
+
+        assert await h(run) == [None, None]
+
+    @pytest.mark.asyncio
+    async def test_nested_coroutines_preserve_distinct_handled_exceptions(self):
+        """Each restored coroutine frame retains its own handled exception."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[tuple[int, str, str]]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[tuple[int, str, str]]]):
+            return await k(1) + await k(2)
+
+        async def inner() -> tuple[int, str]:
+            try:
+                raise KeyError("inner")
+            except KeyError:
+                value = choose()
+                exc = sys.exception()
+                assert exc is not None
+                return value, type(exc).__name__
+
+        async def run() -> list[tuple[int, str, str]]:
+            try:
+                raise ValueError("outer")
+            except ValueError:
+                value, inner_exception = await inner()
+                exc = sys.exception()
+                assert exc is not None
+                return [(value, inner_exception, type(exc).__name__)]
+
+        assert await h(run) == [(1, "KeyError", "ValueError"), (2, "KeyError", "ValueError")]
+
+    @pytest.mark.asyncio
+    async def test_nested_coroutine_inherits_outer_handled_exception(self):
+        """A restored inner coroutine sees an exception handled by its awaiter."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[tuple[int, str]]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[tuple[int, str]]]):
+            return await k(1) + await k(2)
+
+        async def inner() -> tuple[int, str]:
+            value = choose()
+            exc = sys.exception()
+            assert exc is not None
+            return value, type(exc).__name__
+
+        async def run() -> list[tuple[int, str]]:
+            try:
+                raise ValueError("outer")
+            except ValueError:
+                return [await inner()]
+
+        assert await h(run) == [(1, "ValueError"), (2, "ValueError")]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_with_sync_helper_preserves_distinct_handled_exceptions(self):
+        """A sync helper and its async caller restore their own exception states."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[tuple[int, str, str]]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[tuple[int, str, str]]]):
+            return await k(1) + await k(2)
+
+        def inner() -> tuple[int, str]:
+            try:
+                raise KeyError("inner")
+            except KeyError:
+                value = choose()
+                exc = sys.exception()
+                assert exc is not None
+                return value, type(exc).__name__
+
+        async def run() -> list[tuple[int, str, str]]:
+            try:
+                raise ValueError("outer")
+            except ValueError:
+                value, inner_exception = inner()
+                exc = sys.exception()
+                assert exc is not None
+                return [(value, inner_exception, type(exc).__name__)]
+
+        assert await h(run) == [(1, "KeyError", "ValueError"), (2, "KeyError", "ValueError")]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_preserves_implicit_exception_chaining(self):
+        """New errors raised after resume retain the caller's handled exception as context."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[tuple[str, str]]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[tuple[str, str]]]):
+            results: list[tuple[str, str]] = []
+            for value in (1, 2):
+                try:
+                    await k(value)
+                except RuntimeError as exc:
+                    assert exc.__context__ is not None
+                    results.append((str(exc), type(exc.__context__).__name__))
+            return results
+
+        async def run() -> list[tuple[str, str]]:
+            try:
+                raise ValueError("active")
+            except ValueError:
+                value = choose()
+                raise RuntimeError(f"shot: {value}")
+
+        assert await h(run) == [("shot: 1", "ValueError"), ("shot: 2", "ValueError")]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("shots", "expected"),
+        [(0, []), (1, [0]), (2, [0, 1]), (3, [0, 1, 2])],
+    )
+    async def test_async_caller_resume_many_times(self, shots: int, expected: list[int]):
+        """An async caller can be resumed zero, one, or many times."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]):
+            results: list[int] = []
+            for value in range(shots):
+                results.extend(await k(value))
+            return results
+
+        async def run() -> list[int]:
+            return [choose()]
+
+        assert await h(run) == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("delay", [0, 0.001], ids=["bare-yield", "future"])
+    async def test_async_caller_awaits_after_effect_per_shot(self, delay: float):
+        """Each restored async caller independently completes a later await."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose)
+        completed: list[int] = []
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]):
+            return await k(1) + await k(2)
+
+        async def run():
+            value = choose()
+            await asyncio.sleep(delay)
+            completed.append(value)
+            return [value]
+
+        assert await h(run) == [1, 2]
+        assert completed == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_exception_after_effect_isolated_per_shot(self):
+        """An exception from one restored caller does not corrupt another shot."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int | str]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int | str]]):
+            results: list[int | str] = []
+            for value in (1, 2, 3):
+                try:
+                    results.extend(await k(value))
+                except ValueError as exc:
+                    results.append(str(exc))
+            return results
+
+        async def run() -> list[int | str]:
+            value = choose()
+            await asyncio.sleep(0)
+            if value == 2:
+                raise ValueError("bad shot: 2")
+            return [value]
+
+        assert await h(run) == [1, "bad shot: 2", 3]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_restores_nested_coroutine_frames(self):
+        """Nested coroutine frames are restored from inner to outer per shot."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]):
+            return await k(1) + await k(2)
+
+        async def inner():
+            value = choose()
+            await asyncio.sleep(0)
+            return value
+
+        async def run():
+            return [10 + await inner()]
+
+        assert await h(run) == [11, 12]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_restores_sync_helper_before_coroutine_frame(self):
+        """Synchronous frames below an async caller are restored first."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]):
+            return await k(1) + await k(2)
+
+        def inner():
+            return choose()
+
+        async def run():
+            value = inner()
+            await asyncio.sleep(0)
+            return [value]
+
+        assert await h(run) == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_throws_nested_coroutine_error_into_outer_frame(self):
+        """An inner restored coroutine error reaches the outer async frame."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int | str]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int | str]]):
+            return await k(1) + await k(2)
+
+        async def inner():
+            value = choose()
+            await asyncio.sleep(0)
+            if value == 2:
+                raise ValueError("nested: 2")
+            return value
+
+        async def run() -> list[int | str]:
+            try:
+                return [await inner()]
+            except ValueError as exc:
+                return [str(exc)]
+
+        assert await h(run) == [1, "nested: 2"]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_restores_three_nested_coroutine_frames(self):
+        """Coroutine completion is relayed through every restored await frame."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]):
+            return await k(1) + await k(2)
+
+        async def leaf():
+            value = choose()
+            await asyncio.sleep(0)
+            return value
+
+        async def middle():
+            return 10 + await leaf()
+
+        async def run():
+            return [100 + await middle()]
+
+        assert await h(run) == [111, 112]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_composes_two_multishot_effects(self):
+        """Two effects in an async caller produce their cartesian product."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[tuple[int, int]]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[tuple[int, int]]]):
+            return await k(0) + await k(1)
+
+        async def run():
+            first = choose()
+            await asyncio.sleep(0)
+            second = choose()
+            await asyncio.sleep(0)
+            return [(first, second)]
+
+        assert await h(run) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_catches_awaitable_error_per_shot(self):
+        """Each restored caller receives errors from its own awaitable."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[str]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[str]]):
+            return await k(1) + await k(2)
+
+        async def run() -> list[str]:
+            value = choose()
+            future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(future.set_exception, ValueError(f"future: {value}"))
+            try:
+                await future
+            except ValueError as exc:
+                return [str(exc)]
+            pytest.fail("the Future error was not thrown into the restored caller")
+
+        assert await h(run) == ["future: 1", "future: 2"]
+
+    @pytest.mark.asyncio
+    async def test_async_caller_resume_many_times_with_shallow_handler(self):
+        """A shallow async handler can resume one captured occurrence repeatedly."""
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose, shallow=True)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]):
+            return await k(1) + await k(2)
+
+        async def run() -> list[int]:
+            return [choose()]
+
+        assert await h(run) == [1, 2]
+
     @pytest.mark.asyncio
     async def test_async_resume_twice(self):
         """Async handler can call k(value) multiple times."""

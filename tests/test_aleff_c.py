@@ -9,7 +9,9 @@ import greenlet
 from aleff._multishot.v1._aleff import (
     FrameSnapshot,
     snapshot_frames,
+    snapshot_from_frame,
     snapshot_num_frames,
+    restore_async_continuation,
     restore_continuation,
     HAS_RESTORE,
 )
@@ -97,6 +99,23 @@ class TestSnapshotFrames:
         assert snapshot_num_frames(s1) == 1
         assert snapshot_num_frames(s2) == 1
         assert s1 is not s2
+
+
+class TestSnapshotFromFrame:
+    @pytest.mark.parametrize("handled_exception", [None, object()])
+    def test_non_exception_marker_is_treated_as_no_handled_exception(self, handled_exception: object):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            parent.switch()
+
+        child = greenlet.greenlet(suspend)
+        child.switch()
+        assert child.gr_frame is not None
+
+        snapshot = snapshot_from_frame(child.gr_frame, 1, handled_exception)
+
+        assert snapshot_num_frames(snapshot) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +223,33 @@ class TestRestoreContinuationErrors:
         assert HAS_RESTORE == 1, (
             "_PyEval_EvalFrameDefault was not found; restore_continuation will not work on this platform"
         )
+
+
+class TestRestoreAsyncContinuationErrors:
+    def test_negative_start_raises(self):
+        snapshot = snapshot_frames(1)
+
+        with pytest.raises(ValueError, match="invalid async continuation frame index"):
+            restore_async_continuation(snapshot, 42, -1)
+
+    def test_start_past_frame_count_raises(self):
+        snapshot = snapshot_frames(1)
+        frame_count = snapshot_num_frames(snapshot)
+
+        with pytest.raises(ValueError, match="invalid async continuation frame index"):
+            restore_async_continuation(snapshot, 42, frame_count + 1)
+
+    def test_start_at_frame_count_returns_completed_outcome(self):
+        snapshot = snapshot_frames(1)
+        frame_count = snapshot_num_frames(snapshot)
+
+        done, payload, next_frame, initial, is_exception = restore_async_continuation(snapshot, 42, frame_count)
+
+        assert done is True
+        assert payload == 42
+        assert next_frame == frame_count
+        assert initial is None
+        assert is_exception is False
 
 
 # ---------------------------------------------------------------------------
