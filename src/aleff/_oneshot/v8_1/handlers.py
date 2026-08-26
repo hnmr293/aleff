@@ -1,4 +1,4 @@
-from asyncio import Lock, iscoroutine
+from asyncio import Lock, iscoroutine, sleep
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from inspect import iscoroutinefunction
@@ -248,8 +248,58 @@ class _AwaitRequest:
         self.awaitable = awaitable
 
 
+class _BareYieldRequest:
+    """Requests resumption on the next event-loop turn without an awaitable."""
+
+    __slots__ = ()
+
+
+_BARE_YIELD_REQUEST = _BareYieldRequest()
+type _CoroutineRequest = _AwaitRequest | _BareYieldRequest
+
+
 def _is_effect_context(v: Any) -> TypeGuard[EffectContext[..., Any]]:
     return isinstance(v, EffectContext)
+
+
+def _is_coroutine_request(v: Any) -> TypeGuard[_CoroutineRequest]:
+    return isinstance(v, (_AwaitRequest, _BareYieldRequest))
+
+
+def _run_coroutine_in_bridge[V](coro: Coroutine[Any, Any, V]) -> V:
+    """Relay coroutine await requests and exceptions across a greenlet boundary."""
+    pending_exception: BaseException | None = None
+    parent = gl.getcurrent().parent
+    assert parent is not None
+
+    try:
+        while True:
+            if pending_exception is None:
+                awaitable = coro.send(None)
+            else:
+                exc = pending_exception
+                pending_exception = None
+                awaitable = coro.throw(exc)
+
+            # Futures yielded via __await__() are marked as blocking for
+            # asyncio.Task. Clear the marker before awaiting them externally.
+            if hasattr(awaitable, "_asyncio_future_blocking"):
+                awaitable._asyncio_future_blocking = False
+
+            request = _BARE_YIELD_REQUEST if awaitable is None else _AwaitRequest(awaitable)
+            try:
+                parent.switch(request)
+            except BaseException as exc:
+                pending_exception = exc
+    except StopIteration as exc:
+        return cast(V, exc.value)
+
+
+async def _resolve_coroutine_request(request: _CoroutineRequest) -> None:
+    if isinstance(request, _BareYieldRequest):
+        await sleep(0)
+    else:
+        await request.awaitable
 
 
 async def _run_handler_fn_in_bridge(
@@ -262,21 +312,7 @@ async def _run_handler_fn_in_bridge(
     and relaying ``await`` requests back to the event loop."""
 
     def _bridge() -> Any:
-        coro = fn(*args, **kwargs)
-        val: Any = None
-        parent = gl.getcurrent().parent
-        assert parent is not None
-        try:
-            while True:
-                awaitable = coro.send(val)
-                # asyncio Futures set _asyncio_future_blocking when
-                # yielded via __await__().  Reset it so the awaitable
-                # can be properly re-awaited in the outer event loop.
-                if hasattr(awaitable, "_asyncio_future_blocking"):
-                    awaitable._asyncio_future_blocking = False
-                val = parent.switch(_AwaitRequest(awaitable))
-        except StopIteration as e:
-            return e.value
+        return _run_coroutine_in_bridge(fn(*args, **kwargs))
 
     handler_fn_gl = gl.greenlet(_bridge)
     handler_fn_gl.gr_context = copy_context()
@@ -285,13 +321,13 @@ async def _run_handler_fn_in_bridge(
     while not handler_fn_gl.dead:
         if _is_effect_context(v):
             v = await _drive_async(handler_fn_gl, v, exclude_token=exclude_token)
-        elif isinstance(v, _AwaitRequest):
+        elif _is_coroutine_request(v):
             try:
-                result = await v.awaitable
+                await _resolve_coroutine_request(v)
             except BaseException as e:
-                v = handler_fn_gl.throw(type(e), e, e.__traceback__)
+                v = handler_fn_gl.throw(e)
             else:
-                v = handler_fn_gl.switch(result)
+                v = handler_fn_gl.switch(None)
         else:
             break
 
