@@ -678,6 +678,32 @@ inject_resume_value(_aleff_frame_t *frame, PyObject *value)
         if (stacktop < 0) {
             stacktop = value_stack_base;
         }
+#if PY_VERSION_HEX >= 0x030d0000
+        else {
+            /* A saved stack pointer on a non-CALL opcode means the frame was
+             * dispatched inline, exactly as CALL is: the opcode is a call, just
+             * not CALL itself -- CALL_FUNCTION_EX (f(*args) / f(**kwargs)) or
+             * CALL_KW (f(a=1)).  The frame must resume past it; leaving the
+             * instruction pointer alone re-executes the call with only the
+             * injected value on the stack.
+             *
+             * 3.12 gets away with it: prev_instr means "last executed", the
+             * eval loop resumes at prev_instr + 1, and CALL_FUNCTION_EX is one
+             * codeunit wide, so the implicit +1 happens to be right.  From 3.13
+             * instr_ptr means "about to execute" and the resume point is
+             * instr_ptr + return_offset.
+             *
+             * return_offset is CPython's own record of where to resume once the
+             * call returns, so it absorbs per-version cache sizes -- CALL_KW
+             * has no cache entries on 3.13 and three on 3.14.
+             *
+             * The stacktop < 0 side is left alone.  Those are frames suspended
+             * beneath an escaping C call (operator, attribute and subscript
+             * dispatch into Python), which is a separate unsupported case: the
+             * C frame is not in the chain at all. */
+            ALEFF_PREV_INSTR(frame) += frame->return_offset;
+        }
+#endif
     }
 
     #undef CALL_TOTAL_SIZE
