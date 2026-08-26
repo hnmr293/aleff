@@ -7,7 +7,6 @@ wind(before, after, *, auto_exit=True) establishes a dynamic extent guard:
 - The return value of before() is wrapped in a Ref for multi-shot safety
 """
 
-import asyncio
 from contextlib import contextmanager
 from typing import Any, Iterator
 
