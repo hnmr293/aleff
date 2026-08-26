@@ -310,15 +310,18 @@ class TestMultiShotDeepCalls:
 
 # ---------------------------------------------------------------------------
 # Multi-shot: call shapes in the captured chain
-#
-# A frame suspended mid-call has to be resumed just past the call opcode.
-# `f(a)` compiles to CALL, but `f(*args)` and `f(**kwargs)` compile to
-# CALL_FUNCTION_EX, and on 3.13+ `f(a=1)` compiles to CALL_KW -- each of which
-# has its own width and its own resume offset.
 # ---------------------------------------------------------------------------
 
 
 class TestMultiShotCallShapes:
+    """Multi-shot across calls that do not compile to a plain CALL.
+
+    A frame suspended mid-call is resumed just past the call opcode, and not
+    every call spells that opcode the same way: ``f(*args)`` and ``f(**kwargs)``
+    compile to CALL_FUNCTION_EX, and on 3.13+ a keyword call compiles to
+    CALL_KW.
+    """
+
     def test_multishot_through_star_args_call(self):
         """The continuation crosses a f(*args) call."""
         choose: Effect[[], int] = effect("choose")

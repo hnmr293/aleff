@@ -665,45 +665,59 @@ inject_resume_value(_aleff_frame_t *frame, PyObject *value)
          * 3.12 (prev_instr): points to the LAST executed instruction.
          *   Eval loop resumes at prev_instr + 1, so advance by SIZE - 1.
          * 3.13+ (instr_ptr): points to the NEXT instruction to execute.
-         *   Eval loop resumes at instr_ptr directly, so advance by SIZE. */
+         *   Eval loop resumes at instr_ptr directly, so advance by SIZE.
+         *
+         * The width is hardcoded rather than read from frame->return_offset,
+         * which is only meaningful while a call is in progress and is never
+         * cleared afterwards.  From 3.14 the eval loop saves a stack pointer
+         * even around escaping C calls, so stacktop >= 0 no longer implies
+         * this frame dispatched inline, and return_offset may still hold the
+         * width of some earlier call in the same frame. */
 #if PY_VERSION_HEX >= 0x030d0000
         ALEFF_PREV_INSTR(frame) += CALL_TOTAL_SIZE;
 #else
         ALEFF_PREV_INSTR(frame) += CALL_TOTAL_SIZE - 1;
 #endif
-    } else {
-        /* Non-CALL opcode.
-         * If stacktop >= 0, the eval loop saved a valid stack pointer.
-         * If stacktop == -1, this is an active frame; reset to base. */
+    }
+#if PY_VERSION_HEX >= 0x030d0000
+    else if (base_opcode == CALL_FUNCTION_EX || base_opcode == CALL_KW) {
+        /* Also calls, just not spelled CALL: f(*args) / f(**kwargs) compile to
+         * CALL_FUNCTION_EX, and a keyword call compiles to CALL_KW.  A frame
+         * suspended here must resume past the opcode, or it re-executes the
+         * call with nothing but the injected value on the stack.
+         *
+         * 3.12 needs no branch of its own: prev_instr means "last executed"
+         * and the eval loop resumes at prev_instr + 1, which is exactly past a
+         * one-codeunit CALL_FUNCTION_EX.  From 3.13 instr_ptr means "about to
+         * execute" and the resume point is instr_ptr + return_offset.
+         *
+         * return_offset is the width CPython itself recorded for this
+         * dispatch, so it absorbs per-version cache sizes -- CALL_KW has no
+         * cache entries on 3.13 and three on 3.14.  Reading it is sound here
+         * precisely because the opcode identifies the frame as mid-call, so
+         * the value belongs to the call being resumed.
+         *
+         * stacktop < 0 means the call escaped into C instead.  The C frame is
+         * then missing from the captured chain entirely, which is a separate
+         * unsupported case; treat it as any other escaping call. */
         if (stacktop < 0) {
             stacktop = value_stack_base;
         }
-#if PY_VERSION_HEX >= 0x030d0000
         else {
-            /* A saved stack pointer on a non-CALL opcode means the frame was
-             * dispatched inline, exactly as CALL is: the opcode is a call, just
-             * not CALL itself -- CALL_FUNCTION_EX (f(*args) / f(**kwargs)) or
-             * CALL_KW (f(a=1)).  The frame must resume past it; leaving the
-             * instruction pointer alone re-executes the call with only the
-             * injected value on the stack.
-             *
-             * 3.12 gets away with it: prev_instr means "last executed", the
-             * eval loop resumes at prev_instr + 1, and CALL_FUNCTION_EX is one
-             * codeunit wide, so the implicit +1 happens to be right.  From 3.13
-             * instr_ptr means "about to execute" and the resume point is
-             * instr_ptr + return_offset.
-             *
-             * return_offset is CPython's own record of where to resume once the
-             * call returns, so it absorbs per-version cache sizes -- CALL_KW
-             * has no cache entries on 3.13 and three on 3.14.
-             *
-             * The stacktop < 0 side is left alone.  Those are frames suspended
-             * beneath an escaping C call (operator, attribute and subscript
-             * dispatch into Python), which is a separate unsupported case: the
-             * C frame is not in the chain at all. */
             ALEFF_PREV_INSTR(frame) += frame->return_offset;
         }
+    }
 #endif
+    else {
+        /* Not a call at all: the frame is suspended beneath an escaping C
+         * call that dispatched back into Python -- operator, attribute or
+         * subscript lookup.  That C frame is absent from the captured chain,
+         * so the continuation cannot be replayed faithfully; this is a known
+         * unsupported shape.  Reset an active frame's stack to base and leave
+         * the instruction pointer alone. */
+        if (stacktop < 0) {
+            stacktop = value_stack_base;
+        }
     }
 
     #undef CALL_TOTAL_SIZE
