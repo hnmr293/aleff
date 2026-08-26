@@ -36,10 +36,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    # greenlet 3.4.0 does not provide cp314t wheels for Windows.
-    # Pin <3.4.0 on Windows + Python 3.14+ until greenlet ships those wheels.
-    "greenlet>=3.3.2,<3.4.0; sys_platform == 'win32' and python_version >= '3.14'",
-    "greenlet>=3.3.2; sys_platform != 'win32' or python_version < '3.14'",
+    "greenlet>=3.3.2; python_version < '3.14'",
+    "greenlet>=3.3.2,<3.4.0; python_full_version >= '3.14' and python_full_version < '3.14.4'",
+    "greenlet>=3.5.5; python_full_version >= '3.14.4'",
 ]
 
 [project.urls]
@@ -76,7 +75,13 @@ build = ["cp312-*", "cp313-*", "cp314-*", "cp314t-*"]
 skip = ["*-manylinux_i686", "*-musllinux_*", "*-win32"]
 build-frontend = "build[uv]"
 test-command = "pytest {project}/tests -q"
-test-requires = ["pytest", "pytest-asyncio", "greenlet>=3.3.2"]
+test-requires = [
+    "pytest",
+    "pytest-asyncio",
+    "greenlet>=3.3.2; python_version < '3.14'",
+    "greenlet>=3.3.2,<3.4.0; python_full_version >= '3.14' and python_full_version < '3.14.4'",
+    "greenlet>=3.5.5; python_full_version >= '3.14.4'",
+]
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64"]
