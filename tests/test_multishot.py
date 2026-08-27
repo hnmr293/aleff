@@ -1008,7 +1008,7 @@ class TestMultiShotAsync:
         async def values():
             yield choose()
 
-        padding = "\n".join(["        total += 0"] * 300)
+        padding = "\n".join(["        total += 0"] * 14_000)
         source = f"""
 async def run():
     total = 0
@@ -1032,18 +1032,26 @@ async def run():
         exec(source, namespace)
         run = namespace["run"]
         instructions = list(dis.get_instructions(run))
+        maximum_extended_arg_run = 0
+        extended_arg_run = 0
+        for instruction in instructions:
+            if instruction.opname == "EXTENDED_ARG":
+                extended_arg_run += 1
+                maximum_extended_arg_run = max(maximum_extended_arg_run, extended_arg_run)
+            else:
+                extended_arg_run = 0
 
-        assert any(instruction.opname == "EXTENDED_ARG" for instruction in instructions)
+        assert maximum_extended_arg_run >= 2
         assert any(
             instruction.opcode in dis.hasjrel
             and isinstance(instruction.argval, int)
             and instruction.argval > instruction.offset
             and instruction.arg is not None
-            and instruction.arg > 255
+            and instruction.arg > 65_535
             for instruction in instructions
         )
         assert any(
-            instruction.opname.startswith("JUMP_BACKWARD") and instruction.arg is not None and instruction.arg > 255
+            instruction.opname.startswith("JUMP_BACKWARD") and instruction.arg is not None and instruction.arg > 65_535
             for instruction in instructions
         )
         assert await h(run) == [1, 2]
