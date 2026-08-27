@@ -5,6 +5,8 @@ effect handlers in all supported scenarios.
 """
 
 from asyncio import sleep
+from gc import collect
+from sys import getrefcount
 from typing import cast
 
 import pytest
@@ -643,6 +645,74 @@ class TestEffectsDuringAbortCleanup:
         assert h(caller) == "original-abort"
         assert log == ["after: step1", "cleanup-handler"]
 
+    def test_cleanup_effect_continuation_can_resume_multiple_times(self):
+        """A cleanup effect snapshot can be restored for multiple resumptions."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[], str] = effect("cleanup")
+        h: Handler[str] = create_handler(ask, cleanup)
+
+        log: list[str] = []
+
+        @h.on(ask)
+        def _ask(k: Resume[str, str]) -> str:
+            return "original-abort"
+
+        @h.on(cleanup)
+        def _cleanup(k: Resume[str, str]) -> str:
+            log.append(f"resume result: {k('first')}")
+            log.append(f"resume result: {k('second')}")
+            return "cleanup-handled"
+
+        def after() -> None:
+            cleanup()
+            log.append("after completed")
+
+        def caller() -> str:
+            try:
+                with wind(after=after):
+                    return ask()
+            except BaseException:
+                log.append("abort caught")
+                return "caller completed"
+
+        collect()
+        refs_before = (getrefcount(caller), getrefcount(caller.__code__))
+        assert h(caller) == "original-abort"
+        collect()
+        refs_after = (getrefcount(caller), getrefcount(caller.__code__))
+
+        assert refs_after == refs_before
+        assert log == [
+            "after completed",
+            "abort caught",
+            "resume result: caller completed",
+            "after completed",
+            "abort caught",
+            "resume result: caller completed",
+        ]
+
+    def test_cleanup_effect_snapshots_can_be_repeatedly_destroyed(self):
+        """Repeated abort cleanup snapshots release safely during collection."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[], None] = effect("cleanup")
+        h: Handler[str] = create_handler(ask, cleanup)
+
+        @h.on(ask)
+        def _ask(k: Resume[str, str]) -> str:
+            return "aborted"
+
+        @h.on(cleanup)
+        def _cleanup(k: Resume[None, str]) -> str:
+            return k(None)
+
+        def caller() -> str:
+            with wind(after=lambda: cleanup()):
+                return ask()
+
+        for _ in range(50):
+            assert h(caller) == "aborted"
+            collect()
+
 
 class TestAsyncEffectsDuringAbortCleanup:
     @pytest.mark.asyncio
@@ -752,6 +822,53 @@ class TestAsyncEffectsDuringAbortCleanup:
 
         assert await h(caller) == "original-abort"
         assert log == ["after: step1", "cleanup-handler"]
+
+    @pytest.mark.asyncio
+    async def test_async_cleanup_effect_continuation_can_resume_multiple_times(self):
+        """An async cleanup effect snapshot supports multiple resumptions."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[], str] = effect("cleanup")
+        h: AsyncHandler[str] = create_async_handler(ask, cleanup)
+
+        log: list[str] = []
+
+        @h.on(ask)
+        async def _ask(k: ResumeAsync[str, str]) -> str:
+            return "original-abort"
+
+        @h.on(cleanup)
+        async def _cleanup(k: ResumeAsync[str, str]) -> str:
+            log.append(f"resume result: {await k('first')}")
+            log.append(f"resume result: {await k('second')}")
+            return "cleanup-handled"
+
+        def after() -> None:
+            cleanup()
+            log.append("after completed")
+
+        def caller() -> str:
+            try:
+                with wind(after=after):
+                    return ask()
+            except BaseException:
+                log.append("abort caught")
+                return "caller completed"
+
+        collect()
+        refs_before = (getrefcount(caller), getrefcount(caller.__code__))
+        assert await h(caller) == "original-abort"
+        collect()
+        refs_after = (getrefcount(caller), getrefcount(caller.__code__))
+
+        assert refs_after == refs_before
+        assert log == [
+            "after completed",
+            "abort caught",
+            "resume result: caller completed",
+            "after completed",
+            "abort caught",
+            "resume result: caller completed",
+        ]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("delay", [0, 0.001], ids=["bare-yield", "future"])
