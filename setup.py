@@ -18,8 +18,6 @@ class BuildExt(build_ext):
         if self.compiler.compiler_type == "msvc":
             for ext in self.extensions:
                 ext.extra_compile_args = ["/std:c17"]
-                if os.environ.get("ALEFF_MSVC_NO_OPT") == "1":
-                    ext.extra_compile_args.extend(["/Od", "/GL-"])
         else:
             for ext in self.extensions:
                 ext.extra_compile_args = ["-std=c2x"]

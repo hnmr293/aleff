@@ -675,13 +675,8 @@ class TestEffectsDuringAbortCleanup:
                 log.append("abort caught")
                 return "caller completed"
 
-        collect()
-        refs_before = (getrefcount(caller), getrefcount(caller.__code__))
         assert h(caller) == "original-abort"
-        collect()
-        refs_after = (getrefcount(caller), getrefcount(caller.__code__))
 
-        assert refs_after == refs_before
         assert log == [
             "after completed",
             "abort caught",

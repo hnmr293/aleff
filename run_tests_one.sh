@@ -15,18 +15,6 @@ case "$(uname -s)" in
     MINGW*|MSYS*)
         # Windows: use setuptools (MSVC) via build_ext --inplace
         uv run --python "$ver" --with setuptools python setup.py build_ext --inplace
-        if [[ "$ver" == *t ]]; then
-            set +e
-            uv run --quiet --python "$ver" pytest \
-                tests/test_exception.py::TestEffectsDuringAbortCleanup::test_cleanup_effect_continuation_can_resume_multiple_times \
-                -q
-            optimized_status=$?
-            set -e
-            echo "Windows optimized diagnostic exit: $optimized_status"
-
-            export ALEFF_MSVC_NO_OPT=1
-            uv run --python "$ver" --with setuptools python setup.py build_ext --inplace --force
-        fi
         ;;
     *)
         PYTHON="uv run --python $ver python" make debug
