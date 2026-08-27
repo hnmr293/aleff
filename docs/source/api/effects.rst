@@ -1,6 +1,25 @@
 Effects & Handlers
 ==================
 
+Prohibited callback contexts
+----------------------------
+
+.. warning::
+
+   Effects must not be performed, and :class:`Resume` and
+   :class:`ResumeAsync` continuations must not be invoked, from any of the
+   following callback contexts:
+
+   * audit hooks;
+   * tracing, profiling, or ``sys.monitoring`` callbacks;
+   * signal handlers;
+   * weak-reference callbacks;
+   * garbage-collector callbacks;
+   * ``__del__`` methods or other finalizers;
+   * ``atexit`` callbacks; or
+   * GUI callbacks, event-loop callbacks, or callbacks running on another
+     thread.
+
 def effect
 ----------
 
