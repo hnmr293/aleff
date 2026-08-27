@@ -10,6 +10,12 @@ ver="$1"
 
 echo "===== Python $ver ====="
 
+# greenlet's free-threaded support currently requires disabling CPython's
+# thread-local bytecode cache to avoid a known interpreter crash.
+if [[ "$ver" == *t ]]; then
+    export PYTHON_TLBC=0
+fi
+
 # Build C extension
 case "$(uname -s)" in
     MINGW*|MSYS*)

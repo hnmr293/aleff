@@ -43,6 +43,12 @@ print(h(lambda: [choose("A", "B") + choose("C", "D")]))
 - greenlet >= 3.3.2
 - Linux / macOS / Windows
 
+Free-threaded CPython 3.14 must be started with `PYTHON_TLBC=0`. This disables
+the thread-local bytecode cache to avoid a [known greenlet crash][greenlet-ft]
+while free-threaded support remains experimental.
+
+[greenlet-ft]: https://greenlet.readthedocs.io/en/stable/caveats.html#free-threading-is-experimental
+
 ## Installation
 
 ```sh
