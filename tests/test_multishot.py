@@ -5,6 +5,8 @@ each time resuming from the same suspension point with independent state.
 """
 
 import asyncio
+from collections.abc import Generator
+import dis
 import subprocess
 import sys
 import textwrap
@@ -81,7 +83,7 @@ class TestMultiShotBasic:
 
         assert h(run) == [(1, "KeyError", "ValueError"), (2, "KeyError", "ValueError")]
 
-    def test_sync_generator_frame_is_restored_with_generator_ownership(self):
+    def test_sync_generator_frame_is_rejected_without_crashing(self):
         code = textwrap.dedent(
             """
             from aleff import Handler, Resume, create_handler, effect
@@ -102,7 +104,12 @@ class TestMultiShotBasic:
                 iterator = values()
                 return [next(iterator), next(iterator)]
 
-            assert handler(run) == [1, 11, 2, 12]
+            try:
+                handler(run)
+            except RuntimeError as exc:
+                assert str(exc) == "synchronous generator frames are not supported by multi-shot restoration"
+            else:
+                raise AssertionError("expected an explicit unsupported-frame error")
             """
         )
 
@@ -323,7 +330,7 @@ class TestMultiShotNested:
         def _get_base(k: Resume[int, list[int]]):
             return k(100)
 
-        def inner():
+        def inner() -> list[int]:
             h_inner: Handler[list[int]] = create_handler(choose)
 
             @h_inner.on(choose)
@@ -880,7 +887,7 @@ class TestMultiShotAsync:
             return await k(1) + await k(2)
 
         @types.coroutine
-        def inner():
+        def inner() -> Generator[Any, Any, int]:
             value = choose()
             if False:
                 yield None
@@ -901,7 +908,7 @@ class TestMultiShotAsync:
             return await k(1) + await k(2)
 
         @types.coroutine
-        def inner():
+        def inner() -> Generator[Any, Any, int]:
             value = choose()
             yield None
             return value
@@ -910,6 +917,31 @@ class TestMultiShotAsync:
             return [await inner()]
 
         assert await h(run) == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_generator_based_coroutine_await_and_error_after_effect_per_shot(self):
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int | str]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int | str]]):
+            return await k(1) + await k(2)
+
+        @types.coroutine
+        def inner() -> Generator[Any, Any, int]:
+            value = choose()
+            yield from asyncio.sleep(0).__await__()
+            if value == 2:
+                raise ValueError("bad shot: 2")
+            return value
+
+        async def run() -> list[int | str]:
+            try:
+                return [await inner()]
+            except ValueError as exc:
+                return [str(exc)]
+
+        assert await h(run) == [1, "bad shot: 2"]
 
     def test_async_generator_frame_is_restored_with_async_generator_ownership(self):
         code = textwrap.dedent(
@@ -935,6 +967,128 @@ class TestMultiShotAsync:
 
             async def main():
                 assert await handler(run) == [1, 11, 2, 12]
+
+            asyncio.run(main())
+            """
+        )
+
+        result = subprocess.run([sys.executable, "-c", code], text=True, capture_output=True)
+
+        assert result.returncode == 0, result.stderr
+
+    @pytest.mark.asyncio
+    async def test_async_generator_effect_is_restored_through_async_for(self):
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]):
+            return await k(1) + await k(2)
+
+        async def values():
+            yield choose()
+
+        async def run() -> list[int]:
+            result: tuple[int, ...] = ()
+            async for value in values():
+                result += (value,)
+            return list(result)
+
+        assert await h(run) == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_async_generator_effect_with_extended_jump_arguments(self):
+        choose: Effect[[], int] = effect("choose")
+        h: AsyncHandler[list[int]] = create_async_handler(choose)
+
+        @h.on(choose)
+        async def _choose(k: ResumeAsync[int, list[int]]):
+            return await k(1) + await k(2)
+
+        async def values():
+            yield choose()
+
+        padding = "\n".join(["        total += 0"] * 300)
+        source = f"""
+async def run():
+    total = 0
+    if padding_enabled:
+{padding}
+    while total < 1:
+{padding}
+        total += 1
+    try:
+{padding}
+        raise ValueError("enter exception handler")
+    except ValueError:
+        iterator = values()
+        return [await anext(iterator)]
+"""
+        namespace: dict[str, Any] = {
+            "anext": anext,
+            "padding_enabled": False,
+            "values": values,
+        }
+        exec(source, namespace)
+        run = namespace["run"]
+        instructions = list(dis.get_instructions(run))
+
+        assert any(instruction.opname == "EXTENDED_ARG" for instruction in instructions)
+        assert any(
+            instruction.opcode in dis.hasjrel
+            and isinstance(instruction.argval, int)
+            and instruction.argval > instruction.offset
+            and instruction.arg is not None
+            and instruction.arg > 255
+            for instruction in instructions
+        )
+        assert any(
+            instruction.opname.startswith("JUMP_BACKWARD") and instruction.arg is not None and instruction.arg > 255
+            for instruction in instructions
+        )
+        assert await h(run) == [1, 2]
+
+    def test_async_generator_asend_and_athrow_are_restored_per_shot(self):
+        code = textwrap.dedent(
+            """
+            import asyncio
+            from aleff import create_async_handler, effect
+
+            choose = effect("choose")
+            handler = create_async_handler(choose)
+
+            @handler.on(choose)
+            async def handle_choose(k):
+                return await k(1) + await k(2)
+
+            async def asend_values():
+                sent = yield 0
+                value = choose()
+                yield sent + value
+
+            async def run_asend():
+                iterator = asend_values()
+                first = await anext(iterator)
+                second = await iterator.asend(10)
+                await iterator.aclose()
+                return [(first, second)]
+
+            async def athrow_values():
+                try:
+                    yield 0
+                except ValueError:
+                    yield choose()
+
+            async def run_athrow():
+                iterator = athrow_values()
+                first = await anext(iterator)
+                second = await iterator.athrow(ValueError("injected"))
+                await iterator.aclose()
+                return [(first, second)]
+
+            async def main():
+                assert await handler(run_asend) == [(0, 11), (0, 12)]
+                assert await handler(run_athrow) == [(0, 1), (0, 2)]
 
             asyncio.run(main())
             """

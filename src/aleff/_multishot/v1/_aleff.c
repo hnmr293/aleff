@@ -15,7 +15,9 @@
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <compile.h>
 #include <frameobject.h>
+#include <limits.h>
 #include <stddef.h>
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -182,6 +184,7 @@ _aleff_init_opcode_deopt(void)
  * ======================================================================== */
 
 typedef uint16_t _aleff_codeunit;
+#define ALEFF_CODE_CODE(code) ((_aleff_codeunit *)((code)->co_code_adaptive))
 
 #if PY_VERSION_HEX >= 0x030e0000
 /* Python 3.14+: _PyStackRef fields */
@@ -417,6 +420,9 @@ typedef struct {
     int num_slots;          /* number of localsplus slots */
     PyObject *handled_exception;  /* effective handled exception, or nullptr */
     PyObject *original_owner;  /* generator/coroutine owner, or nullptr */
+    int send_stack_depth;  /* operand depth at an active SEND, or -1 */
+    int send_target_offset;  /* bytecode offset of END_SEND, or -1 */
+    int send_value_needs_pop;  /* C-level SEND still owns its sent value */
 } _aleff_frame_copy_t;
 
 typedef struct {
@@ -487,9 +493,17 @@ static PyTypeObject FrameSnapshotType = {
  * frame_obj is set to nullptr (not shared with the original).
  */
 static _aleff_frame_copy_t
-copy_single_frame(_aleff_frame_t *src)
+copy_single_frame(_aleff_frame_t *src, int send_stack_depth, int send_target_offset)
 {
-    _aleff_frame_copy_t result = {nullptr, 0, nullptr, nullptr};
+    _aleff_frame_copy_t result = {
+        .frame = nullptr,
+        .num_slots = 0,
+        .handled_exception = nullptr,
+        .original_owner = nullptr,
+        .send_stack_depth = send_stack_depth,
+        .send_target_offset = send_target_offset,
+        .send_value_needs_pop = -1,
+    };
 
     PyCodeObject *code = _aleff_frame_get_code(src);
     int num_slots = _aleff_frame_num_slots(code);
@@ -532,32 +546,33 @@ copy_single_frame(_aleff_frame_t *src)
     /* owner: mark as owned by thread (will be cleaned up manually) */
     dst->owner = FRAME_OWNED_BY_THREAD;
 
-    /* INCREF localsplus entries.
-     *
-     * CPython 3.12 sets stacktop = -1 while a frame is actively executing
-     * (the real stack pointer is kept in a register). stacktop is only
-     * written with a valid value when the frame is deactivated (yield, etc.).
-     *
-     * Since snapshot_frames() is called from within the eval loop,
-     * stacktop will be -1 for active frames. In this case we must
-     * INCREF all slots (locals + cells + value stack).
-     *
-     * When stacktop >= 0 (deactivated frame), only slots 0..stacktop-1
-     * are valid; the rest may contain stale pointers from POP(). */
-    /* INCREF localsplus entries.
-     *
-     * CPython 3.12 sets stacktop = -1 while a frame is actively executing
-     * (the real stack pointer lives in a register). In this case the
-     * value stack slots still contain valid PyObject pointers.
-     *
-     * When stacktop >= 0 (deactivated frame), slots 0..stacktop-1 are
-     * valid. Slots beyond stacktop may contain stale pointers left by
-     * the eval loop's POP() macro (which doesn't null popped slots). */
     /* When stacktop >= 0: slots 0..stacktop-1 are valid.
      * When stacktop == -1 (active frame): only locals/cells/freevars
      * (0..co_nlocalsplus-1) are safe. The value stack portion may
      * contain stale pointers from the eval loop. */
     int stacktop = _aleff_frame_stacktop(dst);
+    if (send_stack_depth >= 0) {
+        int send_entry_top = code->co_nlocalsplus + send_stack_depth;
+        if (send_entry_top > num_slots) {
+            PyErr_SetString(PyExc_RuntimeError, "active SEND stack exceeds frame capacity");
+            goto frame_header_error;
+        }
+        if (stacktop < 0) {
+            stacktop = send_entry_top;
+            _aleff_frame_set_stacktop(dst, stacktop);
+            result.send_value_needs_pop = 1;
+        }
+        else if (stacktop == send_entry_top) {
+            result.send_value_needs_pop = 1;
+        }
+        else if (stacktop == send_entry_top - 1) {
+            result.send_value_needs_pop = 0;
+        }
+        else {
+            PyErr_SetString(PyExc_RuntimeError, "operand stack does not match active SEND");
+            goto frame_header_error;
+        }
+    }
     int valid_slots = stacktop >= 0
         ? stacktop
         : code->co_nlocalsplus;
@@ -570,6 +585,15 @@ copy_single_frame(_aleff_frame_t *src)
 
     result.frame = dst;
     result.num_slots = num_slots;
+    return result;
+
+frame_header_error:
+    Py_XDECREF(ALEFF_GET_EXECUTABLE(dst));
+    Py_XDECREF(ALEFF_GET_FUNCOBJ(dst));
+    Py_XDECREF(dst->f_globals);
+    Py_XDECREF(dst->f_builtins);
+    Py_XDECREF(dst->f_locals);
+    PyMem_Free(dst);
     return result;
 }
 
@@ -647,7 +671,7 @@ create_snapshot(PyFrameObject *boundary_frame, int max_depth)
         for (int i = 0; i < count; i++) {
             _aleff_frame_t *internal = _aleff_frame_from_pyframe(f);
 
-            snapshot->frames[i] = copy_single_frame(internal);
+            snapshot->frames[i] = copy_single_frame(internal, -1, -1);
             if (snapshot->frames[i].frame == nullptr) {
                 snapshot->num_frames = i;
                 Py_DECREF(f);
@@ -973,7 +997,29 @@ generator_owner_from_frame_copy(
      * returned by an inlined child coroutine must resume after SEND, exactly
      * as CPython's RETURN_VALUE path does via the caller's return_offset. */
     if (resume_from_coroutine) {
-        ALEFF_PREV_INSTR(dst) += dst->return_offset;
+        if (src_copy->send_target_offset >= 0) {
+            int stacktop = _aleff_frame_stacktop(dst);
+            int minimum_top = code->co_nlocalsplus + 1 + src_copy->send_value_needs_pop;
+            if (stacktop < minimum_top) {
+                PyErr_SetString(PyExc_RuntimeError, "invalid operand stack for SEND completion");
+                Py_DECREF(py_frame);
+                return nullptr;
+            }
+            if (src_copy->send_value_needs_pop) {
+                stacktop--;
+                Py_XDECREF(ALEFF_LOCALSPLUS_GET(dst, stacktop));
+                ALEFF_LOCALSPLUS_SET(dst, stacktop, nullptr);
+                _aleff_frame_set_stacktop(dst, stacktop);
+            }
+#if PY_VERSION_HEX >= 0x030d0000
+            ALEFF_PREV_INSTR(dst) = ALEFF_CODE_CODE(code) + src_copy->send_target_offset / 2;
+#else
+            ALEFF_PREV_INSTR(dst) = ALEFF_CODE_CODE(code) + src_copy->send_target_offset / 2 - 1;
+#endif
+        }
+        else {
+            ALEFF_PREV_INSTR(dst) += dst->return_offset;
+        }
     }
     else {
         prepare_resume_frame(dst);
@@ -1081,6 +1127,16 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
     if (num <= 0) {
         PyErr_SetString(PyExc_ValueError, "no frames to restore");
         return nullptr;
+    }
+    for (int i = skip; i < snapshot->num_frames; i++) {
+        PyCodeObject *code = _aleff_frame_get_code(snapshot->frames[i].frame);
+        if (code->co_flags & CO_GENERATOR) {
+            PyErr_SetString(
+                PyExc_RuntimeError,
+                "synchronous generator frames are not supported by multi-shot restoration"
+            );
+            return nullptr;
+        }
     }
 
     PyThreadState *tstate = PyThreadState_Get();
@@ -1385,6 +1441,417 @@ PyDoc_STRVAR(snapshot_from_frame_doc,
 "  depth: Maximum number of frames to capture. -1 for all.\n"
 "  handled_exception: Active exception from the suspended caller, if any.\n");
 
+static int
+_aleff_read_exception_varint(
+    const unsigned char **cursor,
+    const unsigned char *end,
+    int *value
+)
+{
+    if (*cursor >= end) {
+        PyErr_SetString(PyExc_RuntimeError, "truncated exception table");
+        return -1;
+    }
+    unsigned int result = *(*cursor)++ & 63U;
+    while ((*cursor)[-1] & 64U) {
+        if (*cursor >= end || result > ((unsigned int)INT_MAX >> 6)) {
+            PyErr_SetString(PyExc_RuntimeError, "invalid exception table varint");
+            return -1;
+        }
+        result = (result << 6) | (*(*cursor)++ & 63U);
+    }
+    *value = (int)result;
+    return 0;
+}
+
+typedef struct {
+    int start;
+    int end;
+    int target;
+    int depth;
+    int lasti;
+} _aleff_exception_entry_t;
+
+static int
+_aleff_record_stack_depth(
+    int offset,
+    int depth,
+    int code_size,
+    int stack_size,
+    int *depths,
+    int *queue,
+    int *queue_end
+)
+{
+    if (
+        offset < 0 || offset >= code_size || offset % 2 != 0 ||
+        depth < 0 || depth > stack_size
+    ) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid bytecode stack-depth edge");
+        return -1;
+    }
+    int index = offset / 2;
+    if (depths[index] == INT_MIN) {
+        depths[index] = depth;
+        queue[(*queue_end)++] = offset;
+    }
+    else if (depths[index] != depth) {
+        PyErr_SetString(PyExc_RuntimeError, "inconsistent bytecode stack depth");
+        return -1;
+    }
+    return 0;
+}
+
+static int
+_aleff_opcode_is_jump(int opcode)
+{
+    switch (opcode) {
+        case FOR_ITER:
+        case JUMP_FORWARD:
+        case POP_JUMP_IF_FALSE:
+        case POP_JUMP_IF_TRUE:
+        case POP_JUMP_IF_NOT_NONE:
+        case POP_JUMP_IF_NONE:
+        case JUMP_BACKWARD_NO_INTERRUPT:
+        case JUMP_BACKWARD:
+        case SEND:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int
+_aleff_opcode_is_backward_jump(int opcode)
+{
+    return opcode == JUMP_BACKWARD || opcode == JUMP_BACKWARD_NO_INTERRUPT;
+}
+
+static int
+_aleff_opcode_is_unconditional_jump(int opcode)
+{
+    return opcode == JUMP_FORWARD || _aleff_opcode_is_backward_jump(opcode);
+}
+
+static int
+_aleff_opcode_is_terminal(int opcode)
+{
+    switch (opcode) {
+        case RETURN_VALUE:
+#ifdef RETURN_CONST
+        case RETURN_CONST:
+#endif
+        case RAISE_VARARGS:
+        case RERAISE:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int
+_aleff_instruction_arg(
+    const unsigned char *bytecode,
+    int offset,
+    uint32_t *oparg
+)
+{
+    uint32_t result = bytecode[offset + 1];
+    int shift = 8;
+    for (int previous = offset - 2; previous >= 0 && bytecode[previous] == EXTENDED_ARG;
+         previous -= 2) {
+        if (shift >= 32) {
+            PyErr_SetString(PyExc_RuntimeError, "bytecode argument is too large");
+            return -1;
+        }
+        result |= (uint32_t)bytecode[previous + 1] << shift;
+        shift += 8;
+    }
+    *oparg = result;
+    return 0;
+}
+
+static int
+load_send_metadata(
+    PyFrameObject *frame,
+    int *stack_depth,
+    int *target_offset
+)
+{
+    int result = -1;
+    PyCodeObject *code = nullptr;
+    PyObject *code_bytes = nullptr;
+    int *depths = nullptr;
+    int *queue = nullptr;
+    _aleff_exception_entry_t *exception_entries = nullptr;
+    int code_size;
+    int instruction_count;
+    int exception_count = 0;
+
+    *stack_depth = -1;
+    *target_offset = -1;
+    code = (PyCodeObject *)PyFrame_GetCode(frame);
+    if (code == nullptr) {
+        goto done;
+    }
+    code_bytes = PyCode_GetCode(code);
+    if (code_bytes == nullptr) {
+        goto done;
+    }
+    Py_ssize_t byte_count = PyBytes_GET_SIZE(code_bytes);
+    if (byte_count <= 0 || byte_count > INT_MAX || byte_count % 2 != 0) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid frame bytecode size");
+        goto done;
+    }
+    code_size = (int)byte_count;
+    const unsigned char *bytecode = (const unsigned char *)PyBytes_AS_STRING(code_bytes);
+    int send_offset = PyFrame_GetLasti(frame);
+    if (
+        send_offset < 0 || send_offset >= code_size || send_offset % 2 != 0 ||
+        bytecode[send_offset] != SEND
+    ) {
+        result = 0;
+        goto done;
+    }
+
+    uint32_t send_arg;
+    if (_aleff_instruction_arg(bytecode, send_offset, &send_arg) < 0) {
+        goto done;
+    }
+    int send_next = send_offset + 2;
+    while (send_next < code_size && bytecode[send_next] == CACHE) {
+        send_next += 2;
+    }
+    if (
+        send_arg > (uint32_t)((code_size - send_next) / 2) ||
+        send_next + (int)(send_arg * 2U) >= code_size
+    ) {
+        PyErr_SetString(PyExc_RuntimeError, "SEND jump exceeds frame bytecode");
+        goto done;
+    }
+    int send_target = send_next + (int)(send_arg * 2U);
+    if (bytecode[send_target] != END_SEND) {
+        PyErr_SetString(PyExc_RuntimeError, "SEND jump does not target END_SEND");
+        goto done;
+    }
+
+    instruction_count = code_size / 2;
+    depths = PyMem_Malloc((size_t)instruction_count * sizeof(*depths));
+    queue = PyMem_Malloc((size_t)instruction_count * sizeof(*queue));
+    if (depths == nullptr || queue == nullptr) {
+        PyErr_NoMemory();
+        goto done;
+    }
+    for (int i = 0; i < instruction_count; i++) {
+        depths[i] = INT_MIN;
+    }
+
+    PyObject *exception_table = code->co_exceptiontable;
+    if (!PyBytes_Check(exception_table)) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid code exception table");
+        goto done;
+    }
+    Py_ssize_t exception_size = PyBytes_GET_SIZE(exception_table);
+    if (exception_size > INT_MAX) {
+        PyErr_SetString(PyExc_RuntimeError, "exception table is too large");
+        goto done;
+    }
+    if (exception_size > 0) {
+        Py_ssize_t maximum_entries = exception_size / 4 + 1;
+        exception_entries = PyMem_Malloc(
+            (size_t)maximum_entries * sizeof(*exception_entries)
+        );
+        if (exception_entries == nullptr) {
+            PyErr_NoMemory();
+            goto done;
+        }
+        const unsigned char *cursor =
+            (const unsigned char *)PyBytes_AS_STRING(exception_table);
+        const unsigned char *exception_end = cursor + exception_size;
+        while (cursor < exception_end) {
+            int start_units;
+            int length_units;
+            int target_units;
+            int depth_lasti;
+            if (
+                _aleff_read_exception_varint(&cursor, exception_end, &start_units) < 0 ||
+                _aleff_read_exception_varint(&cursor, exception_end, &length_units) < 0 ||
+                _aleff_read_exception_varint(&cursor, exception_end, &target_units) < 0 ||
+                _aleff_read_exception_varint(&cursor, exception_end, &depth_lasti) < 0
+            ) {
+                goto done;
+            }
+            if (
+                start_units > INT_MAX / 2 ||
+                length_units > INT_MAX / 2 - start_units ||
+                target_units > INT_MAX / 2
+            ) {
+                PyErr_SetString(PyExc_RuntimeError, "exception table entry is too large");
+                goto done;
+            }
+            _aleff_exception_entry_t *entry = &exception_entries[exception_count++];
+            entry->start = start_units * 2;
+            entry->end = entry->start + length_units * 2;
+            entry->target = target_units * 2;
+            entry->depth = depth_lasti >> 1;
+            entry->lasti = depth_lasti & 1;
+            if (
+                entry->end < entry->start || entry->end > code_size ||
+                entry->target < 0 || entry->target >= code_size ||
+                entry->depth < 0 ||
+                entry->depth > code->co_stacksize - 1 - entry->lasti
+            ) {
+                PyErr_SetString(PyExc_RuntimeError, "invalid exception table entry");
+                goto done;
+            }
+        }
+    }
+
+    int entry_offset = -1;
+    for (int offset = 0; offset < code_size; offset += 2) {
+        if (bytecode[offset] == RESUME && bytecode[offset + 1] == 0) {
+            entry_offset = offset;
+            break;
+        }
+    }
+    if (entry_offset < 0) {
+        PyErr_SetString(PyExc_RuntimeError, "frame bytecode has no entry RESUME");
+        goto done;
+    }
+
+    int queue_start = 0;
+    int queue_end = 0;
+    if (
+        _aleff_record_stack_depth(
+            entry_offset,
+            0,
+            code_size,
+            code->co_stacksize,
+            depths,
+            queue,
+            &queue_end
+        ) < 0
+    ) {
+        goto done;
+    }
+    while (queue_start < queue_end) {
+        int offset = queue[queue_start++];
+        int depth = depths[offset / 2];
+        int opcode = bytecode[offset];
+        uint32_t unsigned_arg;
+        if (_aleff_instruction_arg(bytecode, offset, &unsigned_arg) < 0) {
+            goto done;
+        }
+        if (unsigned_arg > INT_MAX) {
+            PyErr_SetString(PyExc_RuntimeError, "bytecode argument exceeds stack-effect API");
+            goto done;
+        }
+        int oparg = (int)unsigned_arg;
+        int next_offset = offset + 2;
+        while (next_offset < code_size && bytecode[next_offset] == CACHE) {
+            next_offset += 2;
+        }
+        int is_jump = _aleff_opcode_is_jump(opcode);
+        if (is_jump) {
+            int jump_effect = PyCompile_OpcodeStackEffectWithJump(opcode, oparg, 1);
+            if (jump_effect == PY_INVALID_STACK_EFFECT) {
+                PyErr_SetString(PyExc_RuntimeError, "invalid jump opcode stack effect");
+                goto done;
+            }
+            int64_t jump_distance = (int64_t)oparg * 2;
+            int64_t jump_target_wide = _aleff_opcode_is_backward_jump(opcode)
+                ? (int64_t)next_offset - jump_distance
+                : (int64_t)next_offset + jump_distance;
+            int64_t jump_depth_wide = (int64_t)depth + jump_effect;
+            if (
+                jump_target_wide < INT_MIN || jump_target_wide > INT_MAX ||
+                jump_depth_wide < INT_MIN || jump_depth_wide > INT_MAX
+            ) {
+                PyErr_SetString(PyExc_RuntimeError, "jump bytecode edge overflows");
+                goto done;
+            }
+            if (
+                _aleff_record_stack_depth(
+                    (int)jump_target_wide,
+                    (int)jump_depth_wide,
+                    code_size,
+                    code->co_stacksize,
+                    depths,
+                    queue,
+                    &queue_end
+                ) < 0
+            ) {
+                goto done;
+            }
+        }
+        if (!_aleff_opcode_is_terminal(opcode) && !_aleff_opcode_is_unconditional_jump(opcode)) {
+            int fallthrough_effect = PyCompile_OpcodeStackEffectWithJump(
+                opcode,
+                oparg,
+                is_jump ? 0 : -1
+            );
+            if (fallthrough_effect == PY_INVALID_STACK_EFFECT) {
+                PyErr_SetString(PyExc_RuntimeError, "invalid opcode stack effect");
+                goto done;
+            }
+            int64_t fallthrough_depth_wide = (int64_t)depth + fallthrough_effect;
+            if (fallthrough_depth_wide < INT_MIN || fallthrough_depth_wide > INT_MAX) {
+                PyErr_SetString(PyExc_RuntimeError, "fallthrough bytecode edge overflows");
+                goto done;
+            }
+            if (
+                next_offset < code_size &&
+                _aleff_record_stack_depth(
+                    next_offset,
+                    (int)fallthrough_depth_wide,
+                    code_size,
+                    code->co_stacksize,
+                    depths,
+                    queue,
+                    &queue_end
+                ) < 0
+            ) {
+                goto done;
+            }
+        }
+        for (int i = 0; i < exception_count; i++) {
+            _aleff_exception_entry_t *entry = &exception_entries[i];
+            if (entry->start <= offset && offset < entry->end) {
+                if (
+                    _aleff_record_stack_depth(
+                        entry->target,
+                        entry->depth + 1 + entry->lasti,
+                        code_size,
+                        code->co_stacksize,
+                        depths,
+                        queue,
+                        &queue_end
+                    ) < 0
+                ) {
+                    goto done;
+                }
+            }
+        }
+    }
+
+    int depth = depths[send_offset / 2];
+    if (depth < 2 || depth > code->co_stacksize) {
+        PyErr_SetString(PyExc_RuntimeError, "cannot determine operand stack depth at SEND");
+        goto done;
+    }
+    *stack_depth = depth;
+    *target_offset = send_target;
+    result = 0;
+
+done:
+    PyMem_Free(exception_entries);
+    PyMem_Free(queue);
+    PyMem_Free(depths);
+    Py_XDECREF(code_bytes);
+    Py_XDECREF(code);
+    return result;
+}
+
 static PyObject *
 _aleff_snapshot_from_frame(_ALEFF_UNUSED PyObject *self, PyObject *args)
 {
@@ -1443,8 +1910,20 @@ _aleff_snapshot_from_frame(_ALEFF_UNUSED PyObject *self, PyObject *args)
         Py_INCREF(f);
         for (int i = 0; i < count; i++) {
             _aleff_frame_t *internal = _aleff_frame_from_pyframe(f);
+            int send_stack_depth;
+            int send_target_offset;
+            if (load_send_metadata(f, &send_stack_depth, &send_target_offset) < 0) {
+                snapshot->num_frames = i;
+                Py_DECREF(f);
+                Py_DECREF(snapshot);
+                return nullptr;
+            }
 
-            snapshot->frames[i] = copy_single_frame(internal);
+            snapshot->frames[i] = copy_single_frame(
+                internal,
+                send_stack_depth,
+                send_target_offset
+            );
             if (snapshot->frames[i].frame == nullptr) {
                 snapshot->num_frames = i;
                 Py_DECREF(f);
