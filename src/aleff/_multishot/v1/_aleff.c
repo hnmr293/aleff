@@ -827,13 +827,13 @@ static evalframe_fn_t _evalframe = nullptr;
  * ======================================================================== */
 
 /*
- * Inject resume value into a frame, simulating the return from a CALL.
+ * Inject a resume value into a frame, simulating the completed operation
+ * that dispatched into the captured Python continuation.
  *
- * The frame was suspended mid-CALL (calling the effect).
- *
- * CPython 3.12 sets stacktop = -1 while frames are active (the real
- * stack pointer lives in a register). We use the opcode at prev_instr
- * to determine the CALL dispatch path:
+ * Frames are normally suspended mid-CALL while invoking an effect.  CPython
+ * 3.12 sets stacktop = -1 while such frames are active (the real stack
+ * pointer lives in a register).  The opcode at prev_instr distinguishes the
+ * CALL dispatch paths:
  *
  * - opcode == 171 (CALL): generic path. Stack has callable + args,
  *   prev_instr at the CALL instruction. Need to pop args and advance.
@@ -841,8 +841,8 @@ static evalframe_fn_t _evalframe = nullptr;
  * - other opcode (CACHE=0, or specialized CALL variant): inline dispatch.
  *   Stack already shrunk, prev_instr past CACHE entries. Just push value.
  *
- * In both cases, we set stacktop to co_nlocalsplus (value stack base)
- * before pushing, since the original stacktop may be -1 (invalid).
+ * WITH_EXCEPT_START is a separate implicit call to __exit__.  From Python
+ * 3.13 onward its result must resume at the following TO_BOOL instruction.
  */
 static int
 prepare_resume_frame(_aleff_frame_t *frame)
@@ -924,6 +924,13 @@ prepare_resume_frame(_aleff_frame_t *frame)
         else {
             ALEFF_PREV_INSTR(frame) += frame->return_offset;
         }
+    }
+    else if (base_opcode == WITH_EXCEPT_START && stacktop >= 0) {
+        /* WITH_EXCEPT_START calls __exit__ without using a CALL opcode.  The
+         * injected value is that call's result, so resume at the following
+         * TO_BOOL instead of invoking __exit__ again with the result in the
+         * exception slot. */
+        ALEFF_PREV_INSTR(frame) += 1;
     }
 #endif
     else {
