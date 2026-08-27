@@ -296,9 +296,22 @@ _aleff_obj_to_new_stackref(PyObject *obj)
     return ref;
 }
 
+static inline _aleff_stackref
+_aleff_stackref_new_strong(_aleff_stackref ref)
+{
+    if (!_aleff_stackref_is_object(ref)) return ref;
+    return _aleff_obj_to_new_stackref(_aleff_stackref_to_obj(ref));
+}
+
+static inline void
+_aleff_stackref_dup_strong(_aleff_stackref *ref)
+{
+    *ref = _aleff_stackref_new_strong(*ref);
+}
+
 #define ALEFF_STACKREF_RETAIN(ref) _aleff_stackref_retain(ref)
 #define ALEFF_STACKREF_RELEASE(ref) _aleff_stackref_release(ref)
-#define ALEFF_STACKREF_DUP(ref) _aleff_stackref_dup(ref)
+#define ALEFF_STACKREF_DUP(ref) _aleff_stackref_dup_strong(&(ref))
 #define ALEFF_STACKREF_CLOSE(ref) _aleff_stackref_close(ref)
 
 #define ALEFF_LOCALSPLUS_GET(frame, i) \
@@ -1007,7 +1020,7 @@ push_frame_to_datastack(
 
     apply_frame_replacements(dst, num_slots, replacements);
 
-    /* INCREF all references (the copy shares objects with the snapshot copy) */
+    /* Give the restored frame independent interpreter-owned references. */
     ALEFF_STACKREF_DUP(dst->f_executable);
     ALEFF_STACKREF_DUP(dst->f_funcobj);
     Py_XINCREF(dst->f_globals);
@@ -1017,7 +1030,7 @@ push_frame_to_datastack(
     dst->owner = FRAME_OWNED_BY_THREAD;
 
     /* Source is from a snapshot where stale slots are already nullified.
-     * Duplicate all entries according to interpreter stackref ownership. */
+     * Normalize object entries to independently owned stackrefs. */
     for (int i = 0; i < num_slots; i++) {
         ALEFF_LOCALSPLUS_DUP(dst, i);
     }
@@ -1078,7 +1091,8 @@ generator_owner_from_frame_copy(
     apply_frame_replacements(dst, src_copy->num_slots, replacements);
 
     /* Match normal interpreter-frame ownership: executable, function,
-     * locals, and localsplus are strong; globals and builtins are borrowed. */
+     * locals, and localsplus are independently owned; globals and builtins
+     * are borrowed. */
     ALEFF_STACKREF_DUP(dst->f_executable);
     ALEFF_STACKREF_DUP(dst->f_funcobj);
     Py_XINCREF(dst->f_locals);
