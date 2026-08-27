@@ -27,7 +27,11 @@ def snapshot_frames(depth: int = -1) -> FrameSnapshot[Any, Any]:
     """
     ...
 
-def snapshot_from_frame(frame: types.FrameType, depth: int = -1) -> FrameSnapshot[Any, Any]:
+def snapshot_from_frame(
+    frame: types.FrameType,
+    depth: int = -1,
+    handled_exception: object = None,
+) -> FrameSnapshot[Any, Any]:
     """Capture a frame chain starting from the given frame object.
 
     The frame should be from a suspended greenlet (gr_frame) so that
@@ -36,6 +40,7 @@ def snapshot_from_frame(frame: types.FrameType, depth: int = -1) -> FrameSnapsho
     Parameters:
         frame: A frame object (e.g. greenlet.gr_frame).
         depth: Maximum number of frames to capture. -1 for all.
+        handled_exception: Active exception from the suspended caller, if any.
     """
     ...
 
@@ -66,6 +71,17 @@ def restore_continuation[R, V](snapshot: FrameSnapshot[R, V], value: R, skip: in
         RuntimeError: If _PyEval_EvalFrameDefault is not available.
         ValueError: If no frames remain after skipping.
     """
+    ...
+
+def restore_async_continuation[R, V](
+    snapshot: FrameSnapshot[R, V],
+    outcome: object,
+    start: int = 1,
+    is_exception: bool = False,
+    from_coroutine: bool = False,
+    replacements: dict[object, object] | None = None,
+) -> tuple[bool, object, int, object, bool]:
+    """Advance restored frames to the next coroutine stage or completion."""
     ...
 
 HAS_RESTORE: int

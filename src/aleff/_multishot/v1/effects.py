@@ -1,5 +1,6 @@
 from dataclasses import field, dataclass
 from functools import wraps
+from sys import exception as current_exception
 from typing import Any, Callable, cast, overload, Sequence
 import greenlet as gl
 from .intf import Effect, EffectNotHandledError
@@ -66,6 +67,8 @@ class EffectAborted(BaseException):
 ABORT = object()
 """Sentinel value switched into a caller greenlet to trigger EffectAborted."""
 
+_NO_HANDLED_EXCEPTION = object()
+
 
 def _make_effect(name: str) -> Effect[..., Any]:
     """Create a new effect as a plain Python function.
@@ -86,7 +89,15 @@ def _make_effect(name: str) -> Effect[..., Any]:
         handler_gl = gl.getcurrent().parent
         if handler_gl is None:
             raise EffectNotHandledError(eff)
-        result = handler_gl.switch(EffectContext(eff, args, kwargs))
+        handled_exception = current_exception()
+        result = handler_gl.switch(
+            EffectContext(
+                eff,
+                args,
+                kwargs,
+                handled_exception if handled_exception is not None else _NO_HANDLED_EXCEPTION,
+            )
+        )
         if result is ABORT:
             raise EffectAborted()
         return result
@@ -125,6 +136,7 @@ class EffectContext[**P, R]:
     effect: Effect[P, R]
     args: tuple[Any, ...] = ()
     kwargs: dict[str, Any] = field(default_factory=dict[str, Any])
+    handled_exception: object = field(default=_NO_HANDLED_EXCEPTION, repr=False, compare=False)
 
     def __repr__(self) -> str:
         return f"({eff_str(self.effect)} | args={self.args!r}, kwargs={self.kwargs!r})"
