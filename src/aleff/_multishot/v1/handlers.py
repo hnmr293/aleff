@@ -331,17 +331,38 @@ def _abort_caller(caller_gl: Any) -> None:
     caller_gl.parent = gl.getcurrent()
     try:
         try:
-            abort_v = caller_gl.switch(ABORT)
+            abort_v: Any = caller_gl.switch(ABORT)
         except EffectAborted:
             return
         while not caller_gl.dead:
-            if isinstance(abort_v, EffectContext):
-                try:
-                    abort_v = caller_gl.switch(ABORT)
-                except EffectAborted:
-                    return
-            else:
+            if not isinstance(abort_v, EffectContext):
                 break
+            try:
+                abort_v = cast(Any, _drive(caller_gl, cast(EffectContext[..., Any], abort_v)))
+            except EffectAborted:
+                return
+    finally:
+        if not caller_gl.dead:
+            caller_gl.parent = old_parent
+
+
+async def _abort_caller_async(caller_gl: Any, exclude_token: object | None = None) -> None:
+    """Abort a caller while allowing its cleanup to perform async-dispatched effects."""
+
+    old_parent = caller_gl.parent
+    caller_gl.parent = gl.getcurrent()
+    try:
+        try:
+            abort_v: Any = caller_gl.switch(ABORT)
+        except EffectAborted:
+            return
+        while not caller_gl.dead:
+            if not (_is_effect_context(abort_v) or _is_coroutine_request(abort_v)):
+                break
+            try:
+                abort_v = await _drive_async(caller_gl, abort_v, exclude_token=exclude_token)
+            except EffectAborted:
+                return
     finally:
         if not caller_gl.dead:
             caller_gl.parent = old_parent
@@ -562,7 +583,7 @@ async def _drive_async[V](
     finally:
         if not caller_gl.dead:
             debug(f"||< **abort** perform {eff_str(ctx.effect)}")
-            _abort_caller(caller_gl)
+            await _abort_caller_async(caller_gl, exclude_token=exclude_token)
 
 
 async def _drive_effect_async(
