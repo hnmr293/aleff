@@ -206,7 +206,12 @@ typedef struct _aleff_frame {
 #endif
     uint16_t return_offset;
     char owner;
+#ifdef Py_DEBUG
+    uint8_t visited : 1;
+    uint8_t lltrace : 7;
+#else
     uint8_t visited;
+#endif
     _aleff_stackref localsplus[1];       /* _PyStackRef elements */
 } _aleff_frame_t;
 
@@ -631,6 +636,8 @@ copy_single_frame(_aleff_frame_t *src, int send_stack_depth, int send_target_off
         ptrdiff_t sp_offset = src->stackpointer - src->localsplus;
         dst->stackpointer = dst->localsplus + sp_offset;
     }
+    /* GC traversal state belongs to the source stack walk, not the frame. */
+    dst->visited = 0;
 #endif
 
     /* Strong refs for objects */
@@ -1016,6 +1023,7 @@ push_frame_to_datastack(
         ptrdiff_t sp_offset = src->stackpointer - src->localsplus;
         dst->stackpointer = dst->localsplus + sp_offset;
     }
+    dst->visited = 0;
 #endif
 
     apply_frame_replacements(dst, num_slots, replacements);
@@ -1086,6 +1094,7 @@ generator_owner_from_frame_copy(
         ptrdiff_t sp_offset = src->stackpointer - src->localsplus;
         dst->stackpointer = dst->localsplus + sp_offset;
     }
+    dst->visited = 0;
 #endif
 
     apply_frame_replacements(dst, src_copy->num_slots, replacements);
