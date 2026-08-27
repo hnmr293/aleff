@@ -346,7 +346,7 @@ def _abort_caller(caller_gl: Any) -> None:
             caller_gl.parent = old_parent
 
 
-async def _abort_caller_async(caller_gl: Any, exclude_token: object | None = None) -> None:
+async def _abort_caller_async(caller_gl: Any, exclude_token: object | None) -> None:
     """Abort a caller while allowing its cleanup to perform async-dispatched effects."""
 
     old_parent = caller_gl.parent
