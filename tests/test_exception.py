@@ -4,6 +4,11 @@ Defines and verifies the semantics for how exceptions interact with
 effect handlers in all supported scenarios.
 """
 
+from asyncio import sleep
+from gc import collect
+from sys import getrefcount
+from typing import cast
+
 import pytest
 
 from aleff import (
@@ -496,6 +501,398 @@ class TestAsyncAbortOnHandlerException:
         assert len(raised) == 1
         assert isinstance(raised[0], EffectNotHandledError)
         assert log == ["before", "after"]
+
+
+class TestEffectsDuringAbortCleanup:
+    def test_wind_after_effect_is_dispatched_during_abort(self):
+        """An effect performed by wind.after completes during caller abort."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[str], str] = effect("cleanup")
+        h: Handler[str] = create_handler(ask, cleanup)
+
+        log: list[str] = []
+
+        @h.on(ask)
+        def _ask(k: Resume[str, str]) -> str:
+            return "aborted"
+
+        @h.on(cleanup)
+        def _cleanup(k: Resume[str, str], message: str) -> str:
+            log.append(f"cleanup-handler({message})")
+            return k("cleaned")
+
+        def after() -> None:
+            log.append("after: step1")
+            cleanup("resource")
+            log.append("after: step2")
+
+        def caller() -> str:
+            with wind(lambda: log.append("before"), after):
+                return ask()
+
+        assert h(caller) == "aborted"
+        assert log == [
+            "before",
+            "after: step1",
+            "cleanup-handler(resource)",
+            "after: step2",
+        ]
+
+    def test_unhandled_effect_from_wind_after_replaces_abort_result(self):
+        """An unhandled cleanup effect remains observable during abort."""
+        ask: Effect[[], str] = effect("ask")
+        missing: Effect[[], None] = effect("missing")
+        h: Handler[str] = create_handler(ask)
+
+        @h.on(ask)
+        def _ask(k: Resume[str, str]) -> str:
+            return "aborted"
+
+        def caller() -> str:
+            with wind(after=lambda: missing()):
+                return ask()
+
+        error_type = cast(type[EffectNotHandledError[[], None]], EffectNotHandledError)
+        with pytest.raises(error_type) as excinfo:
+            h(caller)
+
+        assert excinfo.value.effect is missing
+
+    def test_cleanup_handler_exception_replaces_abort_result(self):
+        """A cleanup handler failure is not hidden by the original abort."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[], None] = effect("cleanup")
+        h: Handler[str] = create_handler(ask, cleanup)
+
+        @h.on(ask)
+        def _ask(k: Resume[str, str]) -> str:
+            return "aborted"
+
+        @h.on(cleanup)
+        def _cleanup(k: Resume[None, str]) -> str:
+            raise RuntimeError("cleanup failed")
+
+        def caller() -> str:
+            with wind(after=lambda: cleanup()):
+                return ask()
+
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            h(caller)
+
+    def test_nested_wind_after_effects_complete_inside_out(self):
+        """Nested wind cleanup effects complete once each, inside out."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[str], None] = effect("cleanup")
+        h: Handler[str] = create_handler(ask, cleanup)
+
+        log: list[str] = []
+
+        @h.on(ask)
+        def _ask(k: Resume[str, str]) -> str:
+            return "aborted"
+
+        @h.on(cleanup)
+        def _cleanup(k: Resume[None, str], name: str) -> str:
+            log.append(f"{name}: handler")
+            return k(None)
+
+        def after(name: str) -> None:
+            log.append(f"{name}: step1")
+            cleanup(name)
+            log.append(f"{name}: step2")
+
+        def caller() -> str:
+            with wind(after=lambda: after("outer")):
+                with wind(after=lambda: after("inner")):
+                    return ask()
+
+        assert h(caller) == "aborted"
+        assert log == [
+            "inner: step1",
+            "inner: handler",
+            "inner: step2",
+            "outer: step1",
+            "outer: handler",
+            "outer: step2",
+        ]
+
+    def test_cleanup_handler_abort_truncates_only_that_cleanup(self):
+        """A second abort stops its cleanup continuation without replacing the first result."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[], str] = effect("cleanup")
+        h: Handler[str] = create_handler(ask, cleanup)
+
+        log: list[str] = []
+
+        @h.on(ask)
+        def _ask(k: Resume[str, str]) -> str:
+            return "original-abort"
+
+        @h.on(cleanup)
+        def _cleanup(k: Resume[str, str]) -> str:
+            log.append("cleanup-handler")
+            return "cleanup-abort"
+
+        def after() -> None:
+            log.append("after: step1")
+            cleanup()
+            log.append("after: step2")
+
+        def caller() -> str:
+            with wind(after=after):
+                return ask()
+
+        assert h(caller) == "original-abort"
+        assert log == ["after: step1", "cleanup-handler"]
+
+    def test_cleanup_effect_continuation_can_resume_multiple_times(self):
+        """A cleanup effect snapshot can be restored for multiple resumptions."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[], str] = effect("cleanup")
+        h: Handler[str] = create_handler(ask, cleanup)
+
+        log: list[str] = []
+
+        @h.on(ask)
+        def _ask(k: Resume[str, str]) -> str:
+            return "original-abort"
+
+        @h.on(cleanup)
+        def _cleanup(k: Resume[str, str]) -> str:
+            log.append(f"resume result: {k('first')}")
+            log.append(f"resume result: {k('second')}")
+            return "cleanup-handled"
+
+        def after() -> None:
+            cleanup()
+            log.append("after completed")
+
+        def caller() -> str:
+            try:
+                with wind(after=after):
+                    return ask()
+            except BaseException:
+                log.append("abort caught")
+                return "caller completed"
+
+        collect()
+        refs_before = (getrefcount(caller), getrefcount(caller.__code__))
+        assert h(caller) == "original-abort"
+        collect()
+        refs_after = (getrefcount(caller), getrefcount(caller.__code__))
+
+        assert refs_after == refs_before
+        assert log == [
+            "after completed",
+            "abort caught",
+            "resume result: caller completed",
+            "after completed",
+            "abort caught",
+            "resume result: caller completed",
+        ]
+
+    def test_cleanup_effect_snapshots_can_be_repeatedly_destroyed(self):
+        """Repeated abort cleanup snapshots release safely during collection."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[], None] = effect("cleanup")
+        h: Handler[str] = create_handler(ask, cleanup)
+
+        @h.on(ask)
+        def _ask(k: Resume[str, str]) -> str:
+            return "aborted"
+
+        @h.on(cleanup)
+        def _cleanup(k: Resume[None, str]) -> str:
+            return k(None)
+
+        def caller() -> str:
+            with wind(after=lambda: cleanup()):
+                return ask()
+
+        for _ in range(50):
+            assert h(caller) == "aborted"
+            collect()
+
+
+class TestAsyncEffectsDuringAbortCleanup:
+    @pytest.mark.asyncio
+    async def test_wind_after_effect_is_dispatched_during_async_abort(self):
+        """Async dispatch completes an effect performed by wind.after during abort."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[str], str] = effect("cleanup")
+        h: AsyncHandler[str] = create_async_handler(ask, cleanup)
+
+        log: list[str] = []
+
+        @h.on(ask)
+        async def _ask(k: ResumeAsync[str, str]) -> str:
+            return "aborted"
+
+        @h.on(cleanup)
+        async def _cleanup(k: ResumeAsync[str, str], message: str) -> str:
+            log.append(f"cleanup-handler({message})")
+            return await k("cleaned")
+
+        def after() -> None:
+            log.append("after: step1")
+            cleanup("resource")
+            log.append("after: step2")
+
+        def caller() -> str:
+            with wind(lambda: log.append("before"), after):
+                return ask()
+
+        assert await h(caller) == "aborted"
+        assert log == [
+            "before",
+            "after: step1",
+            "cleanup-handler(resource)",
+            "after: step2",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_unhandled_effect_from_wind_after_replaces_async_abort_result(self):
+        """An unhandled cleanup effect identifies itself during async abort."""
+        ask: Effect[[], str] = effect("ask")
+        missing: Effect[[], None] = effect("missing")
+        h: AsyncHandler[str] = create_async_handler(ask)
+
+        @h.on(ask)
+        async def _ask(k: ResumeAsync[str, str]) -> str:
+            return "aborted"
+
+        def caller() -> str:
+            with wind(after=lambda: missing()):
+                return ask()
+
+        error_type = cast(type[EffectNotHandledError[[], None]], EffectNotHandledError)
+        with pytest.raises(error_type) as excinfo:
+            await h(caller)
+
+        assert excinfo.value.effect is missing
+
+    @pytest.mark.asyncio
+    async def test_cleanup_handler_exception_replaces_async_abort_result(self):
+        """An async cleanup handler failure is not hidden by the original abort."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[], None] = effect("cleanup")
+        h: AsyncHandler[str] = create_async_handler(ask, cleanup)
+
+        @h.on(ask)
+        async def _ask(k: ResumeAsync[str, str]) -> str:
+            return "aborted"
+
+        @h.on(cleanup)
+        async def _cleanup(k: ResumeAsync[None, str]) -> str:
+            raise RuntimeError("cleanup failed")
+
+        def caller() -> str:
+            with wind(after=lambda: cleanup()):
+                return ask()
+
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await h(caller)
+
+    @pytest.mark.asyncio
+    async def test_cleanup_handler_abort_truncates_only_async_cleanup(self):
+        """A second async abort stops its cleanup without replacing the first result."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[], str] = effect("cleanup")
+        h: AsyncHandler[str] = create_async_handler(ask, cleanup)
+
+        log: list[str] = []
+
+        @h.on(ask)
+        async def _ask(k: ResumeAsync[str, str]) -> str:
+            return "original-abort"
+
+        @h.on(cleanup)
+        async def _cleanup(k: ResumeAsync[str, str]) -> str:
+            log.append("cleanup-handler")
+            return "cleanup-abort"
+
+        def after() -> None:
+            log.append("after: step1")
+            cleanup()
+            log.append("after: step2")
+
+        def caller() -> str:
+            with wind(after=after):
+                return ask()
+
+        assert await h(caller) == "original-abort"
+        assert log == ["after: step1", "cleanup-handler"]
+
+    @pytest.mark.asyncio
+    async def test_async_cleanup_effect_continuation_can_resume_multiple_times(self):
+        """An async cleanup effect snapshot supports multiple resumptions."""
+        ask: Effect[[], str] = effect("ask")
+        cleanup: Effect[[], str] = effect("cleanup")
+        h: AsyncHandler[str] = create_async_handler(ask, cleanup)
+
+        log: list[str] = []
+
+        @h.on(ask)
+        async def _ask(k: ResumeAsync[str, str]) -> str:
+            return "original-abort"
+
+        @h.on(cleanup)
+        async def _cleanup(k: ResumeAsync[str, str]) -> str:
+            log.append(f"resume result: {await k('first')}")
+            log.append(f"resume result: {await k('second')}")
+            return "cleanup-handled"
+
+        def after() -> None:
+            cleanup()
+            log.append("after completed")
+
+        def caller() -> str:
+            try:
+                with wind(after=after):
+                    return ask()
+            except BaseException:
+                log.append("abort caught")
+                return "caller completed"
+
+        collect()
+        refs_before = (getrefcount(caller), getrefcount(caller.__code__))
+        assert await h(caller) == "original-abort"
+        collect()
+        refs_after = (getrefcount(caller), getrefcount(caller.__code__))
+
+        assert refs_after == refs_before
+        assert log == [
+            "after completed",
+            "abort caught",
+            "resume result: caller completed",
+            "after completed",
+            "abort caught",
+            "resume result: caller completed",
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("delay", [0, 0.001], ids=["bare-yield", "future"])
+    async def test_async_caller_can_await_in_finally_during_abort(self, delay: float):
+        """Abort draining resolves await requests yielded by an async caller's cleanup."""
+        ask: Effect[[], str] = effect("ask")
+        h: AsyncHandler[str] = create_async_handler(ask)
+
+        log: list[str] = []
+
+        @h.on(ask)
+        async def _ask(k: ResumeAsync[str, str]) -> str:
+            return "aborted"
+
+        async def caller() -> str:
+            try:
+                return ask()
+            finally:
+                log.append("finally: step1")
+                await sleep(delay)
+                log.append("finally: step2")
+
+        assert await h(caller) == "aborted"
+        assert log == ["finally: step1", "finally: step2"]
 
 
 # ---------------------------------------------------------------------------

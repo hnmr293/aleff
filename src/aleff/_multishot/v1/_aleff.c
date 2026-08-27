@@ -206,42 +206,135 @@ typedef struct _aleff_frame {
 #endif
     uint16_t return_offset;
     char owner;
+#ifdef Py_DEBUG
+    uint8_t visited : 1;
+    uint8_t lltrace : 7;
+#else
     uint8_t visited;
+#endif
     _aleff_stackref localsplus[1];       /* _PyStackRef elements */
 } _aleff_frame_t;
 
-/* Convert _aleff_stackref ↔ PyObject*.
- * In CPython 3.14, _PyStackRef uses a tag bit (bit 0) for deferred
- * references.  We must mask it off when reading, and preserve it
- * when writing. */
-#define _ALEFF_TAG_BITS ((uintptr_t)1)
+/* CPython 3.14 stack slots can hold object references, null, or tagged
+ * integers.  Only object references participate in reference counting. */
+#define _ALEFF_REFCNT_TAG ((uintptr_t)1)
+#define _ALEFF_INT_TAG ((uintptr_t)3)
 
-static inline PyObject *
-_aleff_stackref_to_obj(_aleff_stackref ref)
+static inline int
+_aleff_stackref_is_tagged_int(_aleff_stackref ref)
 {
-    return (PyObject *)(ref & ~_ALEFF_TAG_BITS);
-}
-
-static inline _aleff_stackref
-_aleff_obj_to_stackref(PyObject *obj)
-{
-    /* Replicate PyStackRef_FromPyObjectSteal: immortal objects get the
-     * Py_TAG_REFCNT (1) tag bit set via ob_flags. */
-    if (obj == nullptr) return _ALEFF_TAG_BITS;  /* PyStackRef_NULL.bits */
-    unsigned int tag = ((PyObject *)obj)->ob_flags & _ALEFF_TAG_BITS;
-    return (_aleff_stackref)((uintptr_t)obj | tag);
+    return (ref & _ALEFF_INT_TAG) == _ALEFF_INT_TAG;
 }
 
 static inline int
 _aleff_stackref_is_null(_aleff_stackref ref)
 {
-    return _aleff_stackref_to_obj(ref) == nullptr;
+    return ref == _ALEFF_REFCNT_TAG;
 }
+
+static inline int
+_aleff_stackref_is_object(_aleff_stackref ref)
+{
+    return !_aleff_stackref_is_null(ref)
+        && !_aleff_stackref_is_tagged_int(ref);
+}
+
+static inline PyObject *
+_aleff_stackref_to_obj(_aleff_stackref ref)
+{
+    if (!_aleff_stackref_is_object(ref)) return nullptr;
+    return (PyObject *)(ref & ~_ALEFF_REFCNT_TAG);
+}
+
+static inline _aleff_stackref
+_aleff_obj_to_stackref(PyObject *obj)
+{
+    if (obj == nullptr) return _ALEFF_REFCNT_TAG;  /* PyStackRef_NULL.bits */
+#ifdef Py_GIL_DISABLED
+    /* A tag-0 stackref is a valid strong reference for every object.  The
+     * deferred-refcount flag lives in private GC state on free-threaded
+     * builds, so create an ordinary owned stackref instead. */
+    return (_aleff_stackref)(uintptr_t)obj;
+#else
+    /* Replicate PyStackRef_FromPyObjectSteal: immortal objects get the
+     * Py_TAG_REFCNT (1) tag bit set via ob_flags. */
+    unsigned int tag = ((PyObject *)obj)->ob_flags & _ALEFF_REFCNT_TAG;
+    return (_aleff_stackref)((uintptr_t)obj | tag);
+#endif
+}
+
+static inline void
+_aleff_stackref_retain(_aleff_stackref ref)
+{
+    Py_XINCREF(_aleff_stackref_to_obj(ref));
+}
+
+static inline void
+_aleff_stackref_release(_aleff_stackref ref)
+{
+    Py_XDECREF(_aleff_stackref_to_obj(ref));
+}
+
+static inline void
+_aleff_stackref_dup(_aleff_stackref ref)
+{
+    if (_aleff_stackref_is_object(ref)
+        && (ref & _ALEFF_REFCNT_TAG) == 0) {
+        Py_INCREF((PyObject *)ref);
+    }
+}
+
+static inline void
+_aleff_stackref_close(_aleff_stackref ref)
+{
+    if (_aleff_stackref_is_object(ref)
+        && (ref & _ALEFF_REFCNT_TAG) == 0) {
+        Py_DECREF((PyObject *)ref);
+    }
+}
+
+static inline _aleff_stackref
+_aleff_obj_to_new_stackref(PyObject *obj)
+{
+    _aleff_stackref ref = _aleff_obj_to_stackref(obj);
+    _aleff_stackref_dup(ref);
+    return ref;
+}
+
+static inline _aleff_stackref
+_aleff_stackref_new_strong(_aleff_stackref ref)
+{
+    if (!_aleff_stackref_is_object(ref)) return ref;
+    return _aleff_obj_to_new_stackref(_aleff_stackref_to_obj(ref));
+}
+
+static inline void
+_aleff_stackref_dup_strong(_aleff_stackref *ref)
+{
+    *ref = _aleff_stackref_new_strong(*ref);
+}
+
+#define ALEFF_STACKREF_RETAIN(ref) _aleff_stackref_retain(ref)
+#define ALEFF_STACKREF_RELEASE(ref) _aleff_stackref_release(ref)
+#define ALEFF_STACKREF_DUP(ref) _aleff_stackref_dup_strong(&(ref))
+#define ALEFF_STACKREF_CLOSE(ref) _aleff_stackref_close(ref)
 
 #define ALEFF_LOCALSPLUS_GET(frame, i) \
     _aleff_stackref_to_obj((frame)->localsplus[i])
 #define ALEFF_LOCALSPLUS_SET(frame, i, obj) \
     ((frame)->localsplus[i] = _aleff_obj_to_stackref(obj))
+#define ALEFF_LOCALSPLUS_SET_NEW(frame, i, obj) \
+    ((frame)->localsplus[i] = _aleff_obj_to_new_stackref(obj))
+#define ALEFF_LOCALSPLUS_IS_OBJECT(frame, i) \
+    _aleff_stackref_is_object((frame)->localsplus[i])
+#define ALEFF_LOCALSPLUS_RETAIN(frame, i) \
+    ALEFF_STACKREF_RETAIN((frame)->localsplus[i])
+#define ALEFF_LOCALSPLUS_RELEASE(frame, i) \
+    ALEFF_STACKREF_RELEASE((frame)->localsplus[i])
+#define ALEFF_LOCALSPLUS_DUP(frame, i) \
+    ALEFF_STACKREF_DUP((frame)->localsplus[i])
+#define ALEFF_LOCALSPLUS_CLOSE(frame, i) \
+    ALEFF_STACKREF_CLOSE((frame)->localsplus[i])
 
 /* prev_instr accessor (3.14 uses instr_ptr) */
 #define ALEFF_PREV_INSTR(frame) ((frame)->instr_ptr)
@@ -309,6 +402,22 @@ typedef struct _aleff_frame {
 
 #define ALEFF_LOCALSPLUS_GET(frame, i) ((frame)->localsplus[i])
 #define ALEFF_LOCALSPLUS_SET(frame, i, obj) ((frame)->localsplus[i] = (obj))
+#define ALEFF_LOCALSPLUS_SET_NEW(frame, i, obj) \
+    (Py_INCREF(obj), ALEFF_LOCALSPLUS_SET(frame, i, obj))
+#define ALEFF_LOCALSPLUS_IS_OBJECT(frame, i) \
+    (ALEFF_LOCALSPLUS_GET(frame, i) != nullptr)
+#define ALEFF_STACKREF_RETAIN(ref) Py_XINCREF(ref)
+#define ALEFF_STACKREF_RELEASE(ref) Py_XDECREF(ref)
+#define ALEFF_STACKREF_DUP(ref) Py_XINCREF(ref)
+#define ALEFF_STACKREF_CLOSE(ref) Py_XDECREF(ref)
+#define ALEFF_LOCALSPLUS_RETAIN(frame, i) \
+    ALEFF_STACKREF_RETAIN((frame)->localsplus[i])
+#define ALEFF_LOCALSPLUS_RELEASE(frame, i) \
+    ALEFF_STACKREF_RELEASE((frame)->localsplus[i])
+#define ALEFF_LOCALSPLUS_DUP(frame, i) \
+    ALEFF_STACKREF_DUP((frame)->localsplus[i])
+#define ALEFF_LOCALSPLUS_CLOSE(frame, i) \
+    ALEFF_STACKREF_CLOSE((frame)->localsplus[i])
 #define ALEFF_PREV_INSTR(frame) ((frame)->prev_instr)
 
 static inline int
@@ -439,8 +548,8 @@ FrameSnapshot_dealloc(FrameSnapshotObject *self)
         _aleff_frame_t *f = fc->frame;
         if (f == nullptr) continue;
 
-        Py_XDECREF(ALEFF_GET_EXECUTABLE(f));
-        Py_XDECREF(ALEFF_GET_FUNCOBJ(f));
+        ALEFF_STACKREF_RELEASE(f->f_executable);
+        ALEFF_STACKREF_RELEASE(f->f_funcobj);
         /* f_globals and f_builtins are borrowed in live frames,
            but we hold strong refs in copies */
         Py_XDECREF(f->f_globals);
@@ -451,7 +560,7 @@ FrameSnapshot_dealloc(FrameSnapshotObject *self)
         /* Don't decref frame_obj — we set it to nullptr in copies */
 
         for (int j = 0; j < fc->num_slots; j++) {
-            Py_XDECREF(ALEFF_LOCALSPLUS_GET(f, j));
+            ALEFF_LOCALSPLUS_RELEASE(f, j);
         }
         PyMem_Free(f);
     }
@@ -527,11 +636,13 @@ copy_single_frame(_aleff_frame_t *src, int send_stack_depth, int send_target_off
         ptrdiff_t sp_offset = src->stackpointer - src->localsplus;
         dst->stackpointer = dst->localsplus + sp_offset;
     }
+    /* GC traversal state belongs to the source stack walk, not the frame. */
+    dst->visited = 0;
 #endif
 
     /* Strong refs for objects */
-    Py_XINCREF(ALEFF_GET_EXECUTABLE(dst));
-    Py_XINCREF(ALEFF_GET_FUNCOBJ(dst));
+    ALEFF_STACKREF_RETAIN(dst->f_executable);
+    ALEFF_STACKREF_RETAIN(dst->f_funcobj);
     /* Promote borrowed to strong */
     Py_XINCREF(dst->f_globals);
     Py_XINCREF(dst->f_builtins);
@@ -577,7 +688,7 @@ copy_single_frame(_aleff_frame_t *src, int send_stack_depth, int send_target_off
         ? stacktop
         : code->co_nlocalsplus;
     for (int i = 0; i < valid_slots; i++) {
-        Py_XINCREF(ALEFF_LOCALSPLUS_GET(dst, i));
+        ALEFF_LOCALSPLUS_RETAIN(dst, i);
     }
     for (int i = valid_slots; i < num_slots; i++) {
         ALEFF_LOCALSPLUS_SET(dst, i, nullptr);
@@ -588,8 +699,8 @@ copy_single_frame(_aleff_frame_t *src, int send_stack_depth, int send_target_off
     return result;
 
 frame_header_error:
-    Py_XDECREF(ALEFF_GET_EXECUTABLE(dst));
-    Py_XDECREF(ALEFF_GET_FUNCOBJ(dst));
+    ALEFF_STACKREF_RELEASE(dst->f_executable);
+    ALEFF_STACKREF_RELEASE(dst->f_funcobj);
     Py_XDECREF(dst->f_globals);
     Py_XDECREF(dst->f_builtins);
     Py_XDECREF(dst->f_locals);
@@ -716,13 +827,13 @@ static evalframe_fn_t _evalframe = nullptr;
  * ======================================================================== */
 
 /*
- * Inject resume value into a frame, simulating the return from a CALL.
+ * Inject a resume value into a frame, simulating the completed operation
+ * that dispatched into the captured Python continuation.
  *
- * The frame was suspended mid-CALL (calling the effect).
- *
- * CPython 3.12 sets stacktop = -1 while frames are active (the real
- * stack pointer lives in a register). We use the opcode at prev_instr
- * to determine the CALL dispatch path:
+ * Frames are normally suspended mid-CALL while invoking an effect.  CPython
+ * 3.12 sets stacktop = -1 while such frames are active (the real stack
+ * pointer lives in a register).  The opcode at prev_instr distinguishes the
+ * CALL dispatch paths:
  *
  * - opcode == 171 (CALL): generic path. Stack has callable + args,
  *   prev_instr at the CALL instruction. Need to pop args and advance.
@@ -730,8 +841,8 @@ static evalframe_fn_t _evalframe = nullptr;
  * - other opcode (CACHE=0, or specialized CALL variant): inline dispatch.
  *   Stack already shrunk, prev_instr past CACHE entries. Just push value.
  *
- * In both cases, we set stacktop to co_nlocalsplus (value stack base)
- * before pushing, since the original stacktop may be -1 (invalid).
+ * WITH_EXCEPT_START is a separate implicit call to __exit__.  From Python
+ * 3.13 onward its result must resume at the following TO_BOOL instruction.
  */
 static int
 prepare_resume_frame(_aleff_frame_t *frame)
@@ -757,7 +868,7 @@ prepare_resume_frame(_aleff_frame_t *frame)
             stacktop = value_stack_base + call_items;
             int new_top = value_stack_base;
             for (int i = new_top; i < stacktop; i++) {
-                Py_XDECREF(ALEFF_LOCALSPLUS_GET(frame, i));
+                ALEFF_LOCALSPLUS_CLOSE(frame, i);
                 ALEFF_LOCALSPLUS_SET(frame, i, nullptr);
             }
             stacktop = new_top;
@@ -814,6 +925,13 @@ prepare_resume_frame(_aleff_frame_t *frame)
             ALEFF_PREV_INSTR(frame) += frame->return_offset;
         }
     }
+    else if (base_opcode == WITH_EXCEPT_START && stacktop >= 0) {
+        /* WITH_EXCEPT_START calls __exit__ without using a CALL opcode.  The
+         * injected value is that call's result, so resume at the following
+         * TO_BOOL instead of invoking __exit__ again with the result in the
+         * exception slot. */
+        ALEFF_PREV_INSTR(frame) += 1;
+    }
 #endif
     else {
         /* Not a call at all: the frame is suspended beneath an escaping C
@@ -839,8 +957,7 @@ inject_resume_value(_aleff_frame_t *frame, PyObject *value)
     int stacktop = prepare_resume_frame(frame);
 
     /* Push the resume value */
-    Py_INCREF(value);
-    ALEFF_LOCALSPLUS_SET(frame, stacktop, value);
+    ALEFF_LOCALSPLUS_SET_NEW(frame, stacktop, value);
     stacktop++;
     _aleff_frame_set_stacktop(frame, stacktop);
 }
@@ -867,8 +984,14 @@ static void
 apply_frame_replacements(_aleff_frame_t *frame, int num_slots, PyObject *replacements)
 {
     for (int i = 0; i < num_slots; i++) {
+        if (!ALEFF_LOCALSPLUS_IS_OBJECT(frame, i)) {
+            continue;
+        }
         PyObject *obj = ALEFF_LOCALSPLUS_GET(frame, i);
-        ALEFF_LOCALSPLUS_SET(frame, i, replacement_for(obj, replacements));
+        PyObject *replacement = replacement_for(obj, replacements);
+        if (replacement != obj) {
+            ALEFF_LOCALSPLUS_SET(frame, i, replacement);
+        }
     }
 }
 
@@ -907,13 +1030,14 @@ push_frame_to_datastack(
         ptrdiff_t sp_offset = src->stackpointer - src->localsplus;
         dst->stackpointer = dst->localsplus + sp_offset;
     }
+    dst->visited = 0;
 #endif
 
     apply_frame_replacements(dst, num_slots, replacements);
 
-    /* INCREF all references (the copy shares objects with the snapshot copy) */
-    Py_XINCREF(ALEFF_GET_EXECUTABLE(dst));
-    Py_XINCREF(ALEFF_GET_FUNCOBJ(dst));
+    /* Give the restored frame independent interpreter-owned references. */
+    ALEFF_STACKREF_DUP(dst->f_executable);
+    ALEFF_STACKREF_DUP(dst->f_funcobj);
     Py_XINCREF(dst->f_globals);
     Py_XINCREF(dst->f_builtins);
     Py_XINCREF(dst->f_locals);
@@ -921,9 +1045,9 @@ push_frame_to_datastack(
     dst->owner = FRAME_OWNED_BY_THREAD;
 
     /* Source is from a snapshot where stale slots are already nullified.
-     * INCREF all non-null entries. */
+     * Normalize object entries to independently owned stackrefs. */
     for (int i = 0; i < num_slots; i++) {
-        Py_XINCREF(ALEFF_LOCALSPLUS_GET(dst, i));
+        ALEFF_LOCALSPLUS_DUP(dst, i);
     }
 
     return dst;
@@ -961,11 +1085,11 @@ generator_owner_from_frame_copy(
     if (initialized_slots < 0) {
         initialized_slots = new_code->co_nlocalsplus;
     }
-    Py_XDECREF(ALEFF_GET_EXECUTABLE(dst));
-    Py_XDECREF(ALEFF_GET_FUNCOBJ(dst));
+    ALEFF_STACKREF_CLOSE(dst->f_executable);
+    ALEFF_STACKREF_CLOSE(dst->f_funcobj);
     Py_XDECREF(dst->f_locals);
     for (int i = 0; i < initialized_slots; i++) {
-        Py_XDECREF(ALEFF_LOCALSPLUS_GET(dst, i));
+        ALEFF_LOCALSPLUS_CLOSE(dst, i);
     }
 
     size_t frame_size = sizeof(_aleff_frame_t)
@@ -977,20 +1101,22 @@ generator_owner_from_frame_copy(
         ptrdiff_t sp_offset = src->stackpointer - src->localsplus;
         dst->stackpointer = dst->localsplus + sp_offset;
     }
+    dst->visited = 0;
 #endif
 
     apply_frame_replacements(dst, src_copy->num_slots, replacements);
 
     /* Match normal interpreter-frame ownership: executable, function,
-     * locals, and localsplus are strong; globals and builtins are borrowed. */
-    Py_XINCREF(ALEFF_GET_EXECUTABLE(dst));
-    Py_XINCREF(ALEFF_GET_FUNCOBJ(dst));
+     * locals, and localsplus are independently owned; globals and builtins
+     * are borrowed. */
+    ALEFF_STACKREF_DUP(dst->f_executable);
+    ALEFF_STACKREF_DUP(dst->f_funcobj);
     Py_XINCREF(dst->f_locals);
     dst->frame_obj = nullptr;
     dst->previous = nullptr;
     dst->owner = FRAME_OWNED_BY_FRAME_OBJECT;
     for (int i = 0; i < src_copy->num_slots; i++) {
-        Py_XINCREF(ALEFF_LOCALSPLUS_GET(dst, i));
+        ALEFF_LOCALSPLUS_DUP(dst, i);
     }
 
     /* coro.send(outcome) supplies the value that resumes this frame.  A value
@@ -1007,7 +1133,7 @@ generator_owner_from_frame_copy(
             }
             if (src_copy->send_value_needs_pop) {
                 stacktop--;
-                Py_XDECREF(ALEFF_LOCALSPLUS_GET(dst, stacktop));
+                ALEFF_LOCALSPLUS_CLOSE(dst, stacktop);
                 ALEFF_LOCALSPLUS_SET(dst, stacktop, nullptr);
                 _aleff_frame_set_stacktop(dst, stacktop);
             }
