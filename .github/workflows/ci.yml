@@ -81,14 +81,14 @@ jobs:
           )
           $cdb = $cdbCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if ($cdb) {
-            & $cdb -G -c "sxe av; g; .ecxr; r; kP; lm; q" `
-              $python -m pytest $nodeId -q
+            & $cdb -G -c "sxe av; g; .ecxr; r; kv; ub @rip L20; u @rip L20; lm; q" `
+              $python -m pytest $nodeId -q -p no:faulthandler
           } else {
             Write-Host "cdb.exe is unavailable."
           }
 
           & $procdump -accepteula -mm -n 10 -e 1 -x $dumpDirectory `
-            $python -m pytest $nodeId -q
+            $python -m pytest $nodeId -q -p no:faulthandler
 
       - name: Upload Windows crash dump
         if: always() && runner.os == 'Windows' && matrix.python-version == '3.14t'
