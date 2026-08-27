@@ -41,17 +41,12 @@ jobs:
         with:
           cache-suffix: "test-${{ matrix.python-version }}"
 
-      - name: Configure Windows crash dumps
+      - name: Prepare Windows crash diagnostics
         if: runner.os == 'Windows' && matrix.python-version == '3.14t'
         shell: pwsh
         run: |
           $dumpDirectory = Join-Path $env:RUNNER_TEMP "crash-dumps"
           New-Item -ItemType Directory -Force -Path $dumpDirectory
-          $key = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps"
-          New-Item -Path $key -Force
-          New-ItemProperty -Path $key -Name DumpFolder -Value $dumpDirectory -PropertyType ExpandString -Force
-          New-ItemProperty -Path $key -Name DumpCount -Value 2 -PropertyType DWord -Force
-          New-ItemProperty -Path $key -Name DumpType -Value 1 -PropertyType DWord -Force
 
       - name: Run tests
         shell: bash
@@ -61,10 +56,33 @@ jobs:
         if: failure() && runner.os == 'Windows' && matrix.python-version == '3.14t'
         shell: pwsh
         run: |
-          $dump = Get-ChildItem (Join-Path $env:RUNNER_TEMP "crash-dumps") -Filter "*.dmp" |
+          $dumpDirectory = Join-Path $env:RUNNER_TEMP "crash-dumps"
+          $python = Join-Path $env:GITHUB_WORKSPACE ".venv\Scripts\python.exe"
+          $nodeId = "tests/test_exception.py::TestEffectsDuringAbortCleanup::test_cleanup_effect_continuation_can_resume_multiple_times"
+
+          $env:PYTHON_GIL = "1"
+          & $python -m pytest $nodeId -q
+          Write-Host "PYTHON_GIL=1 exit code: $LASTEXITCODE"
+          Remove-Item Env:PYTHON_GIL
+
+          $procdumpZip = Join-Path $env:RUNNER_TEMP "procdump.zip"
+          $procdumpDirectory = Join-Path $env:RUNNER_TEMP "procdump"
+          Invoke-WebRequest "https://download.sysinternals.com/files/Procdump.zip" -OutFile $procdumpZip
+          Expand-Archive -Path $procdumpZip -DestinationPath $procdumpDirectory
+          $procdump = Join-Path $procdumpDirectory "procdump64.exe"
+          $signature = Get-AuthenticodeSignature $procdump
+          if ($signature.Status -ne "Valid" -or
+              $signature.SignerCertificate.Subject -notmatch "O=Microsoft Corporation") {
+            throw "ProcDump does not have a valid Microsoft signature."
+          }
+          & $procdump -accepteula -ma -e 1 -f C0000005 -x $dumpDirectory `
+            $python -m pytest $nodeId -q
+
+          $dump = Get-ChildItem $dumpDirectory -Filter "*.dmp" |
+            Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
           if (-not $dump) {
-            Write-Host "No crash dump was produced."
+            Write-Host "ProcDump did not capture a dump."
             exit 0
           }
           $cdbCandidates = @(
