@@ -41,6 +41,48 @@ jobs:
         with:
           cache-suffix: "test-${{ matrix.python-version }}"
 
+      - name: Configure Windows crash dumps
+        if: runner.os == 'Windows' && matrix.python-version == '3.14t'
+        shell: pwsh
+        run: |
+          $dumpDirectory = Join-Path $env:RUNNER_TEMP "crash-dumps"
+          New-Item -ItemType Directory -Force -Path $dumpDirectory
+          $key = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps"
+          New-Item -Path $key -Force
+          New-ItemProperty -Path $key -Name DumpFolder -Value $dumpDirectory -PropertyType ExpandString -Force
+          New-ItemProperty -Path $key -Name DumpCount -Value 2 -PropertyType DWord -Force
+          New-ItemProperty -Path $key -Name DumpType -Value 1 -PropertyType DWord -Force
+
       - name: Run tests
         shell: bash
         run: ./run_tests_one.sh "${{ matrix.python-version }}"
+
+      - name: Analyze Windows crash dump
+        if: failure() && runner.os == 'Windows' && matrix.python-version == '3.14t'
+        shell: pwsh
+        run: |
+          $dump = Get-ChildItem (Join-Path $env:RUNNER_TEMP "crash-dumps") -Filter "*.dmp" |
+            Select-Object -First 1
+          if (-not $dump) {
+            Write-Host "No crash dump was produced."
+            exit 0
+          }
+          $cdbCandidates = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe",
+            "$env:ProgramFiles\Windows Kits\10\Debuggers\x64\cdb.exe"
+          )
+          $cdb = $cdbCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $cdb) {
+            Write-Host "cdb.exe is unavailable; preserving the dump as an artifact."
+            exit 0
+          }
+          & $cdb -z $dump.FullName -c ".symfix; .reload; .ecxr; r; kP; lm; q"
+
+      - name: Upload Windows crash dump
+        if: always() && runner.os == 'Windows' && matrix.python-version == '3.14t'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-3.14t-crash-dump
+          path: ${{ runner.temp }}/crash-dumps/*.dmp
+          if-no-files-found: ignore
+          retention-days: 1
