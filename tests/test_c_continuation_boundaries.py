@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator as ABCIterator
 import functools
+import importlib.abc
+import importlib.util
+import io
 import itertools
+import os
 import operator
 from pathlib import Path
 import subprocess
@@ -455,6 +459,34 @@ def _reversed_invalid_length_isolated_per_shot() -> None:
     )
 
 
+@_case("error", "itertools_chain_invalid_outer_iterator_isolated_per_shot")
+def _itertools_chain_invalid_outer_iterator_isolated_per_shot() -> None:
+    def run(choose: Choose) -> list[object]:
+        class Outer:
+            def __iter__(self) -> Any:
+                value = choose()
+                return 42 if value == "invalid" else iter(())
+
+        return list(itertools.chain.from_iterable(Outer()))
+
+    _assert_equal(
+        _resume_outcomes(run, ("invalid", "valid")),
+        [("raise", "TypeError"), ("return", [])],
+    )
+
+
+@_case("error", "itertools_chain_active_error_isolated_per_shot")
+def _itertools_chain_active_error_isolated_per_shot() -> None:
+    def run(choose: Choose) -> list[int]:
+        first = map(lambda _item: _raise_then_return(choose), (None,))
+        return list(itertools.chain(first, (100,)))
+
+    _assert_equal(
+        _resume_outcomes(run, ("raise", 10)),
+        [("raise", "_ExpectedCallbackError"), ("return", [10, 100])],
+    )
+
+
 @_case("corner", "bytes_constructor_effectful_release_buffer")
 def _bytes_constructor_effectful_release_buffer() -> None:
     def run(choose: Choose) -> bytes:
@@ -638,6 +670,21 @@ def _next_default_after_effectful_stop() -> None:
     _assert_equal(_resume_outcomes(run, (1, 0, 1)), _returns(42, 99, 42))
 
 
+@_case("normal", "next_without_default_effectful_iterator")
+def _next_without_default_effectful_iterator() -> None:
+    def run(choose: Choose) -> int:
+        class Iterator:
+            def __iter__(self) -> Iterator:
+                return self
+
+            def __next__(self) -> int:
+                return cast(int, choose()) + 100
+
+        return next(Iterator())
+
+    _assert_equal(_resume_outcomes(run), _returns(101, 110))
+
+
 @_case("normal", "next_default_after_effectful_map_callback_stop")
 def _next_default_after_effectful_map_callback_stop() -> None:
     def run(choose: Choose) -> int:
@@ -723,6 +770,86 @@ def _anext_default_without_event_loop() -> None:
     _assert_equal(_resume_outcomes(run, (0, 1)), _returns(99, 42))
 
 
+@_case("corner", "anext_default_on_restored_stop_without_event_loop")
+def _anext_default_on_restored_stop_without_event_loop() -> None:
+    def run(choose: Choose) -> int:
+        class AsyncIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> int:
+                if choose() == 0:
+                    raise StopAsyncIteration
+                return 42
+
+        async def consume() -> int:
+            return await anext(AsyncIterator(), 99)
+
+        coroutine = consume()
+        try:
+            coroutine.send(None)
+        except StopIteration as completed:
+            return cast(int, completed.value)
+        finally:
+            coroutine.close()
+        raise AssertionError("coroutine unexpectedly suspended")
+
+    _assert_equal(_resume_outcomes(run, (1, 0)), _returns(42, 99))
+
+
+@_case("normal", "anext_without_default_without_event_loop")
+def _anext_without_default_without_event_loop() -> None:
+    def run(choose: Choose) -> int:
+        class AsyncIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> int:
+                return cast(int, choose()) + 100
+
+        async def consume() -> int:
+            return await anext(AsyncIterator())
+
+        coroutine = consume()
+        try:
+            coroutine.send(None)
+        except StopIteration as completed:
+            return cast(int, completed.value)
+        raise AssertionError("coroutine unexpectedly suspended")
+
+    _assert_equal(_resume_outcomes(run), _returns(101, 110))
+
+
+@_case("error", "anext_without_default_stop_isolated_per_shot")
+def _anext_without_default_stop_isolated_per_shot() -> None:
+    def run(choose: Choose) -> int:
+        class AsyncIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self) -> int:
+                if choose() == 0:
+                    raise StopAsyncIteration
+                return 42
+
+        async def consume() -> int:
+            return await anext(AsyncIterator())
+
+        coroutine = consume()
+        try:
+            coroutine.send(None)
+        except StopIteration as completed:
+            return cast(int, completed.value)
+        finally:
+            coroutine.close()
+        raise AssertionError("coroutine unexpectedly suspended")
+
+    _assert_equal(
+        _resume_outcomes(run, (1, 0)),
+        [("return", 42), ("raise", "StopAsyncIteration")],
+    )
+
+
 @_case("normal", "binary_add_protocol")
 def _binary_add_protocol() -> None:
     def run(choose: Choose) -> int:
@@ -789,6 +916,702 @@ _UNARY_PROTOCOLS: tuple[tuple[str, Callable[[Any], Any], tuple[Any, ...]], ...] 
 for _method_name, _operation, _values in _UNARY_PROTOCOLS:
     _case("normal", f"unary_protocol_{_method_name}")(
         functools.partial(_unary_protocol_case, _method_name, _operation, _values)
+    )
+
+
+@_case("normal", "builtin_ascii_effectful_repr")
+def _builtin_ascii_effectful_repr() -> None:
+    def run(choose: Choose) -> str:
+        class Target:
+            def __repr__(self) -> str:
+                return f"é{choose()}"
+
+        return ascii(Target())
+
+    _assert_equal(_resume_outcomes(run), _returns("\\xe91", "\\xe910"))
+
+
+@_case("error", "builtin_ascii_success_invalid_success")
+def _builtin_ascii_success_invalid_success() -> None:
+    invalid = object()
+
+    def run(choose: Choose) -> str:
+        class Target:
+            def __repr__(self) -> str:
+                return cast(str, choose())
+
+        return ascii(Target())
+
+    _assert_equal(
+        _resume_outcomes(run, ("é1", invalid, "é10")),
+        [("return", "\\xe91"), ("raise", "TypeError"), ("return", "\\xe910")],
+    )
+
+
+@_case("normal", "builtin_getattr_effectful_getattribute")
+def _builtin_getattr_effectful_getattribute() -> None:
+    def run(choose: Choose) -> int:
+        class Target:
+            def __getattribute__(self, name: str) -> Any:
+                if name == "value":
+                    return choose()
+                return object.__getattribute__(self, name)
+
+        return cast(int, getattr(Target(), "value"))
+
+    _assert_equal(_resume_outcomes(run), _returns(1, 10))
+
+
+@_case("error", "builtin_getattr_default_and_error_isolated_per_shot")
+def _builtin_getattr_default_and_error_isolated_per_shot() -> None:
+    def run(choose: Choose) -> int:
+        class Target:
+            def __getattribute__(self, name: str) -> Any:
+                if name == "value":
+                    outcome = choose()
+                    if outcome == 0:
+                        raise AttributeError(name)
+                    if outcome == 1:
+                        raise RuntimeError("boom")
+                    return 42
+                return object.__getattribute__(self, name)
+
+        return cast(int, getattr(Target(), "value", 99))
+
+    _assert_equal(
+        _resume_outcomes(run, (2, 0, 1)),
+        [("return", 42), ("return", 99), ("raise", "RuntimeError")],
+    )
+
+
+@_case("normal", "builtin_hasattr_effectful_getattribute")
+def _builtin_hasattr_effectful_getattribute() -> None:
+    def run(choose: Choose) -> bool:
+        class Target:
+            def __getattribute__(self, name: str) -> Any:
+                if name == "value":
+                    if choose():
+                        return 42
+                    raise AttributeError(name)
+                return object.__getattribute__(self, name)
+
+        return hasattr(Target(), "value")
+
+    _assert_equal(_resume_outcomes(run, (0, 1)), _returns(False, True))
+
+
+@_case("error", "builtin_hasattr_attribute_error_runtime_error_success")
+def _builtin_hasattr_attribute_error_runtime_error_success() -> None:
+    def run(choose: Choose) -> bool:
+        class Target:
+            def __getattribute__(self, name: str) -> Any:
+                if name == "value":
+                    outcome = choose()
+                    if outcome == 0:
+                        raise AttributeError(name)
+                    if outcome == 1:
+                        raise RuntimeError("boom")
+                    return 42
+                return object.__getattribute__(self, name)
+
+        return hasattr(Target(), "value")
+
+    _assert_equal(
+        _resume_outcomes(run, (0, 1, 2)),
+        [("return", False), ("raise", "RuntimeError"), ("return", True)],
+    )
+
+
+@_case("normal", "builtin_dir_effectful_dir")
+def _builtin_dir_effectful_dir() -> None:
+    def run(choose: Choose) -> list[str]:
+        class Target:
+            def __dir__(self) -> list[str]:
+                return [f"value_{choose()}"]
+
+        return dir(Target())
+
+    _assert_equal(_resume_outcomes(run), _returns(["value_1"], ["value_10"]))
+
+
+@_case("normal", "builtin_divmod_effectful_protocol")
+def _builtin_divmod_effectful_protocol() -> None:
+    def run(choose: Choose) -> tuple[int, int]:
+        class Target:
+            def __divmod__(self, _other: object) -> tuple[int, int]:
+                return cast(int, choose()), 2
+
+        return divmod(Target(), 3)
+
+    _assert_equal(_resume_outcomes(run), _returns((1, 2), (10, 2)))
+
+
+@_case("normal", "builtin_isinstance_effectful_instancecheck")
+def _builtin_isinstance_effectful_instancecheck() -> None:
+    def run(choose: Choose) -> bool:
+        class Meta(type):
+            def __instancecheck__(cls, _instance: object) -> bool:
+                return bool(choose())
+
+        class Target(metaclass=Meta):
+            pass
+
+        return isinstance(object(), Target)
+
+    _assert_equal(_resume_outcomes(run, (0, 1)), _returns(False, True))
+
+
+@_case("normal", "builtin_issubclass_effectful_subclasscheck")
+def _builtin_issubclass_effectful_subclasscheck() -> None:
+    def run(choose: Choose) -> bool:
+        class Meta(type):
+            def __subclasscheck__(cls, _subclass: type[object]) -> bool:
+                return bool(choose())
+
+        class Target(metaclass=Meta):
+            pass
+
+        class Candidate:
+            pass
+
+        return issubclass(Candidate, Target)
+
+    _assert_equal(_resume_outcomes(run, (0, 1)), _returns(False, True))
+
+
+@_case("normal", "builtin_memoryview_effectful_buffer")
+def _builtin_memoryview_effectful_buffer() -> None:
+    def run(choose: Choose) -> bytes:
+        class Buffer:
+            def __buffer__(self, _flags: int) -> memoryview:
+                return memoryview(bytes((cast(int, choose()),)))
+
+            def __release_buffer__(self, _view: memoryview) -> None:
+                pass
+
+        return memoryview(Buffer()).tobytes()
+
+    _assert_equal(_resume_outcomes(run), _returns(b"\x01", b"\x0a"))
+
+
+@_case("normal", "builtin_pow_three_argument_effectful_protocol")
+def _builtin_pow_three_argument_effectful_protocol() -> None:
+    def run(choose: Choose) -> int:
+        class Target:
+            def __pow__(self, _exponent: object, _modulus: object) -> int:
+                return cast(int, choose())
+
+        return pow(Target(), 2, 3)
+
+    _assert_equal(_resume_outcomes(run), _returns(1, 10))
+
+
+@_case("normal", "builtin_vars_effectful_dict_lookup")
+def _builtin_vars_effectful_dict_lookup() -> None:
+    def run(choose: Choose) -> dict[str, int]:
+        class Target:
+            def __getattribute__(self, name: str) -> Any:
+                if name == "__dict__":
+                    return {"value": cast(int, choose())}
+                return object.__getattribute__(self, name)
+
+        return vars(Target())
+
+    _assert_equal(_resume_outcomes(run), _returns({"value": 1}, {"value": 10}))
+
+
+@_case("normal", "builtin_print_effectful_write")
+def _builtin_print_effectful_write() -> None:
+    def run(choose: Choose) -> None:
+        class Output:
+            def write(self, text: str) -> int:
+                if text == "value":
+                    return cast(int, choose())
+                return len(text)
+
+        return print("value", file=Output())
+
+    _assert_equal(_resume_outcomes(run), _returns(None, None))
+
+
+@_case("error", "builtin_print_write_error_isolated_per_shot")
+def _builtin_print_write_error_isolated_per_shot() -> None:
+    def run(choose: Choose) -> None:
+        class Output:
+            def write(self, text: str) -> int:
+                if text != "value":
+                    return len(text)
+                outcome = choose()
+                if outcome == "raise":
+                    raise RuntimeError("boom")
+                return cast(int, outcome)
+
+        return print("value", file=Output())
+
+    _assert_equal(
+        _resume_outcomes(run, (1, "raise", 10)),
+        [("return", None), ("raise", "RuntimeError"), ("return", None)],
+    )
+
+
+@_case("corner", "builtin_print_resumes_end_after_effectful_write")
+def _builtin_print_resumes_end_after_effectful_write() -> None:
+    def run(choose: Choose) -> None:
+        class Output:
+            fail_end = False
+
+            def write(self, text: str) -> int:
+                if text == "value":
+                    self.fail_end = choose() == 10
+                elif self.fail_end:
+                    raise RuntimeError("end reached")
+                return len(text)
+
+        return print("value", file=Output())
+
+    _assert_equal(
+        _resume_outcomes(run),
+        [("return", None), ("raise", "RuntimeError")],
+    )
+
+
+@_case("corner", "builtin_print_resumes_write_after_effectful_str")
+def _builtin_print_resumes_write_after_effectful_str() -> None:
+    def run(choose: Choose) -> None:
+        class Value:
+            def __str__(self) -> str:
+                return f"value={choose()}"
+
+        class Output:
+            def write(self, text: str) -> int:
+                if text == "value=10":
+                    raise RuntimeError("write reached")
+                return len(text)
+
+        return print(Value(), file=Output())
+
+    _assert_equal(
+        _resume_outcomes(run),
+        [("return", None), ("raise", "RuntimeError")],
+    )
+
+
+@_case("corner", "builtin_print_effectful_flush")
+def _builtin_print_effectful_flush() -> None:
+    def run(choose: Choose) -> None:
+        class Output:
+            def write(self, text: str) -> int:
+                return len(text)
+
+            def flush(self) -> int:
+                return cast(int, choose())
+
+        return print("value", file=Output(), flush=True)
+
+    _assert_equal(_resume_outcomes(run), _returns(None, None))
+
+
+@_case("normal", "builtin_open_effectful_path_protocol")
+def _builtin_open_effectful_path_protocol() -> None:
+    paths = (str(Path(__file__).resolve()), str(Path(__file__).resolve().parents[1] / "README.md"))
+    expected = tuple(Path(path).read_text(encoding="utf-8")[0] for path in paths)
+
+    def run(choose: Choose) -> str:
+        class Target:
+            def __fspath__(self) -> str:
+                return cast(str, choose())
+
+        with open(Target(), encoding="utf-8") as stream:
+            return stream.read(1)
+
+    _assert_equal(_resume_outcomes(run, paths), _returns(*expected))
+
+
+@_case("error", "builtin_open_invalid_path_isolated_per_shot")
+def _builtin_open_invalid_path_isolated_per_shot() -> None:
+    valid_paths = (
+        str(Path(__file__).resolve()),
+        str(Path(__file__).resolve().parents[1] / "README.md"),
+    )
+    invalid = object()
+    expected = tuple(Path(path).read_text(encoding="utf-8")[0] for path in valid_paths)
+
+    def run(choose: Choose) -> str:
+        class Target:
+            def __fspath__(self) -> str:
+                return cast(str, choose())
+
+        with open(Target(), encoding="utf-8") as stream:
+            return stream.read(1)
+
+    _assert_equal(
+        _resume_outcomes(run, (valid_paths[0], invalid, valid_paths[1])),
+        [("return", expected[0]), ("raise", "TypeError"), ("return", expected[1])],
+    )
+
+
+@_case("corner", "builtin_open_effectful_opener")
+def _builtin_open_effectful_opener() -> None:
+    path = str(Path(__file__).resolve())
+    expected = Path(path).read_text(encoding="utf-8")[0]
+
+    def run(choose: Choose) -> str:
+        def opener(opener_path: str, flags: int) -> int:
+            choose()
+            return os.open(opener_path, flags)
+
+        with open(path, encoding="utf-8", opener=opener) as stream:
+            return stream.read(1)
+
+    _assert_equal(_resume_outcomes(run), _returns(expected, expected))
+
+
+@_case("normal", "builtin_input_effectful_readline")
+def _builtin_input_effectful_readline() -> None:
+    def run(choose: Choose) -> str:
+        class Input:
+            def readline(self) -> str:
+                return f"value={choose()}\n"
+
+        original_stdin = sys.stdin
+        original_stdout = sys.stdout
+        try:
+            sys.stdin = cast(Any, Input())
+            sys.stdout = io.StringIO()
+            return input("prompt: ")
+        finally:
+            sys.stdin = original_stdin
+            sys.stdout = original_stdout
+
+    _assert_equal(_resume_outcomes(run), _returns("value=1", "value=10"))
+
+
+@_case("error", "builtin_input_newline_eof_and_crlf_isolated_per_shot")
+def _builtin_input_newline_eof_and_crlf_isolated_per_shot() -> None:
+    def run(choose: Choose) -> str:
+        class Input:
+            def readline(self) -> str:
+                return cast(str, choose())
+
+        original_stdin = sys.stdin
+        original_stdout = sys.stdout
+        try:
+            sys.stdin = cast(Any, Input())
+            sys.stdout = io.StringIO()
+            return input()
+        finally:
+            sys.stdin = original_stdin
+            sys.stdout = original_stdout
+
+    _assert_equal(
+        _resume_outcomes(run, ("one\n", "", "ten\r\n")),
+        [("return", "one"), ("raise", "EOFError"), ("return", "ten")],
+    )
+
+
+@_case("corner", "builtin_input_effectful_prompt_write_then_readline")
+def _builtin_input_effectful_prompt_write_then_readline() -> None:
+    def run(choose: Choose) -> str:
+        class Input:
+            def readline(self) -> str:
+                return "answer\n"
+
+        class Output:
+            def write(self, text: str) -> int:
+                if text == "prompt: ":
+                    return cast(int, choose())
+                return len(text)
+
+            def flush(self) -> None:
+                pass
+
+        original_stdin = sys.stdin
+        original_stdout = sys.stdout
+        try:
+            sys.stdin = cast(Any, Input())
+            sys.stdout = cast(Any, Output())
+            return input("prompt: ")
+        finally:
+            sys.stdin = original_stdin
+            sys.stdout = original_stdout
+
+    _assert_equal(_resume_outcomes(run), _returns("answer", "answer"))
+
+
+@_case("normal", "builtin_eval_effectful_expression")
+def _builtin_eval_effectful_expression() -> None:
+    def run(choose: Choose) -> int:
+        return cast(int, eval("choose() + 100", {"choose": choose}))
+
+    _assert_equal(_resume_outcomes(run), _returns(101, 110))
+
+
+@_case("normal", "builtin_exec_effectful_code")
+def _builtin_exec_effectful_code() -> None:
+    def run(choose: Choose) -> tuple[None, int]:
+        namespace: dict[str, Any] = {"choose": choose}
+        result = exec("value = choose() + 100", namespace)
+        return result, cast(int, namespace["value"])
+
+    _assert_equal(_resume_outcomes(run), _returns((None, 101), (None, 110)))
+
+
+@_case("normal", "builtin_build_class_effectful_set_name")
+def _builtin_build_class_effectful_set_name() -> None:
+    def run(choose: Choose) -> int:
+        class Descriptor:
+            saved = 0
+
+            def __set_name__(self, _owner: type[object], _name: str) -> None:
+                self.saved = cast(int, choose()) + 100
+
+            def __get__(self, _instance: object, _owner: type[object]) -> int:
+                return self.saved
+
+        class Target:
+            value = Descriptor()
+
+        return Target.value
+
+    _assert_equal(_resume_outcomes(run), _returns(101, 110))
+
+
+@_case("normal", "builtin_build_class_effectful_class_body")
+def _builtin_build_class_effectful_class_body() -> None:
+    def run(choose: Choose) -> int:
+        class Target:
+            value = choose()
+
+        return cast(int, Target.value)
+
+    _assert_equal(_resume_outcomes(run), _returns(1, 10))
+
+
+@_case("normal", "builtin_build_class_effectful_init_subclass")
+def _builtin_build_class_effectful_init_subclass() -> None:
+    def run(choose: Choose) -> int:
+        class Base:
+            @classmethod
+            def __init_subclass__(cls) -> None:
+                cls.value = choose()
+
+        class Target(Base):
+            pass
+
+        return cast(int, Target.value)
+
+    _assert_equal(_resume_outcomes(run), _returns(1, 10))
+
+
+@_case("normal", "builtin_import_effectful_finder")
+def _builtin_import_effectful_finder() -> None:
+    module_name = "_aleff_effectful_import_case"
+
+    def run(choose: Choose) -> int:
+        class Loader(importlib.abc.Loader):
+            def __init__(self, value: int) -> None:
+                self.value = value
+
+            def create_module(self, _spec: Any) -> None:
+                return None
+
+            def exec_module(self, module: Any) -> None:
+                module.value = self.value
+
+        class Finder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname: str, _path: Any, _target: Any = None) -> Any:
+                if fullname != module_name:
+                    return None
+                value = cast(int, choose())
+                return importlib.util.spec_from_loader(fullname, Loader(value))
+
+        finder = Finder()
+        sys.meta_path.insert(0, finder)
+        try:
+            module = __import__(module_name)
+            return cast(int, module.value)
+        finally:
+            if finder in sys.meta_path:
+                sys.meta_path.remove(finder)
+            sys.modules.pop(module_name, None)
+
+    _assert_equal(_resume_outcomes(run), _returns(1, 10))
+
+
+@_case("error", "builtin_import_finder_error_isolated_per_shot")
+def _builtin_import_finder_error_isolated_per_shot() -> None:
+    module_name = "_aleff_effectful_import_error_case"
+
+    def run(choose: Choose) -> int:
+        class Loader(importlib.abc.Loader):
+            def create_module(self, _spec: Any) -> None:
+                return None
+
+            def exec_module(self, module: Any) -> None:
+                module.value = 42
+
+        class Finder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname: str, _path: Any, _target: Any = None) -> Any:
+                if fullname != module_name:
+                    return None
+                if choose() == "raise":
+                    raise RuntimeError("boom")
+                return importlib.util.spec_from_loader(fullname, Loader())
+
+        finder = Finder()
+        sys.meta_path.insert(0, finder)
+        try:
+            module = __import__(module_name)
+            return cast(int, module.value)
+        finally:
+            if finder in sys.meta_path:
+                sys.meta_path.remove(finder)
+            sys.modules.pop(module_name, None)
+
+    _assert_equal(
+        _resume_outcomes(run, ("ok", "raise", "ok")),
+        [("return", 42), ("raise", "RuntimeError"), ("return", 42)],
+    )
+
+
+@_case("corner", "builtin_import_effectful_loader_without_global_lock")
+def _builtin_import_effectful_loader_without_global_lock() -> None:
+    module_name = "_aleff_effectful_import_loader_case"
+
+    def run(choose: Choose) -> int:
+        class Loader(importlib.abc.Loader):
+            def create_module(self, _spec: Any) -> None:
+                return None
+
+            def exec_module(self, module: Any) -> None:
+                module.value = choose()
+
+        class Finder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname: str, _path: Any, _target: Any = None) -> Any:
+                if fullname != module_name:
+                    return None
+                return importlib.util.spec_from_loader(fullname, Loader())
+
+        finder = Finder()
+        sys.meta_path.insert(0, finder)
+        try:
+            module = __import__(module_name)
+            return cast(int, module.value)
+        finally:
+            if finder in sys.meta_path:
+                sys.meta_path.remove(finder)
+            sys.modules.pop(module_name, None)
+
+    _assert_equal(_resume_outcomes(run), _returns(1, 10))
+
+
+@_case("normal", "builtin_breakpoint_effectful_hook")
+def _builtin_breakpoint_effectful_hook() -> None:
+    def run(choose: Choose) -> int:
+        original_hook = sys.breakpointhook
+        try:
+            sys.breakpointhook = lambda: cast(int, choose()) + 100
+            return cast(int, breakpoint())
+        finally:
+            sys.breakpointhook = original_hook
+
+    _assert_equal(_resume_outcomes(run), _returns(101, 110))
+
+
+@_case("normal", "builtin_type_three_argument_effectful_set_name")
+def _builtin_type_three_argument_effectful_set_name() -> None:
+    def run(choose: Choose) -> int:
+        class Descriptor:
+            saved = 0
+
+            def __set_name__(self, _owner: type[object], _name: str) -> None:
+                self.saved = cast(int, choose()) + 100
+
+            def __get__(self, _instance: object, _owner: type[object]) -> int:
+                return self.saved
+
+        target = type("Target", (), {"value": Descriptor()})
+        return cast(int, target.value)
+
+    _assert_equal(_resume_outcomes(run), _returns(101, 110))
+
+
+def _type_construction_suffix_case(choose: Choose, use_build_class: bool) -> tuple[int, int]:
+    class First:
+        saved = 0
+
+        def __set_name__(self, _owner: type[object], _name: str) -> None:
+            self.saved = cast(int, choose())
+
+    class Second:
+        saved = 0
+
+        def __init__(self, first: First) -> None:
+            self.first = first
+
+        def __set_name__(self, _owner: type[object], _name: str) -> None:
+            self.saved = self.first.saved
+
+    first = First()
+    second = Second(first)
+
+    class Base:
+        @classmethod
+        def __init_subclass__(cls) -> None:
+            cls.subclass_saved = second.saved
+
+    if use_build_class:
+
+        class Target(Base):
+            first_value = first
+            second_value = second
+
+    else:
+        Target = type(
+            "Target",
+            (Base,),
+            {"first_value": first, "second_value": second},
+        )
+    return second.saved, cast(int, Target.subclass_saved)
+
+
+@_case("corner", "builtin_build_class_resumes_set_name_and_init_subclass_suffix")
+def _builtin_build_class_resumes_set_name_and_init_subclass_suffix() -> None:
+    _assert_equal(
+        _resume_outcomes(lambda choose: _type_construction_suffix_case(choose, True)),
+        _returns((1, 1), (10, 10)),
+    )
+
+
+@_case("corner", "builtin_type_resumes_set_name_and_init_subclass_suffix")
+def _builtin_type_resumes_set_name_and_init_subclass_suffix() -> None:
+    _assert_equal(
+        _resume_outcomes(lambda choose: _type_construction_suffix_case(choose, False)),
+        _returns((1, 1), (10, 10)),
+    )
+
+
+@_case("error", "builtin_type_set_name_error_isolated_per_shot")
+def _builtin_type_set_name_error_isolated_per_shot() -> None:
+    def run(choose: Choose) -> int:
+        class Descriptor:
+            saved = 0
+
+            def __set_name__(self, _owner: type[object], _name: str) -> None:
+                outcome = choose()
+                if outcome == "raise":
+                    raise RuntimeError("boom")
+                self.saved = cast(int, outcome)
+
+            def __get__(self, _instance: object, _owner: type[object]) -> int:
+                return self.saved
+
+        target = type("Target", (), {"value": Descriptor()})
+        return cast(int, target.value)
+
+    _assert_equal(
+        _resume_outcomes(run, (1, "raise", 10)),
+        [("return", 1), ("raise", "RuntimeError"), ("return", 10)],
     )
 
 
@@ -1168,6 +1991,89 @@ def _dict_get_effectful_equality() -> None:
     _assert_equal(_resume_outcomes(run, (0, 1)), _returns("missing", "found"))
 
 
+@_case("normal", "list_sort_effectful_key")
+def _list_sort_effectful_key() -> None:
+    def run(choose: Choose) -> tuple[int, ...]:
+        target = [1, 2]
+        target.sort(key=lambda value: choose() if value == 1 else 5)
+        return tuple(target)
+
+    _assert_equal(_resume_outcomes(run, (0, 10)), _returns((1, 2), (2, 1)))
+
+
+def _sequence_search_case(sequence_type: type[list[Any]] | type[tuple[Any, ...]], operation: str) -> None:
+    def run(choose: Choose) -> Any:
+        class Item:
+            def __eq__(self, _other: object) -> Any:
+                return choose()
+
+        sequence = sequence_type((Item(),))
+        if operation == "count":
+            return sequence.count(object())
+        if operation == "index":
+            return sequence.index(object())
+        if operation == "contains":
+            return object() in sequence
+        if operation == "eq":
+            return sequence == sequence_type((object(),))
+        return sequence != sequence_type((object(),))
+
+    values = (0, 2) if operation != "index" else (1, 0)
+    if operation == "index":
+        expected: list[tuple[str, Any]] = [("return", 0), ("raise", "ValueError")]
+    elif operation == "count":
+        expected = _returns(0, 1)
+    elif operation in {"contains", "eq"}:
+        expected = _returns(False, True)
+    else:
+        expected = _returns(True, False)
+    _assert_equal(_resume_outcomes(run, values), expected)
+
+
+for _sequence_type, _sequence_name in ((list, "list"), (tuple, "tuple")):
+    for _operation in ("count", "index", "contains", "eq", "ne"):
+        _case(
+            "error" if _operation == "index" else "normal",
+            f"{_sequence_name}_{_operation}_effectful_equality_search",
+        )(functools.partial(_sequence_search_case, _sequence_type, _operation))
+
+
+def _sequence_contains_suffix_case(sequence_type: type[list[Any]] | type[tuple[Any, ...]]) -> None:
+    def run(choose: Choose) -> bool:
+        class Item:
+            def __eq__(self, _other: object) -> Any:
+                return choose()
+
+        target = object()
+        sequence = sequence_type((Item(), target))
+        return target in sequence
+
+    _assert_equal(_resume_outcomes(run, (0, 0)), _returns(True, True))
+
+
+for _sequence_type, _sequence_name in ((list, "list"), (tuple, "tuple")):
+    _case("corner", f"{_sequence_name}_contains_resumes_suffix")(
+        functools.partial(_sequence_contains_suffix_case, _sequence_type)
+    )
+
+
+@_case("error", "list_remove_effectful_equality_isolated_per_shot")
+def _list_remove_effectful_equality_isolated_per_shot() -> None:
+    def run(choose: Choose) -> tuple[Any, tuple[Any, ...]]:
+        class Item:
+            def __eq__(self, _other: object) -> Any:
+                return choose()
+
+        target: list[Any] = [Item(), "suffix"]
+        result = target.remove(object())
+        return result, tuple(target)
+
+    outcomes = _resume_outcomes(run, (1, 0))
+    assert outcomes[0][0] == "return" and outcomes[0][1][0] is None, outcomes
+    assert outcomes[0][1][1] == ("suffix",), outcomes
+    assert outcomes[1] == ("raise", "ValueError"), outcomes
+
+
 @_case("normal", "itertools_accumulate_pending_suffix")
 def _itertools_accumulate_pending_suffix() -> None:
     def run(choose: Choose) -> list[int]:
@@ -1186,6 +2092,64 @@ def _itertools_accumulate_pending_suffix() -> None:
     assert all(tag == "return" and isinstance(value, list) for tag, value in outcomes), outcomes
     assert 5 in outcomes[0][1], outcomes
     assert 14 in outcomes[1][1], outcomes
+
+
+@_case("normal", "itertools_chain_effectful_iterable")
+def _itertools_chain_effectful_iterable() -> None:
+    def run(choose: Choose) -> list[int]:
+        return list(itertools.chain(_EffectfulIterable(choose), (100,)))
+
+    _assert_equal(_resume_outcomes(run), _returns([1, 100], [10, 100]))
+
+
+@_case("normal", "itertools_chain_from_iterable_effectful_outer")
+def _itertools_chain_from_iterable_effectful_outer() -> None:
+    def run(choose: Choose) -> list[int]:
+        class Outer:
+            def __iter__(self) -> ABCIterator[tuple[int, ...]]:
+                value = cast(int, choose())
+                return iter(((value,), (100,)))
+
+        return list(itertools.chain.from_iterable(Outer()))
+
+    _assert_equal(_resume_outcomes(run), _returns([1, 100], [10, 100]))
+
+
+@_case("normal", "itertools_chain_from_iterable_effectful_inner")
+def _itertools_chain_from_iterable_effectful_inner() -> None:
+    def run(choose: Choose) -> list[int]:
+        first = map(lambda _item: cast(int, choose()), (None,))
+        return list(itertools.chain.from_iterable((first, (100,))))
+
+    _assert_equal(_resume_outcomes(run), _returns([1, 100], [10, 100]))
+
+
+@_case("corner", "itertools_chain_from_iterable_descriptor_binding")
+def _itertools_chain_from_iterable_descriptor_binding() -> None:
+    descriptor = itertools.chain.__dict__["from_iterable"]
+    assert type(descriptor).__name__ == "classmethod_descriptor"
+    assert list(itertools.chain.from_iterable(((1,), (2,)))) == [1, 2]
+    assert list(itertools.chain().from_iterable(((3,), (4,)))) == [3, 4]
+
+
+@_case("corner", "itertools_chain_empty_inputs")
+def _itertools_chain_empty_inputs() -> None:
+    empty_chain = cast(ABCIterator[object], itertools.chain())
+    empty_from_iterable = cast(ABCIterator[object], itertools.chain.from_iterable(()))
+    assert list(empty_chain) == []
+    assert list(empty_from_iterable) == []
+
+
+@_case("corner", "itertools_chain_three_shot_suffix")
+def _itertools_chain_three_shot_suffix() -> None:
+    def run(choose: Choose) -> list[int]:
+        first = map(lambda _item: cast(int, choose()), (None,))
+        return list(itertools.chain(first, (100,)))
+
+    _assert_equal(
+        _resume_outcomes(run, (1, 2, 3)),
+        _returns([1, 100], [2, 100], [3, 100]),
+    )
 
 
 @_case("normal", "functools_reduce_pending_suffix")

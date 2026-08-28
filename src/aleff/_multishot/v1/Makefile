@@ -11,16 +11,18 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 TARGET = _aleff$(EXT_SUFFIX)
-SRC = _aleff.c continuation_adapters.c
+ADAPTER_SRC = adapters/framework.c adapters/iterators.c adapters/builtins.c \
+	adapters/containers.c adapters/adapters_bootstrap.c adapters/api.h
+SRC = _aleff.c adapters/framework.c
 
 .PHONY: build debug clean
 
 build: $(TARGET)
 
-debug: $(SRC)
+debug: $(SRC) $(ADAPTER_SRC)
 	$(CC) $(DEBUG_CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $(TARGET) $(SRC)
 
-$(TARGET): $(SRC)
+$(TARGET): $(SRC) $(ADAPTER_SRC)
 	$(CC) $(CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $@ $(SRC)
 
 clean:

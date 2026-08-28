@@ -30,7 +30,14 @@ setup(
             "aleff._multishot.v1._aleff",
             sources=[
                 "src/aleff/_multishot/v1/_aleff.c",
-                "src/aleff/_multishot/v1/continuation_adapters.c",
+                "src/aleff/_multishot/v1/adapters/framework.c",
+            ],
+            depends=[
+                "src/aleff/_multishot/v1/adapters/api.h",
+                "src/aleff/_multishot/v1/adapters/builtins.c",
+                "src/aleff/_multishot/v1/adapters/containers.c",
+                "src/aleff/_multishot/v1/adapters/adapters_bootstrap.c",
+                "src/aleff/_multishot/v1/adapters/iterators.c",
             ],
         ),
     ],
