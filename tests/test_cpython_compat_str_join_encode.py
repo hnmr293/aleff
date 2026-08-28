@@ -172,7 +172,7 @@ def test_str_encode_resume_continues_after_replacement() -> None:
     def run(choose: Choose) -> bytes:
         codecs.register_error(
             "issue55_encode_resume",
-            lambda exc: (choose(), exc.end),
+            lambda exc: (choose(), exc.end),  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType, reportUnknownMemberType]
         )
         return "éX".encode("ascii", "issue55_encode_resume")
 
@@ -185,7 +185,7 @@ def test_str_encode_resume_accepts_bytes_replacement() -> None:
     def run(choose: Choose) -> bytes:
         codecs.register_error(
             "issue55_encode_bytes_resume",
-            lambda exc: (choose(), exc.end),
+            lambda exc: (choose(), exc.end),  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType, reportUnknownMemberType]
         )
         return "éX".encode("ascii", "issue55_encode_bytes_resume")
 

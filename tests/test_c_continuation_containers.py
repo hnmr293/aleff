@@ -49,12 +49,14 @@ class _EffectfulIterable:
 
     def __iter__(self) -> Iterator[Any]:
         value = self.choose()
+
         def replace(item: Any) -> Any:
             if item is _CHOSEN:
                 return value
             if isinstance(item, tuple):
-                return tuple(replace(part) for part in item)
+                return tuple(replace(part) for part in item)  # pyright: ignore[reportUnknownVariableType]
             return item
+
         return iter(tuple(replace(item) for item in self.values))
 
 
@@ -83,7 +85,7 @@ class _EffectfulMapping(Mapping[str, Any]):
     def __len__(self) -> int:
         return 1
 
-    def keys(self) -> tuple[str, ...]:
+    def keys(self) -> tuple[str, ...]:  # pyright: ignore[reportIncompatibleMethodOverride]
         return ("chosen",)
 
 
@@ -97,12 +99,12 @@ class _EffectfulKeysMapping(Mapping[str, int]):
         return 42
 
     def __iter__(self) -> Iterator[str]:
-        return iter((("wrong", 99),))
+        return iter((("wrong", 99),))  # pyright: ignore[reportReturnType]
 
     def __len__(self) -> int:
         return 1
 
-    def keys(self) -> tuple[str, ...]:
+    def keys(self) -> tuple[str, ...]:  # pyright: ignore[reportIncompatibleMethodOverride]
         return cast(tuple[str, ...], self.choose())
 
 
@@ -139,19 +141,19 @@ class _EffectfulEquality:
 @_case("dict_item_protocols")
 def _dict_item_protocols() -> None:
     def get_run(choose: Choose) -> str:
-        return dict.__getitem__({1: "one", 10: "ten"}, _EffectfulHash(choose))
+        return dict.__getitem__({1: "one", 10: "ten"}, _EffectfulHash(choose))  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
     def contains_run(choose: Choose) -> bool:
-        return dict.__contains__({1: "one", 10: "ten"}, _EffectfulHash(choose))
+        return dict.__contains__({1: "one", 10: "ten"}, _EffectfulHash(choose))  # pyright: ignore[reportUnknownMemberType]
 
     def set_run(choose: Choose) -> dict[int, str]:
         result = {1: "old", 10: "old"}
-        dict.__setitem__(result, _EffectfulHash(choose), "new")
+        dict.__setitem__(result, _EffectfulHash(choose), "new")  # pyright: ignore[reportUnknownMemberType]
         return dict(result)
 
     def del_run(choose: Choose) -> dict[int, str]:
         result = {1: "one", 10: "ten"}
-        dict.__delitem__(result, _EffectfulHash(choose))
+        dict.__delitem__(result, _EffectfulHash(choose))  # pyright: ignore[reportUnknownMemberType]
         return dict(result)
 
     assert _outcomes(get_run) == ["one", "ten"]
@@ -162,11 +164,11 @@ def _dict_item_protocols() -> None:
     ]
     assert _outcomes(del_run) == [{10: "ten"}, {}]
     with pytest.raises(KeyError):
-        dict.__getitem__({}, "missing")
+        dict.__getitem__({}, "missing")  # pyright: ignore[reportUnknownMemberType]
     with pytest.raises(KeyError):
-        dict.__delitem__({}, "missing")
+        dict.__delitem__({}, "missing")  # pyright: ignore[reportUnknownMemberType]
     with pytest.raises(TypeError):
-        dict.__setitem__({}, "key")
+        dict.__setitem__({}, "key")  # pyright: ignore[reportCallIssue, reportUnknownMemberType]
 
 
 @_case("dict_equality_protocols")
@@ -182,16 +184,16 @@ def _dict_equality_protocols() -> None:
     assert _outcomes(equal_run, (True, False)) == [True, False]
     assert _outcomes(not_equal_run, (True, False)) == [False, True]
     with pytest.raises(TypeError):
-        dict.__eq__({})
+        dict.__eq__({})  # pyright: ignore[reportCallIssue, reportUnknownMemberType]
     with pytest.raises(TypeError):
-        dict.__ne__({})
+        dict.__ne__({})  # pyright: ignore[reportCallIssue, reportUnknownMemberType]
 
 
 @_case("dict_pop")
 def _dict_pop() -> None:
     def pop_hash_run(choose: Choose) -> int:
         result = {1: 100, 10: 200}
-        return 1000 + result.pop(_EffectfulHash(choose))
+        return 1000 + result.pop(_EffectfulHash(choose))  # pyright: ignore[reportArgumentType]
 
     class EqualityKey:
         def __init__(self, choose: Choose) -> None:
@@ -205,15 +207,15 @@ def _dict_pop() -> None:
 
     def pop_equality_run(choose: Choose) -> int:
         result = {1: 100}
-        return result.pop(EqualityKey(choose), 300)
+        return result.pop(EqualityKey(choose), 300)  # pyright: ignore[reportArgumentType, reportCallIssue, reportUnknownVariableType]
 
     assert _outcomes(pop_hash_run) == [1100, 1200]
     assert _outcomes(pop_equality_run, (False, True)) == [300, 100]
 
     with pytest.raises(TypeError):
-        {}.pop()
+        {}.pop()  # pyright: ignore[reportCallIssue, reportUnknownMemberType]
     with pytest.raises(TypeError):
-        {}.pop("key", 1, 2)
+        {}.pop("key", 1, 2)  # pyright: ignore[reportCallIssue, reportUnknownMemberType]
 
 
 @_case("codec_methods")
@@ -223,23 +225,21 @@ def _codec_methods() -> None:
     def encode_run(choose: Choose) -> bytes:
         codecs.register_error(
             "aleff_test_encode",
-            lambda exc: (str(choose()), exc.end),
+            lambda exc: (str(choose()), exc.end),  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType, reportUnknownMemberType]
         )
-        return "\N{LATIN SMALL LETTER E WITH ACUTE}".encode(
-            "ascii", "aleff_test_encode"
-        )
+        return "\N{LATIN SMALL LETTER E WITH ACUTE}".encode("ascii", "aleff_test_encode")
 
     def bytes_decode_run(choose: Choose) -> str:
         codecs.register_error(
             "aleff_test_bytes_decode",
-            lambda exc: (str(choose()), exc.end),
+            lambda exc: (str(choose()), exc.end),  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType, reportUnknownMemberType]
         )
         return b"\xff".decode("ascii", "aleff_test_bytes_decode")
 
     def bytearray_decode_run(choose: Choose) -> str:
         codecs.register_error(
             "aleff_test_bytearray_decode",
-            lambda exc: (str(choose()), exc.end),
+            lambda exc: (str(choose()), exc.end),  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType, reportUnknownMemberType]
         )
         return bytearray(b"\xff").decode("ascii", "aleff_test_bytearray_decode")
 
@@ -259,12 +259,12 @@ def _memoryview_count_index() -> None:
     view = memoryview(b"ababa")
     if not hasattr(view, "count") or not hasattr(view, "index"):
         return
-    assert type(view.count(97)) is int
-    assert view.count(97) == 3
-    assert view.index(98) == 1
-    assert view.count(120) == 0
+    assert type(view.count(97)) is int  # pyright: ignore[reportOptionalCall, reportUnknownArgumentType]
+    assert view.count(97) == 3  # pyright: ignore[reportOptionalCall]
+    assert view.index(98) == 1  # pyright: ignore[reportOptionalCall]
+    assert view.count(120) == 0  # pyright: ignore[reportOptionalCall]
     with pytest.raises(ValueError):
-        view.index(120)
+        view.index(120)  # pyright: ignore[reportOptionalCall]
     assert view.count("a") == 0  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         view.index("a")  # type: ignore[arg-type]
@@ -315,7 +315,7 @@ def _dict_update_keywords_and_signature() -> None:
 
     assert _outcomes(run) == [{"key": 1, "extra": 3}, {"key": 10, "extra": 3}]
     with pytest.raises(TypeError):
-        {}.update(("key", 1), ("other", 2))
+        {}.update(("key", 1), ("other", 2))  # pyright: ignore[reportCallIssue, reportUnknownMemberType]
 
 
 @_case("dict_update_mapping_sequence_precedence")
@@ -374,9 +374,9 @@ def _dict_update_input_shapes() -> None:
         {"mapping": 1, "list": 2, "tuple": 3, "generator": 4, "chosen": 10, "keyword": 5},
     ]
     with pytest.raises(ValueError):
-        {}.update([("too", "many", "items")])
+        {}.update([("too", "many", "items")])  # pyright: ignore[reportArgumentType, reportCallIssue, reportUnknownMemberType]
     with pytest.raises(ValueError):
-        {}.update([("too",)])
+        {}.update([("too",)])  # pyright: ignore[reportArgumentType, reportCallIssue, reportUnknownMemberType]
 
 
 @_case("set_update")
@@ -403,11 +403,11 @@ def _set_update_unhashable_item_isolated() -> None:
 @_case("set_operations")
 def _set_operations() -> None:
     operations: dict[str, Callable[[set[int], _EffectfulIterable], Any]] = {
-        "union": set.union,
-        "intersection": set.intersection,
-        "difference": set.difference,
-        "symmetric_difference": set.symmetric_difference,
-        "isdisjoint": set.isdisjoint,
+        "union": set.union,  # pyright: ignore[reportUnknownMemberType]
+        "intersection": set.intersection,  # pyright: ignore[reportUnknownMemberType]
+        "difference": set.difference,  # pyright: ignore[reportUnknownMemberType]
+        "symmetric_difference": set.symmetric_difference,  # pyright: ignore[reportUnknownMemberType]
+        "isdisjoint": set.isdisjoint,  # pyright: ignore[reportUnknownMemberType]
     }
     expected = {
         "union": [{1, 2, 3}, {1, 2, 3, 10}],
@@ -417,6 +417,7 @@ def _set_operations() -> None:
         "isdisjoint": [False, False],
     }
     for name, operation in operations.items():
+
         def run(choose: Choose, op: Callable[..., Any] = operation) -> Any:
             return op({1, 2, 3}, _EffectfulIterable(choose, (_CHOSEN, 2)))
 
@@ -486,29 +487,29 @@ def _set_zero_operand_corner_cases() -> None:
 @_case("set_single_operand_signature_errors")
 def _set_single_operand_signature_errors() -> None:
     with pytest.raises(TypeError):
-        {1}.symmetric_difference()
+        {1}.symmetric_difference()  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError):
-        {1}.symmetric_difference((2,), (3,))
+        {1}.symmetric_difference((2,), (3,))  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError):
-        {1}.symmetric_difference_update()
+        {1}.symmetric_difference_update()  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError):
-        {1}.symmetric_difference_update((2,), (3,))
+        {1}.symmetric_difference_update((2,), (3,))  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError):
-        {1}.isdisjoint()
+        {1}.isdisjoint()  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError):
-        {1}.issubset((1,), (2,))
+        {1}.issubset((1,), (2,))  # pyright: ignore[reportCallIssue]
 
 
 @_case("frozenset_operations")
 def _frozenset_operations() -> None:
     operations: dict[str, Callable[[frozenset[int], _EffectfulIterable], Any]] = {
-        "union": frozenset.union,
-        "intersection": frozenset.intersection,
-        "difference": frozenset.difference,
-        "symmetric_difference": frozenset.symmetric_difference,
-        "isdisjoint": frozenset.isdisjoint,
-        "issubset": frozenset.issubset,
-        "issuperset": frozenset.issuperset,
+        "union": frozenset.union,  # pyright: ignore[reportUnknownMemberType]
+        "intersection": frozenset.intersection,  # pyright: ignore[reportUnknownMemberType]
+        "difference": frozenset.difference,  # pyright: ignore[reportUnknownMemberType]
+        "symmetric_difference": frozenset.symmetric_difference,  # pyright: ignore[reportUnknownMemberType]
+        "isdisjoint": frozenset.isdisjoint,  # pyright: ignore[reportUnknownMemberType]
+        "issubset": frozenset.issubset,  # pyright: ignore[reportUnknownMemberType]
+        "issuperset": frozenset.issuperset,  # pyright: ignore[reportUnknownMemberType]
     }
     expected = {
         "union": [frozenset({1, 2, 3}), frozenset({1, 2, 3, 10})],
@@ -520,6 +521,7 @@ def _frozenset_operations() -> None:
         "issuperset": [True, False],
     }
     for name, operation in operations.items():
+
         def run(choose: Choose, op: Callable[..., Any] = operation) -> Any:
             return op(frozenset({1, 2, 3}), _EffectfulIterable(choose, (_CHOSEN, 2)))
 
@@ -539,6 +541,7 @@ def _set_subset_and_superset_element_callbacks() -> None:
             return cast(bool, self.choose())
 
     for container_type in (set, frozenset):
+
         def subset_hash_run(choose: Choose) -> bool:
             return container_type({1}).issubset((_EffectfulHash(choose),))
 
@@ -737,15 +740,11 @@ def _str_format_methods_preserve_cpython_semantics() -> None:
 
     value = Value()
     assert "{0.attribute} {0[key]}".format(value) == "attribute item:key"
-    assert "{0!r} {0:{1}}".format(value, "spec") == (
-        "represented formatted:spec"
-    )
-    assert "{{{value}}} {other}".format_map(
-        {"value": 1, "other": 2}
-    ) == "{1} 2"
+    assert "{0!r} {0:{1}}".format(value, "spec") == ("represented formatted:spec")
+    assert "{{{value}}} {other}".format_map({"value": 1, "other": 2}) == "{1} 2"
 
     with pytest.raises(ValueError):
-        "{0} {}".format(value, value)
+        "{0} {}".format(value, value)  # noqa: F523, F525
     with pytest.raises(ValueError):
         "{0}".format_map({"0": value})
     with pytest.raises(ValueError):
@@ -756,7 +755,7 @@ def _str_format_methods_preserve_cpython_semantics() -> None:
 def _range_count() -> None:
     def run(choose: Choose) -> int:
         value = _EffectfulEquality(choose)
-        return range(1).count(value)
+        return range(1).count(value)  # pyright: ignore[reportArgumentType]
 
     assert _outcomes(run, (False, True)) == [0, 1]
 
@@ -764,13 +763,13 @@ def _range_count() -> None:
 @_case("range_index")
 def _range_index() -> None:
     def run(choose: Choose) -> int:
-        return range(1).index(_EffectfulEquality(choose))
+        return range(1).index(_EffectfulEquality(choose))  # pyright: ignore[reportArgumentType]
 
     assert _outcomes(run, (False, True)) == ["ValueError", 0]
 
 
-@_case("slice_indices")
-def _slice_indices() -> tuple[int, int, int]:
+@_case("slice_indices")  # pyright: ignore[reportArgumentType]
+def _slice_indices() -> tuple[int, int, int]:  # pyright: ignore[reportReturnType]
     def run(choose: Choose) -> tuple[int, int, int]:
         value = _EffectfulIndex(choose)
         return slice(value, 8, 2).indices(10)

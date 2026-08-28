@@ -26,9 +26,7 @@ def _case(name: str) -> Callable[[Case], Case]:
     return register
 
 
-def _resume_outcomes(
-    run: Callable[[Choose], Any], values: tuple[Any, ...] = (1, 10)
-) -> list[tuple[str, Any]]:
+def _resume_outcomes(run: Callable[[Choose], Any], values: tuple[Any, ...] = (1, 10)) -> list[tuple[str, Any]]:
     choose = effect("choose")
     handler = create_handler(choose)
 
@@ -145,9 +143,7 @@ def _dir_sorts_callback_result() -> None:
 
         return dir(Target())
 
-    assert _resume_outcomes(run, (["b", "a"], ["d", "c"])) == _returns(
-        ["a", "b"], ["c", "d"]
-    )
+    assert _resume_outcomes(run, (["b", "a"], ["d", "c"])) == _returns(["a", "b"], ["c", "d"])
 
 
 @_case("dir_invalid_result_isolated")
@@ -194,9 +190,7 @@ def _hash_invalid_result_isolated() -> None:
 
 def _abstract_check_case(name: str) -> None:
     operation = isinstance if name == "isinstance" else issubclass
-    hook_name = (
-        "__instancecheck__" if name == "isinstance" else "__subclasscheck__"
-    )
+    hook_name = "__instancecheck__" if name == "isinstance" else "__subclasscheck__"
 
     def run(choose: Choose) -> bool:
         def hook(_self: Any, _candidate: Any) -> Any:
@@ -212,9 +206,7 @@ def _abstract_check_case(name: str) -> None:
 
 
 for _name in ("isinstance", "issubclass"):
-    _case(f"{_name}_normalizes_hook_result")(
-        lambda name=_name: _abstract_check_case(name)
-    )
+    _case(f"{_name}_normalizes_hook_result")(lambda name=_name: _abstract_check_case(name))
 
 
 def _attribute_mutation_case(name: str) -> None:
@@ -251,9 +243,7 @@ def _attribute_mutation_case(name: str) -> None:
 
 
 for _name in ("setattr", "delattr"):
-    _case(f"{_name}_returns_none")(
-        lambda name=_name: _attribute_mutation_case(name)
-    )
+    _case(f"{_name}_returns_none")(lambda name=_name: _attribute_mutation_case(name))
 
 
 def _abstract_tuple_case(name: str) -> None:
@@ -279,16 +269,12 @@ def _abstract_tuple_case(name: str) -> None:
 
 
 for _name in ("isinstance", "issubclass"):
-    _case(f"{_name}_tuple_of_classes")(
-        lambda name=_name: _abstract_tuple_case(name)
-    )
+    _case(f"{_name}_tuple_of_classes")(lambda name=_name: _abstract_tuple_case(name))
 
 
 def _abstract_invalid_tuple_case(name: str) -> None:
     operation = isinstance if name == "isinstance" else issubclass
-    hook_name = (
-        "__instancecheck__" if name == "isinstance" else "__subclasscheck__"
-    )
+    hook_name = "__instancecheck__" if name == "isinstance" else "__subclasscheck__"
 
     def run(choose: Choose) -> bool:
         def hook(_self: Any, _candidate: Any) -> Any:
@@ -300,7 +286,7 @@ def _abstract_invalid_tuple_case(name: str) -> None:
             {},
         )
         candidate: Any = object() if name == "isinstance" else type("Candidate", (), {})
-        return operation(candidate, (checker, 1))
+        return operation(candidate, (checker, 1))  # pyright: ignore[reportArgumentType]
 
     assert _resume_outcomes(run, (0, 2)) == [
         ("raise", "TypeError"),
@@ -309,9 +295,7 @@ def _abstract_invalid_tuple_case(name: str) -> None:
 
 
 for _name in ("isinstance", "issubclass"):
-    _case(f"{_name}_invalid_tuple_isolated")(
-        lambda name=_name: _abstract_invalid_tuple_case(name)
-    )
+    _case(f"{_name}_invalid_tuple_isolated")(lambda name=_name: _abstract_invalid_tuple_case(name))
 
 
 @_case("eval_pending_suffix")
@@ -472,19 +456,19 @@ def _simple_builtin_case(name: str) -> None:
         if name == "bool":
             return bool(target)
         if name == "divmod":
-            return divmod(target, 2)
+            return divmod(target, 2)  # pyright: ignore[reportArgumentType, reportCallIssue, reportUnknownVariableType]
         if name == "format":
             return format(target, "spec")
         if name == "pow":
-            return pow(target, 2)
-        return {
+            return pow(target, 2)  # pyright: ignore[reportArgumentType, reportCallIssue, reportUnknownVariableType]
+        return {  # pyright: ignore[reportCallIssue, reportUnknownVariableType]
             "abs": abs,
             "complex": complex,
             "float": float,
             "int": int,
             "repr": repr,
             "str": str,
-        }[name](target)
+        }[name](target)  # pyright: ignore[reportArgumentType]
 
     if name == "bool":
         assert _resume_outcomes(run, (False, True)) == _returns(False, True)
@@ -504,9 +488,7 @@ def _simple_builtin_case(name: str) -> None:
 
 
 for _name in ("abs", "bool", "complex", "divmod", "float", "format", "int", "pow", "repr", "str"):
-    _case(f"builtin_{_name}_effectful_protocol")(
-        lambda name=_name: _simple_builtin_case(name)
-    )
+    _case(f"builtin_{_name}_effectful_protocol")(lambda name=_name: _simple_builtin_case(name))
 
 
 def _invalid_conversion_case(name: str) -> None:
@@ -534,13 +516,13 @@ def _invalid_conversion_case(name: str) -> None:
         target = type("InvalidBuiltinTarget", (), {method_name: protocol})()
         if name == "format":
             return format(target, "spec")
-        return {
+        return {  # pyright: ignore[reportCallIssue]
             "complex": complex,
             "float": float,
             "int": int,
             "repr": repr,
             "str": str,
-        }[name](target)
+        }[name](target)  # pyright: ignore[reportArgumentType]
 
     expected = {
         "complex": complex(10, 2),
@@ -557,9 +539,7 @@ def _invalid_conversion_case(name: str) -> None:
 
 
 for _name in ("complex", "float", "format", "int", "repr", "str"):
-    _case(f"builtin_{_name}_invalid_result_isolated")(
-        lambda name=_name: _invalid_conversion_case(name)
-    )
+    _case(f"builtin_{_name}_invalid_result_isolated")(lambda name=_name: _invalid_conversion_case(name))
 
 
 def _run_case(name: str) -> subprocess.CompletedProcess[str]:

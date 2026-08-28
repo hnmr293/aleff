@@ -5,7 +5,7 @@ from textwrap import dedent
 from cpython_compat_support import assert_cpython_compatible
 
 try:
-    from aleff._multishot.v1 import _aleff as _aleff
+    from aleff._multishot.v1 import _aleff as _aleff  # pyright: ignore[reportPrivateUsage]
 except ImportError as exc:
     raise RuntimeError("CPython compatibility tests require a built aleff extension") from exc
 

@@ -256,7 +256,7 @@ record("bytearray-empty", lambda: bytearray().decode())
 
 def test_effectful_bytes_decode_resumes_the_original_source() -> None:
     def bytes_run(choose: Callable[[], Any]) -> str:
-        codecs.register_error("compat_22_bytes_effect", lambda exc: (str(choose()), exc.end))
+        codecs.register_error("compat_22_bytes_effect", lambda exc: (str(choose()), exc.end))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType, reportUnknownMemberType]
         return b"a\xffb".decode("ascii", "compat_22_bytes_effect")
 
     assert _effect_outcomes(bytes_run, ("X", "Y")) == ["aXb", "aYb"]
@@ -264,7 +264,7 @@ def test_effectful_bytes_decode_resumes_the_original_source() -> None:
 
 def test_effectful_bytearray_decode_resumes_the_original_source() -> None:
     def bytearray_run(choose: Callable[[], Any]) -> str:
-        codecs.register_error("compat_22_bytearray_effect", lambda exc: (str(choose()), exc.end))
+        codecs.register_error("compat_22_bytearray_effect", lambda exc: (str(choose()), exc.end))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType, reportUnknownMemberType]
         return bytearray(b"a\xffb").decode("ascii", "compat_22_bytearray_effect")
 
     assert _effect_outcomes(bytearray_run, ("X", "Y")) == ["aXb", "aYb"]
@@ -288,7 +288,7 @@ def test_effectful_bytearray_decode_honors_error_position() -> None:
 
 def test_effectful_bytes_decode_preserves_embedded_nul_in_replacement() -> None:
     def nul_bytes(choose: Callable[[], Any]) -> str:
-        codecs.register_error("compat_22_nul_bytes", lambda exc: (choose(), exc.end))
+        codecs.register_error("compat_22_nul_bytes", lambda exc: (choose(), exc.end))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType, reportUnknownMemberType]
         return b"a\xffb".decode("ascii", "compat_22_nul_bytes")
 
     assert _effect_outcomes(nul_bytes, ("X", "A\x00B")) == ["aXb", "aA\x00Bb"]
@@ -296,7 +296,7 @@ def test_effectful_bytes_decode_preserves_embedded_nul_in_replacement() -> None:
 
 def test_effectful_bytearray_decode_uses_utf8_byte_length_for_replacement() -> None:
     def unicode_bytearray(choose: Callable[[], Any]) -> str:
-        codecs.register_error("compat_22_unicode_bytearray", lambda exc: (choose(), exc.end))
+        codecs.register_error("compat_22_unicode_bytearray", lambda exc: (choose(), exc.end))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownLambdaType, reportUnknownMemberType]
         return bytearray(b"a\xffb").decode("ascii", "compat_22_unicode_bytearray")
 
     assert _effect_outcomes(unicode_bytearray, ("X", "é")) == ["aXb", "aéb"]

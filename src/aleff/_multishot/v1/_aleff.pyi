@@ -50,11 +50,8 @@ def _snapshot_from_frame_with_adapters(
     handled_exception: object,
     adapter_token: object,
 ) -> FrameSnapshot[Any, Any]: ...
-
 def _suspend_adapters() -> object: ...
-
 def _restore_adapters(token: object) -> None: ...
-
 def snapshot_num_frames[R, V](snapshot: FrameSnapshot[R, V]) -> int:
     """Return the number of frames in a FrameSnapshot.
 

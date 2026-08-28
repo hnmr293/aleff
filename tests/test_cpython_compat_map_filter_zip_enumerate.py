@@ -394,7 +394,7 @@ def _zip_strict_truth_effect() -> None:
             def __bool__(self) -> bool:
                 return bool(choose())
 
-        return list(zip((1, 2), (3,), strict=Strict()))
+        return list(zip((1, 2), (3,), strict=Strict()))  # pyright: ignore[reportArgumentType, reportUnknownArgumentType]
 
     actual = _resume_outcomes(run, (False, True))
     expected = [
@@ -412,7 +412,7 @@ def _reversed_custom_protocol_effect() -> None:
                 choose()
                 return iter((3, 2, 1))
 
-        return list(reversed(Reversible()))
+        return list(reversed(Reversible()))  # pyright: ignore[reportArgumentType, reportCallIssue, reportUnknownArgumentType]
 
     assert _resume_outcomes(run) == [[3, 2, 1], [3, 2, 1]]
 

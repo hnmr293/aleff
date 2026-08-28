@@ -387,7 +387,7 @@ def _dict_item_equality_resume() -> None:
                 return 1
 
         try:
-            return dict.__getitem__({StoredKey(): "value"}, LookupKey())
+            return dict.__getitem__({StoredKey(): "value"}, LookupKey())  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         except KeyError:
             return "KeyError"
 

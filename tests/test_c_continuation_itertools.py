@@ -140,13 +140,13 @@ def _count() -> None:
     class Step(int):
         def __new__(cls, callback: Choose) -> "Step":
             value = int.__new__(cls, 2)
-            value.callback = callback
+            value.callback = callback  # pyright: ignore[reportAttributeAccessIssue]
             return value
 
         def __radd__(self, other: object) -> int:
             if other == 0:
-                self.callback()
-            return int(other) + 2
+                self.callback()  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+            return int(other) + 2  # pyright: ignore[reportArgumentType]
 
     @handler.on(choose)
     def handle_count_step(k: Any) -> list[tuple[str, Any]]:
@@ -169,10 +169,14 @@ def _count() -> None:
     assert list(itertools.islice(itertools.count(3, 2), 3)) == [3, 5, 7]
     assert list(itertools.islice(itertools.count(2.5, 0.5), 3)) == [2.5, 3.0, 3.5]
     assert list(itertools.islice(itertools.count(Fraction(1, 3), Fraction(1, 3)), 3)) == [
-        Fraction(1, 3), Fraction(2, 3), Fraction(1, 1)
+        Fraction(1, 3),
+        Fraction(2, 3),
+        Fraction(1, 1),
     ]
     assert list(itertools.islice(itertools.count(Decimal("1.2"), Decimal("1.2")), 3)) == [
-        Decimal("1.2"), Decimal("2.4"), Decimal("3.6")
+        Decimal("1.2"),
+        Decimal("2.4"),
+        Decimal("3.6"),
     ]
     assert list(itertools.islice(itertools.count(0, 0), 3)) == [0, 0, 0]
     assert list(itertools.islice(itertools.count(0, -2), 3)) == [0, -2, -4]
@@ -219,10 +223,7 @@ def _filterfalse() -> None:
 @_case("groupby")
 def _groupby() -> None:
     def run(choose: Choose) -> list[tuple[int, list[int]]]:
-        return [
-            (key, list(group))
-            for key, group in itertools.groupby(_EffectfulIterable(choose, (1, 1, 2)))
-        ]
+        return [(key, list(group)) for key, group in itertools.groupby(_EffectfulIterable(choose, (1, 1, 2)))]
 
     expected = [(1, [1, 1]), (2, [2])]
     _assert_equal(_resume_outcomes(run), [("return", expected), ("return", expected)])
@@ -291,7 +292,7 @@ def _repeat() -> None:
             return cast(int, choose())
 
     def run() -> list[str]:
-        return list(itertools.repeat("x", Times())) + ["tail"]
+        return list(itertools.repeat("x", Times())) + ["tail"]  # pyright: ignore[reportArgumentType]
 
     @handler.on(choose)
     def handle_repeat_times(k: Any) -> list[tuple[str, Any]]:
@@ -318,9 +319,9 @@ def _repeat() -> None:
             return "not an int"
 
     with pytest.raises(TypeError):
-        itertools.repeat("x", InvalidIndex())
+        itertools.repeat("x", InvalidIndex())  # pyright: ignore[reportArgumentType]
     with pytest.raises(TypeError):
-        itertools.repeat("x", 1.5)
+        itertools.repeat("x", 1.5)  # pyright: ignore[reportArgumentType]
     with pytest.raises(OverflowError):
         itertools.repeat("x", 10**100)
 
@@ -328,7 +329,7 @@ def _repeat() -> None:
 @_case("starmap")
 def _starmap() -> None:
     def run(choose: Choose) -> list[int]:
-        return list(itertools.starmap(lambda left, right: left + right + choose(), ((1, 2),)))
+        return list(itertools.starmap(lambda left, right: left + right + choose(), ((1, 2),)))  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
 
     _assert_equal(_resume_outcomes(run), [("return", [4]), ("return", [13])])
 
@@ -372,7 +373,7 @@ def _zip_longest() -> None:
 @_case("zip_longest_fill")
 def _zip_longest_fill() -> None:
     assert list(itertools.zip_longest((1,), (2, 3), fillvalue=99)) == [(1, 2), (99, 3)]
-    assert list(itertools.zip_longest()) == []
+    assert list(itertools.zip_longest()) == []  # pyright: ignore[reportCallIssue]
 
 
 def _run_case(name: str) -> subprocess.CompletedProcess[str]:

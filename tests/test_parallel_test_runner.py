@@ -62,22 +62,19 @@ def run_parallel_runner(
     )
 
 
-def test_test_targets_run_concurrently_in_isolated_environments(tmp_path):
+def test_test_targets_run_concurrently_in_isolated_environments(tmp_path: Path) -> None:
     runner_dir, state_dir = prepare_runner(tmp_path)
 
     result = run_parallel_runner(runner_dir, state_dir)
 
     assert result.returncode == 0, result.stderr
-    environments = {
-        (state_dir / f"{target}.environment").read_text().strip()
-        for target in TARGETS
-    }
+    environments = {(state_dir / f"{target}.environment").read_text().strip() for target in TARGETS}
     assert len(environments) == len(TARGETS)
     assert all(not Path(environment).exists() for environment in environments)
     assert all(f"completed {target}" in result.stdout for target in TARGETS)
 
 
-def test_test_runner_reports_child_failure_after_waiting_for_all_targets(tmp_path):
+def test_test_runner_reports_child_failure_after_waiting_for_all_targets(tmp_path: Path) -> None:
     runner_dir, state_dir = prepare_runner(tmp_path)
 
     result = run_parallel_runner(

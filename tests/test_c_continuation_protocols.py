@@ -257,10 +257,10 @@ def _invalid_conversion_case(name: str) -> None:
 
         target = type("InvalidConversionTarget", (), {name: method})()
         if name == "__index__":
-            return operator.index(target)
+            return operator.index(target)  # pyright: ignore[reportArgumentType]
         if name == "__float__":
-            return float(target)
-        return complex(target)
+            return float(target)  # pyright: ignore[reportArgumentType]
+        return complex(target)  # pyright: ignore[reportArgumentType, reportCallIssue]
 
     expected = {"__index__": 7, "__float__": 7.5, "__complex__": 7 + 0.5j}[name]
     valid = expected
@@ -273,7 +273,9 @@ def _invalid_conversion_case(name: str) -> None:
 
 
 for _conversion_name in ("__index__", "__float__", "__complex__"):
-    _case("error", f"invalid_conversion_{_conversion_name}")(cast(Any, lambda name=_conversion_name: _invalid_conversion_case(name)))
+    _case("error", f"invalid_conversion_{_conversion_name}")(
+        cast(Any, lambda name=_conversion_name: _invalid_conversion_case(name))
+    )
 
 
 @_case("corner", "unary_missing_fallback_and_three_shot_nested")
@@ -284,7 +286,7 @@ def _unary_missing_fallback_and_three_shot_nested() -> None:
 
     assert operator.index(Target()) == 7
     with pytest.raises(TypeError):
-        abs(Target())
+        abs(Target())  # pyright: ignore[reportArgumentType]
 
     def run(choose: Choose) -> int:
         class Number:
@@ -328,9 +330,19 @@ else:
 
 
 _BINARY: tuple[tuple[str, str], ...] = (
-    ("add", "+"), ("sub", "-"), ("mul", "*"), ("matmul", "@"),
-    ("truediv", "/"), ("floordiv", "//"), ("mod", "%"), ("pow", "**"),
-    ("lshift", "<<"), ("rshift", ">>"), ("and", "&"), ("xor", "^"), ("or", "|"),
+    ("add", "+"),
+    ("sub", "-"),
+    ("mul", "*"),
+    ("matmul", "@"),
+    ("truediv", "/"),
+    ("floordiv", "//"),
+    ("mod", "%"),
+    ("pow", "**"),
+    ("lshift", "<<"),
+    ("rshift", ">>"),
+    ("and", "&"),
+    ("xor", "^"),
+    ("or", "|"),
 )
 
 
@@ -358,9 +370,15 @@ def _binary_case(name: str, symbol: str, reflected: bool, inplace: bool) -> None
 
 
 for _binary_name, _binary_symbol in _BINARY:
-    _case("normal", f"binary_{_binary_name}")(lambda n=_binary_name, s=_binary_symbol: _binary_case(f"__{n}__", s, False, False))
-    _case("normal", f"reflected_{_binary_name}")(lambda n=_binary_name, s=_binary_symbol: _binary_case(f"__r{n}__", s, True, False))
-    _case("normal", f"inplace_{_binary_name}")(lambda n=_binary_name, s=_binary_symbol: _binary_case(f"__i{n}__", s, False, True))
+    _case("normal", f"binary_{_binary_name}")(
+        lambda n=_binary_name, s=_binary_symbol: _binary_case(f"__{n}__", s, False, False)
+    )
+    _case("normal", f"reflected_{_binary_name}")(
+        lambda n=_binary_name, s=_binary_symbol: _binary_case(f"__r{n}__", s, True, False)
+    )
+    _case("normal", f"inplace_{_binary_name}")(
+        lambda n=_binary_name, s=_binary_symbol: _binary_case(f"__i{n}__", s, False, True)
+    )
 
 
 @_case("error", "binary_invalid_result_and_callback_exception_are_isolated")
@@ -426,8 +444,17 @@ def _comparison_case(name: str, symbol: str) -> None:
     assert _outcomes(run, (False, True)) == _returns(False, True)
 
 
-for _comparison_name, _comparison_symbol in (("eq", "=="), ("ne", "!="), ("lt", "<"), ("le", "<="), ("gt", ">"), ("ge", ">=")):
-    _case("normal", f"comparison_{_comparison_name}")(lambda n=_comparison_name, s=_comparison_symbol: _comparison_case(f"__{n}__", s))
+for _comparison_name, _comparison_symbol in (
+    ("eq", "=="),
+    ("ne", "!="),
+    ("lt", "<"),
+    ("le", "<="),
+    ("gt", ">"),
+    ("ge", ">="),
+):
+    _case("normal", f"comparison_{_comparison_name}")(
+        lambda n=_comparison_name, s=_comparison_symbol: _comparison_case(f"__{n}__", s)
+    )
 
 
 @_case("error", "comparison_exception_then_success_isolated")
@@ -450,7 +477,7 @@ def _comparison_missing_fallback_and_non_bool_result_preserved() -> None:
     assert (Target() == Target()) is False
     assert (Target() != Target()) is True
     with pytest.raises(TypeError):
-        Target() < Target()
+        Target() < Target()  # pyright: ignore[reportOperatorIssue, reportUnusedExpression]
 
     marker = object()
 
@@ -487,9 +514,9 @@ def _attribute_get_set_delete_and_descriptor_callbacks() -> None:
         got = target.value
         target.value = 100
         del target.value
-        result = (got, target.saved, target.deleted)
-        assert all(type(value) is int for value in result)
-        return result
+        result = (got, target.saved, target.deleted)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+        assert all(type(value) is int for value in result)  # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
+        return result  # pyright: ignore[reportUnknownVariableType]
 
     assert _outcomes(run) == _returns((1, 102, 5), (10, 102, 5))
 
@@ -633,13 +660,13 @@ def _iter_next_reversed_and_async_iter_callbacks() -> None:
 
         iter_result = list(Iterator())
         next_result = next(Iterator())
-        reversed_result = list(reversed(Reversible()))
+        reversed_result = list(reversed(Reversible()))  # pyright: ignore[reportArgumentType, reportCallIssue]
 
         async def consume() -> int:
             return await anext(AsyncIterator())
 
         async_result = drive(consume())
-        return iter_result, next_result, reversed_result, async_result
+        return iter_result, next_result, reversed_result, async_result  # pyright: ignore[reportReturnType]
 
     assert _outcomes(run) == _returns(([1], 2, [3], 5), ([10], 2, [3], 5))
 
@@ -819,7 +846,9 @@ def _representation_invalid_case(name: str) -> None:
 
 
 for _representation_name in ("__repr__", "__format__", "__hash__"):
-    _case("error", f"representation_invalid_{_representation_name}")(cast(Any, lambda name=_representation_name: _representation_invalid_case(name)))
+    _case("error", f"representation_invalid_{_representation_name}")(
+        cast(Any, lambda name=_representation_name: _representation_invalid_case(name))
+    )
 
 
 @_case("corner", "representation_missing_fallback_and_hash_minus_one_normalization")
@@ -842,7 +871,7 @@ def _representation_missing_fallback_and_hash_minus_one_normalization() -> None:
     assert type(format(Default())) is str
 
     class Unhashable:
-        __hash__ = None
+        __hash__ = None  # pyright: ignore[reportAssignmentType]
 
     with pytest.raises(TypeError):
         hash(Unhashable())

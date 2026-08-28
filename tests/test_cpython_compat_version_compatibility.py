@@ -90,7 +90,7 @@ def test_codec_error_handlers_resume_with_the_remaining_input() -> None:
         handler = create_handler(choose)
 
         def codec_error(exc: UnicodeError) -> tuple[Any, int]:
-            return choose(), exc.end
+            return choose(), exc.end  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
 
         codecs.register_error(error_name, codec_error)
 

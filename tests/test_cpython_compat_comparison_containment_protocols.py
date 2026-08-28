@@ -348,7 +348,7 @@ def test_dictionary_containment_resumes_equality_without_restarting_lookup() -> 
                 calls += 1
                 return bool(choose())
 
-        return dict.__contains__({Key(): None}, Key())
+        return dict.__contains__({Key(): None}, Key())  # pyright: ignore[reportUnknownMemberType]
 
     assert _resume_outcomes(run, (True, False)) == [True, False]
     assert calls == 1

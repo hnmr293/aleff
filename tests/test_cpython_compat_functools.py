@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import functools
+from collections.abc import Callable
+from typing import Any
 
 from aleff import create_handler, effect
 from cpython_compat_support import assert_cpython_compatible
@@ -269,8 +271,8 @@ def test_lru_cache_reentrant_same_key_resume_preserves_existing_value() -> None:
     handler = create_handler(choose)
 
     @handler.on(choose)
-    def resume_all(k):
-        outcomes = []
+    def resume_all(k: Callable[[int], Any]) -> list[Any]:
+        outcomes: list[Any] = []
         for value in (1, 10):
             outcomes.append(k(value))
         return outcomes
@@ -278,7 +280,7 @@ def test_lru_cache_reentrant_same_key_resume_preserves_existing_value() -> None:
     state = {"outer": True}
 
     @functools.lru_cache(maxsize=1)
-    def cached(key):
+    def cached(key: str) -> Any:
         if state.pop("outer", False):
             cached(key)
             return choose()

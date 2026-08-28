@@ -420,6 +420,4 @@ assert importlib.import_module("asyncio.threads") is asyncio.threads
             check=False,
             env=environment,
         )
-        assert result.returncode == 0, (
-            f"PYTHONHASHSEED={seed}\n{result.stdout}{result.stderr}"
-        )
+        assert result.returncode == 0, f"PYTHONHASHSEED={seed}\n{result.stdout}{result.stderr}"

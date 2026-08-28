@@ -318,8 +318,8 @@ def test_set_constructor_resumes_hash_conversion() -> None:
         return (
             len(result),
             sorted(type(item).__name__ for item in result),
-            1 in result,
-            10 in result,
+            1 in result,  # pyright: ignore[reportUnnecessaryContains]
+            10 in result,  # pyright: ignore[reportUnnecessaryContains]
         )
 
     assert _resume_outcomes(run) == [
@@ -344,8 +344,8 @@ def test_frozenset_constructor_resumes_hash_conversion() -> None:
         return (
             len(result),
             sorted(type(item).__name__ for item in result),
-            1 in result,
-            10 in result,
+            1 in result,  # pyright: ignore[reportUnnecessaryContains]
+            10 in result,  # pyright: ignore[reportUnnecessaryContains]
         )
 
     assert _resume_outcomes(run) == [

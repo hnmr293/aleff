@@ -1223,7 +1223,7 @@ def _builtin_print_effectful_flush_precedes_invalid_sep() -> None:
                 return len(text)
 
         try:
-            print("value", sep=object(), file=Output(), flush=Flush())
+            print("value", sep=object(), file=Output(), flush=Flush())  # pyright: ignore[reportArgumentType, reportCallIssue]
         except TypeError:
             return "TypeError"
         return "returned"
@@ -1243,7 +1243,7 @@ def _builtin_print_effectful_flush_precedes_invalid_end() -> None:
                 return len(text)
 
         try:
-            print("value", end=object(), file=Output(), flush=Flush())
+            print("value", end=object(), file=Output(), flush=Flush())  # pyright: ignore[reportArgumentType, reportCallIssue]
         except TypeError:
             return "TypeError"
         return "returned"
@@ -1456,7 +1456,7 @@ def _builtin_import_effectful_finder() -> None:
             def __init__(self, value: int) -> None:
                 self.value = value
 
-            def create_module(self, _spec: Any) -> None:
+            def create_module(self, _spec: Any) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
                 return None
 
             def exec_module(self, module: Any) -> None:
@@ -1488,7 +1488,7 @@ def _builtin_import_finder_error_isolated_per_shot() -> None:
 
     def run(choose: Choose) -> int:
         class Loader(importlib.abc.Loader):
-            def create_module(self, _spec: Any) -> None:
+            def create_module(self, _spec: Any) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
                 return None
 
             def exec_module(self, module: Any) -> None:
@@ -1524,7 +1524,7 @@ def _builtin_import_effectful_loader_without_global_lock() -> None:
 
     def run(choose: Choose) -> int:
         class Loader(importlib.abc.Loader):
-            def create_module(self, _spec: Any) -> None:
+            def create_module(self, _spec: Any) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]
                 return None
 
             def exec_module(self, module: Any) -> None:
@@ -1575,7 +1575,7 @@ def _builtin_type_three_argument_effectful_set_name() -> None:
                 return self.saved
 
         target = type("Target", (), {"value": Descriptor()})
-        return cast(int, target.value)
+        return cast(int, target.value)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
 
     _assert_equal(_resume_outcomes(run), _returns(101, 110))
 
@@ -1611,12 +1611,12 @@ def _type_construction_suffix_case(choose: Choose, use_build_class: bool) -> tup
             second_value = second
 
     else:
-        Target = type(
+        Target = type(  # pyright: ignore[reportAssignmentType]
             "Target",
             (Base,),
             {"first_value": first, "second_value": second},
         )
-    return second.saved, cast(int, Target.subclass_saved)
+    return second.saved, cast(int, Target.subclass_saved)  # pyright: ignore[reportUnnecessaryCast]
 
 
 @_case("corner", "builtin_build_class_resumes_set_name_and_init_subclass_suffix")
@@ -1651,7 +1651,7 @@ def _builtin_type_set_name_error_isolated_per_shot() -> None:
                 return self.saved
 
         target = type("Target", (), {"value": Descriptor()})
-        return cast(int, target.value)
+        return cast(int, target.value)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
 
     _assert_equal(
         _resume_outcomes(run, (1, "raise", 10)),
@@ -2389,7 +2389,7 @@ def _operator_attrgetter_error_isolated_after_dotted_prefix() -> None:
 @_case("corner", "operator_attrgetter_constructor_and_single_result")
 def _operator_attrgetter_constructor_and_single_result() -> None:
     with pytest.raises(TypeError):
-        operator.attrgetter()
+        operator.attrgetter()  # pyright: ignore[reportCallIssue]
     getter = operator.attrgetter("value")
     result = getter(type("Target", (), {"value": 3})())
     assert type(result) is int
@@ -2409,9 +2409,9 @@ def _operator_itemgetter_multiple_pending_suffix() -> None:
 
         result = operator.itemgetter("first", "second")(Target())
         assert type(result) is tuple
-        assert type(result[0]) is int
-        assert type(result[1]) is str
-        return result
+        assert type(result[0]) is int  # pyright: ignore[reportUnknownArgumentType]
+        assert type(result[1]) is str  # pyright: ignore[reportUnknownArgumentType]
+        return result  # pyright: ignore[reportUnknownVariableType]
 
     _assert_equal(_resume_outcomes(run), _returns((101, "tail"), (110, "tail")))
 
@@ -2441,7 +2441,7 @@ def _operator_itemgetter_error_isolated_after_first_item() -> None:
 @_case("corner", "operator_itemgetter_constructor_and_single_result")
 def _operator_itemgetter_constructor_and_single_result() -> None:
     with pytest.raises(TypeError):
-        operator.itemgetter()
+        operator.itemgetter()  # pyright: ignore[reportCallIssue]
     getter = operator.itemgetter(0)
     result = getter((3,))
     assert type(result) is int
@@ -2467,11 +2467,11 @@ def _operator_methodcaller_args_kwargs_and_result() -> None:
         )
         result = caller(Target())
         assert type(result) is tuple
-        assert type(result[0]) is str
-        assert type(result[1]) is int
-        assert type(result[2]) is tuple
-        assert type(result[3]) is dict
-        return result
+        assert type(result[0]) is str  # pyright: ignore[reportUnknownArgumentType]
+        assert type(result[1]) is int  # pyright: ignore[reportUnknownArgumentType]
+        assert type(result[2]) is tuple  # pyright: ignore[reportUnknownArgumentType]
+        assert type(result[3]) is dict  # pyright: ignore[reportUnknownArgumentType]
+        return result  # pyright: ignore[reportUnknownVariableType]
 
     _assert_equal(
         _resume_outcomes(run),
@@ -2505,9 +2505,9 @@ def _operator_methodcaller_error_isolated_after_call() -> None:
 @_case("corner", "operator_methodcaller_constructor_validation")
 def _operator_methodcaller_constructor_validation() -> None:
     with pytest.raises(TypeError):
-        operator.methodcaller()
+        operator.methodcaller()  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError):
-        operator.methodcaller(3)
+        operator.methodcaller(3)  # pyright: ignore[reportArgumentType]
 
 
 @_case("normal", "functools_partial_call_pending_suffix")
@@ -2719,7 +2719,7 @@ def _functools_cmp_to_key_invalid_result_isolated_per_shot() -> None:
             return choose()
 
         key = functools.cmp_to_key(compare)
-        return key(1) < key(2)
+        return key(1) < key(2)  # pyright: ignore[reportReturnType]
 
     outcomes = _resume_outcomes(run, ("invalid", -1))
     _assert_equal(
@@ -2795,7 +2795,7 @@ def _functools_lru_cache_cache_info_tracks_continuation_hits() -> None:
         return first, second, calls, cached.cache_info()
 
     outcomes = _resume_outcomes(run)
-    expected_info = functools._CacheInfo(hits=1, misses=1, maxsize=2, currsize=1)
+    expected_info = functools._CacheInfo(hits=1, misses=1, maxsize=2, currsize=1)  # pyright: ignore[reportPrivateUsage]
     _assert_equal(
         outcomes,
         _returns((101, 101, 1, expected_info), (110, 110, 1, expected_info)),
@@ -2823,7 +2823,7 @@ def _functools_lru_cache_exception_does_not_pollute_stats() -> None:
         second = cached(1)
         return first, second, calls, cached.cache_info()
 
-    expected_info = functools._CacheInfo(hits=1, misses=1, maxsize=2, currsize=1)
+    expected_info = functools._CacheInfo(hits=1, misses=1, maxsize=2, currsize=1)  # pyright: ignore[reportPrivateUsage]
     _assert_equal(
         _resume_outcomes(run, ("raise", 7)),
         [("raise", "ExpectedCacheError"), ("return", (7, 7, 1, expected_info))],
@@ -2854,7 +2854,7 @@ def _functools_lru_cache_preserves_lru_recency_on_continuation() -> None:
             cached.cache_info(),
         )
 
-    expected_info = functools._CacheInfo(hits=2, misses=4, maxsize=2, currsize=2)
+    expected_info = functools._CacheInfo(hits=2, misses=4, maxsize=2, currsize=2)  # pyright: ignore[reportPrivateUsage]
     _assert_equal(
         _resume_outcomes(run),
         _returns(
@@ -2881,7 +2881,7 @@ def _functools_lru_cache_typed_false_separates_int_and_bool() -> None:
         boolean = cast(str, cached(True))
         return integer, integer_again, boolean, tuple(calls), cached.cache_info()
 
-    expected_info = functools._CacheInfo(hits=1, misses=2, maxsize=None, currsize=2)
+    expected_info = functools._CacheInfo(hits=1, misses=2, maxsize=None, currsize=2)  # pyright: ignore[reportPrivateUsage]
     _assert_equal(
         _resume_outcomes(run),
         _returns(
@@ -2906,16 +2906,16 @@ def _functools_lru_cache_continuation_preserves_public_wrapper_attributes() -> N
 
         cached = functools.lru_cache(maxsize=2, typed=True)(implementation)
         result = cached(1)
-        return (
+        return (  # pyright: ignore[reportUnknownVariableType]
             result,
-            cached.__name__,
-            cached.__doc__,
+            cached.__name__,  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+            cached.__doc__,  # pyright: ignore[reportReturnType]
             cached.__wrapped__.__name__,
             cached.cache_parameters(),
             cached.cache_info(),
         )
 
-    expected_info = functools._CacheInfo(hits=0, misses=1, maxsize=2, currsize=1)
+    expected_info = functools._CacheInfo(hits=0, misses=1, maxsize=2, currsize=1)  # pyright: ignore[reportPrivateUsage]
     _assert_equal(
         _resume_outcomes(run),
         _returns(
@@ -3014,7 +3014,7 @@ def _operator_concat_requires_sequence() -> None:
 
     for operation in (operator.concat, operator.iconcat):
         with pytest.raises(TypeError, match="can't be concatenated"):
-            operation(Target(), 2)
+            operation(Target(), 2)  # pyright: ignore[reportArgumentType]
 
 
 for _name in _OPERATOR_PROTOCOL_CASES:
@@ -3029,7 +3029,7 @@ def _operator_truth_case(name: str) -> None:
             def __bool__(self) -> bool:
                 return cast(bool, choose())
 
-        return cast(bool, operation(Target()))
+        return cast(bool, operation(Target()))  # pyright: ignore[reportUnnecessaryCast]
 
     expected = (False, True) if name == "truth" else (True, False)
     outcomes = _resume_outcomes(run, (False, True))
@@ -3128,9 +3128,9 @@ def _operator_mutation_case(name: str) -> None:
 
         target = Target()
         if name == "setitem":
-            result = operation(target, "key", 100)
+            result = operation(target, "key", 100)  # pyright: ignore[reportArgumentType, reportCallIssue, reportUnknownVariableType]
         else:
-            result = operation(target, "key")
+            result = operation(target, "key")  # pyright: ignore[reportArgumentType, reportCallIssue, reportUnknownVariableType]
         assert result is None
         return target.selected + 100
 
@@ -3159,7 +3159,7 @@ def _operator_public_function_coverage() -> None:
         "setitem",
         "truth",
     }
-    expected = set(operator.__all__) - identity_only
+    expected = set(operator.__all__) - identity_only  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType, reportUnknownVariableType]
     _assert_equal(tested, expected)
 
 
