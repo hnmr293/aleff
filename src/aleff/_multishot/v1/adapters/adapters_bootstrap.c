@@ -526,8 +526,6 @@ aleff_adapter_install(void)
     BACKUP_TYPE(&PyDict_Type, "__eq__");
     BACKUP_TYPE(&PyDict_Type, "__ne__");
     BACKUP_TYPE(&PyUnicode_Type, "join");
-    BACKUP_TYPE(&PyUnicode_Type, "format");
-    BACKUP_TYPE(&PyUnicode_Type, "format_map");
     BACKUP_TYPE(&PyUnicode_Type, "encode");
     BACKUP_TYPE(&PyBytes_Type, "join");
     BACKUP_TYPE(&PyBytes_Type, "decode");
@@ -1121,7 +1119,6 @@ rollback:
         Py_CLEAR(import_get_module_lock);
         Py_CLEAR(import_global_lock_held);
         Py_CLEAR(import_global_lock_acquire);
-        Py_CLEAR(original_str_format);
         Py_CLEAR(functools_original_lru_cache);
         Py_CLEAR(functools_update_wrapper);
         adapters_installed = 0;

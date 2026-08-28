@@ -2225,16 +2225,6 @@ containers_replace_type_method(
 int
 adapter_containers_install(void)
 {
-    if (original_str_format == NULL) {
-        PyObject *unicode_dict = PyType_GetDict(&PyUnicode_Type);
-        PyObject *descriptor = unicode_dict == NULL
-            ? NULL : PyDict_GetItemString(unicode_dict, "format");
-        if (descriptor == NULL) {
-            PyErr_SetString(PyExc_RuntimeError, "cannot access str.format");
-            return -1;
-        }
-        original_str_format = Py_NewRef(descriptor);
-    }
     if (original_dict_subscript == NULL && PyDict_Type.tp_as_mapping != NULL) {
         original_dict_subscript = PyDict_Type.tp_as_mapping->mp_subscript;
     }
@@ -2249,8 +2239,6 @@ adapter_containers_install(void)
         containers_replace_type_method(&PyDict_Type, "__eq__", &containers_dict_eq_method) < 0 ||
         containers_replace_type_method(&PyDict_Type, "__ne__", &containers_dict_ne_method) < 0 ||
         containers_replace_type_method(&PyUnicode_Type, "join", &containers_str_join_method) < 0 ||
-        containers_replace_type_method(&PyUnicode_Type, "format", &containers_str_format_method) < 0 ||
-        containers_replace_type_method(&PyUnicode_Type, "format_map", &containers_str_format_map_method) < 0 ||
         containers_replace_type_method(&PyUnicode_Type, "encode", &containers_str_encode_method) < 0 ||
         containers_replace_type_method(&PyBytes_Type, "join", &containers_bytes_join_method) < 0 ||
         containers_replace_type_method(&PyBytes_Type, "decode", &containers_bytes_decode_method) < 0 ||

@@ -17,6 +17,7 @@ Prohibited callback contexts
    * garbage-collector callbacks;
    * ``__del__`` methods or other finalizers;
    * callbacks invoked by ``dict.setdefault``;
+   * calls to ``str.format`` or ``str.format_map``;
    * ``atexit`` callbacks; or
    * GUI callbacks, event-loop callbacks, or callbacks running on another
      thread.

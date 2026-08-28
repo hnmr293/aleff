@@ -136,25 +136,6 @@ class _EffectfulEquality:
         return bool(self.choose())
 
 
-class _EffectfulFormatMap(Mapping[str, str]):
-    def __init__(self, choose: Choose) -> None:
-        self.choose = choose
-
-    def __getitem__(self, key: str) -> str:
-        if key != "value":
-            raise KeyError(key)
-        value = self.choose()
-        if isinstance(value, BaseException):
-            raise value
-        return str(value)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(("value",))
-
-    def __len__(self) -> int:
-        return 1
-
-
 @_case("dict_item_protocols")
 def _dict_item_protocols() -> None:
     def get_run(choose: Choose) -> str:
@@ -233,18 +214,6 @@ def _dict_pop() -> None:
         {}.pop()
     with pytest.raises(TypeError):
         {}.pop("key", 1, 2)
-
-
-@_case("str_format_map")
-def _str_format_map() -> None:
-    def run(choose: Choose) -> str:
-        return "value={value}".format_map(_EffectfulFormatMap(choose))
-
-    assert _outcomes(run) == ["value=1", "value=10"]
-    with pytest.raises(KeyError):
-        "{missing}".format_map({})
-    with pytest.raises(ValueError):
-        "{value:bad".format_map({"value": 1})
 
 
 @_case("codec_methods")
@@ -644,38 +613,35 @@ def _bytes_join_empty_single_buffer() -> None:
     ]
 
 
-@_case("str_format")
-def _str_format() -> str:
-    def run(choose: Choose) -> str:
-        class Value:
-            def __format__(self, spec: str) -> str:
-                return str(cast(int, choose())) + spec
+@_case("str_format_methods_preserve_cpython_semantics")
+def _str_format_methods_preserve_cpython_semantics() -> None:
+    class Value:
+        attribute = "attribute"
 
-        return "{}".format(Value())
+        def __getitem__(self, key: str) -> str:
+            return f"item:{key}"
 
-    assert _outcomes(run) == ["1", "10"]
+        def __format__(self, spec: str) -> str:
+            return f"formatted:{spec}"
 
+        def __repr__(self) -> str:
+            return "represented"
 
-@_case("str_format_multiple_callbacks")
-def _str_format_multiple_callbacks() -> None:
-    def run(choose: Choose) -> str:
-        class Value:
-            def __format__(self, spec: str) -> str:
-                return str(cast(int, choose())) + spec
+    value = Value()
+    assert "{0.attribute} {0[key]}".format(value) == "attribute item:key"
+    assert "{0!r} {0:{1}}".format(value, "spec") == (
+        "represented formatted:spec"
+    )
+    assert "{{{value}}} {other}".format_map(
+        {"value": 1, "other": 2}
+    ) == "{1} 2"
 
-        return "{}:{}".format(Value(), Value())
-
-    assert _outcomes(run) == [
-        ["1:1", "1:10"],
-        ["10:1", "10:10"],
-    ]
-
-    missing_argument_format = "{} {}"
-    invalid_format = "{"
-    with pytest.raises(IndexError):
-        missing_argument_format.format(1)
     with pytest.raises(ValueError):
-        invalid_format.format()
+        "{0} {}".format(value, value)
+    with pytest.raises(ValueError):
+        "{0}".format_map({"0": value})
+    with pytest.raises(ValueError):
+        "unmatched }".format_map({})
 
 
 @_case("range_count")
