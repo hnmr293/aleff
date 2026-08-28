@@ -102,7 +102,7 @@ def _make_effect(name: str) -> Effect[..., Any]:
                     args,
                     kwargs,
                     handled_exception if handled_exception is not None else _NO_HANDLED_EXCEPTION,
-                    adapter_token,
+                    adapter_token=adapter_token,
                 )
             )
         finally:
@@ -146,7 +146,7 @@ class EffectContext[**P, R]:
     args: tuple[Any, ...] = ()
     kwargs: dict[str, Any] = field(default_factory=dict[str, Any])
     handled_exception: object = field(default=_NO_HANDLED_EXCEPTION, repr=False, compare=False)
-    adapter_token: object = field(default=None, repr=False, compare=False)
+    adapter_token: object = field(kw_only=True, repr=False, compare=False)
 
     def __repr__(self) -> str:
         return f"({eff_str(self.effect)} | args={self.args!r}, kwargs={self.kwargs!r})"
