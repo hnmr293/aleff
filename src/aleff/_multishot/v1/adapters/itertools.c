@@ -1922,7 +1922,9 @@ typedef struct {
     PyObject *iterator;
     PyObject *saved;
     Py_ssize_t index;
+#if PY_VERSION_HEX < 0x030e0700
     int firstpass;
+#endif
 } AleffNativeCycleObject;
 
 typedef struct {
@@ -2076,9 +2078,23 @@ it_runtime_from_native(PyObject *object, ItIteratorKind kind)
             state->cache = PyList_GetSlice(
                 native->saved, 0, PyList_GET_SIZE(native->saved)
             );
+#if PY_VERSION_HEX >= 0x030e0700
+#ifdef Py_GIL_DISABLED
+            Py_ssize_t native_index =
+                _Py_atomic_load_ssize_relaxed(&native->index);
+#else
+            Py_ssize_t native_index = native->index;
+#endif
+            state->index = native_index < 0
+                ? PyList_GET_SIZE(native->saved)
+                : native_index;
+            state->started = 0;
+            state->exhausted = native_index >= 0;
+#else
             state->index = native->index;
             state->started = native->firstpass;
             state->exhausted = native->iterator == NULL;
+#endif
             break;
         }
         case ITERTOOLS_DROPWHILE:
@@ -2204,8 +2220,17 @@ it_runtime_commit_native(const ItRuntimeState *state)
                 (AleffNativeCycleObject *)state->owner;
             Py_XSETREF(native->iterator, Py_XNewRef(state->source));
             Py_SETREF(native->saved, Py_NewRef(state->cache));
+#if PY_VERSION_HEX >= 0x030e0700
+            Py_ssize_t native_index = state->exhausted ? state->index : -1;
+#ifdef Py_GIL_DISABLED
+            _Py_atomic_store_ssize_relaxed(&native->index, native_index);
+#else
+            native->index = native_index;
+#endif
+#else
             native->index = state->index;
             native->firstpass = state->started;
+#endif
             return 0;
         }
         case ITERTOOLS_DROPWHILE:

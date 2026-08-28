@@ -960,15 +960,30 @@ adapter_input(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *stdout_object = PySys_GetObject("stdout");
     PyObject *stderr_object = PySys_GetObject("stderr");
     if (stdin_object == NULL || stdin_object == Py_None) {
+#if (PY_VERSION_HEX < 0x030c0a00) || \
+    (PY_VERSION_HEX >= 0x030d0000 && PY_VERSION_HEX < 0x030d0300)
+        PyErr_SetString(PyExc_RuntimeError, "input(): lost sys.stdin");
+#else
         PyErr_SetString(PyExc_RuntimeError, "lost sys.stdin");
+#endif
         return NULL;
     }
     if (stdout_object == NULL || stdout_object == Py_None) {
+#if (PY_VERSION_HEX < 0x030c0a00) || \
+    (PY_VERSION_HEX >= 0x030d0000 && PY_VERSION_HEX < 0x030d0300)
+        PyErr_SetString(PyExc_RuntimeError, "input(): lost sys.stdout");
+#else
         PyErr_SetString(PyExc_RuntimeError, "lost sys.stdout");
+#endif
         return NULL;
     }
     if (stderr_object == NULL || stderr_object == Py_None) {
+#if (PY_VERSION_HEX < 0x030c0a00) || \
+    (PY_VERSION_HEX >= 0x030d0000 && PY_VERSION_HEX < 0x030d0300)
+        PyErr_SetString(PyExc_RuntimeError, "input(): lost sys.stderr");
+#else
         PyErr_SetString(PyExc_RuntimeError, "lost sys.stderr");
+#endif
         return NULL;
     }
     PyObject *prompt = count == 0 ? Py_None : PyTuple_GET_ITEM(args, 0);

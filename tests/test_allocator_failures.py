@@ -19,7 +19,9 @@ from typing import NamedTuple
 
 import pytest
 
-from aleff._multishot.v1 import _aleff  # noqa: F401  # registers continuation adapters
+from aleff._multishot.v1 import _aleff  # pyright: ignore[reportPrivateUsage]
+
+del _aleff  # importing the extension registers the continuation adapters
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +41,7 @@ def allocator_helper(tmp_path_factory: pytest.TempPathFactory) -> AllocatorHelpe
         pytest.skip("the test allocator helper currently supports POSIX builds only")
     compiler = shutil.which(os.environ.get("CC", "cc"))
     include = sysconfig.get_path("include")
-    if compiler is None or include is None or not (Path(include) / "Python.h").is_file():
+    if compiler is None or not (Path(include) / "Python.h").is_file():
         pytest.skip("a C compiler and Python development headers are required")
 
     output = tmp_path_factory.mktemp("allocator-helper") / "allocator_helper.so"
@@ -56,6 +58,8 @@ def allocator_helper(tmp_path_factory: pytest.TempPathFactory) -> AllocatorHelpe
         str(output),
         str(HELPER_SOURCE),
     ]
+    if sys.platform == "darwin":
+        command[6:6] = ["-undefined", "dynamic_lookup"]
     result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
     if result.returncode != 0:
         pytest.fail(f"could not compile allocator helper:\n{result.stdout}\n{result.stderr}")
@@ -89,7 +93,7 @@ def test_allocator_is_restored_after_adapter_failure(allocator_helper: Allocator
     assert len(["after", "failure"]) == 2
 
     with pytest.raises(TypeError):
-        len(None)
+        len(None)  # pyright: ignore[reportArgumentType]
 
 
 def test_install_failure_rolls_back_all_mutations(allocator_helper: AllocatorHelper) -> None:

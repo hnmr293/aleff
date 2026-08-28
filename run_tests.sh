@@ -15,6 +15,9 @@ logs=()
 
 cleanup() {
     for pid in "${pids[@]}"; do
+        if [ -z "$pid" ]; then
+            continue
+        fi
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
         fi
@@ -43,7 +46,7 @@ for index in "${!targets[@]}"; do
     else
         status=$?
     fi
-    unset 'pids[index]'
+    pids[$index]=
     cat "${logs[$index]}"
     if [ "$status" -ne 0 ]; then
         echo "Python $ver failed with status $status" >&2
