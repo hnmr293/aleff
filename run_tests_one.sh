@@ -22,7 +22,7 @@ case "$(uname -s)" in
 esac
 
 # Run tests
-uv run --quiet --python "$ver" pytest tests/ -q
+uv run --quiet --python "$ver" pytest -p no:cacheprovider tests/ -q
 
 # Run example regression tests
 all=0

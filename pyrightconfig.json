@@ -5,6 +5,7 @@
     "venv": ".venv",
     "reportUnusedFunction": false,
     "ignore": [
+        "build/",
         "src/aleff/_oneshot/v1",
         "src/aleff/_oneshot/v2",
         "src/aleff/_oneshot/v3",

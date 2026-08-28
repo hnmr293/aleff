@@ -11,17 +11,25 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 TARGET = _aleff$(EXT_SUFFIX)
-SRC = _aleff.c
+ADAPTER_SRC = adapters/framework.c adapters/iterators.c adapters/itertools.c \
+	adapters/builtins.c adapters/protocols.c adapters/containers.c adapters/mappings.c \
+	adapters/sets.c adapters/text.c adapters/operator.c adapters/functools.c \
+	adapters/adapters_bootstrap.c adapters/sort_engine.c
+ADAPTER_HEADERS = adapters/api.h adapters/builtins.h adapters/containers.h \
+	adapters/functools.h adapters/internal.h adapters/iterators.h adapters/itertools.h \
+	adapters/mappings.h adapters/operator.h adapters/protocols.h adapters/sets.h \
+	adapters/sort_engine.h adapters/text.h
+SRC = _aleff.c $(ADAPTER_SRC)
 
 .PHONY: build debug clean
 
 build: $(TARGET)
 
-debug: $(SRC)
-	$(CC) $(DEBUG_CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $(TARGET) $<
+debug: $(SRC) $(ADAPTER_HEADERS)
+	$(CC) $(DEBUG_CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $(TARGET) $(SRC)
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $@ $<
+$(TARGET): $(SRC) $(ADAPTER_HEADERS)
+	$(CC) $(CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $@ $(SRC)
 
 clean:
 	rm -f _aleff*.so
