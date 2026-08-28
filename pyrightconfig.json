@@ -13,6 +13,8 @@
         "src/aleff/_oneshot/v6",
         "src/aleff/_oneshot/v7",
         "src/aleff/_oneshot/v8",
+        "vendor/greenlet",
+        "build",
         "debug_*.py",
         "docs/"
     ]

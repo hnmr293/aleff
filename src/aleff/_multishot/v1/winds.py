@@ -372,6 +372,64 @@ class wind_range(WindBase["wind_range", int]):
         return val
 
 
+class wind_count(WindBase["wind_count", Any]):
+    """Multi-shot-safe adapter for :func:`itertools.count`."""
+
+    def __init__(self, start: Any = 0, step: Any = 1) -> None:
+        super().__init__()
+        self._current = start
+        self._step = step
+
+    def _wind_enter(self) -> "wind_count":
+        return self
+
+    def _wind_snapshot(self) -> Any:
+        return self._current
+
+    def _wind_restore(self, state: Any) -> None:
+        self._current = state
+
+    def __iter__(self) -> "wind_count":
+        return self
+
+    def __next__(self) -> Any:
+        value = self._current
+        self._current += self._step
+        return value
+
+
+class wind_repeat[T](WindBase["wind_repeat[T]", int | None]):
+    """Multi-shot-safe adapter for :func:`itertools.repeat`."""
+
+    def __init__(self, value: T, times: int | None = None) -> None:
+        super().__init__()
+        if times is not None:
+            import operator
+
+            times = max(0, operator.index(times))
+        self._value = value
+        self._remaining = times
+
+    def _wind_enter(self) -> "wind_repeat[T]":
+        return self
+
+    def _wind_snapshot(self) -> int | None:
+        return self._remaining
+
+    def _wind_restore(self, state: int | None) -> None:
+        self._remaining = state
+
+    def __iter__(self) -> "wind_repeat[T]":
+        return self
+
+    def __next__(self) -> T:
+        if self._remaining == 0:
+            raise StopIteration
+        if self._remaining is not None:
+            self._remaining -= 1
+        return self._value
+
+
 def _accepts_positional(fn: Callable[..., Any]) -> TypeGuard[Callable[[Any], Any]]:
     """Return True if *fn* accepts at least one positional argument.
 
@@ -413,9 +471,21 @@ def capture_wind_stack(caller_gl: gl.greenlet) -> _CapturedWinds:
 
 
 # for handlers.py
-def rewind(captured: _CapturedWinds) -> None:
+def rewind(
+    captured: _CapturedWinds,
+    current: list[WindBase[Any, Any]] | None = None,
+) -> None:
     """Re-enter the *captured* dynamic extents for a multi-shot continuation."""
+    if current is not None:
+        _set_wind_stack(current)
     WindBase._rewind(captured)  # pyright: ignore[reportPrivateUsage]
+
+
+# for handlers.py
+def current_wind_stack() -> list[WindBase[Any, Any]]:
+    """Return the current dynamic-wind path without snapshotting its entries."""
+
+    return _get_wind_stack()
 
 
 def _shared_prefix_len(

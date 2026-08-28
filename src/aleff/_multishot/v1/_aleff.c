@@ -2111,6 +2111,22 @@ _aleff_debug_frame_stacktop(_ALEFF_UNUSED PyObject *self, PyObject *arg)
     return PyLong_FromLong(_aleff_frame_stacktop(iframe));
 }
 
+/*
+ * Test-only native boundary for X(func). It intentionally owns no state
+ * across the callback beyond the argument borrowed from its Python caller.
+ * Third-party functions with owned references or resources remain outside
+ * X's safety guarantees.
+ */
+static PyObject *
+_aleff_test_native_call(_ALEFF_UNUSED PyObject *self, PyObject *callback)
+{
+    if (!PyCallable_Check(callback)) {
+        PyErr_SetString(PyExc_TypeError, "callback must be callable");
+        return nullptr;
+    }
+    return PyObject_CallNoArgs(callback);
+}
+
 /* ========================================================================
  * Module definition
  * ======================================================================== */
@@ -2127,6 +2143,7 @@ static PyMethodDef _aleff_methods[] = {
         restore_async_continuation_doc
     },
     {"_debug_frame_stacktop", _aleff_debug_frame_stacktop, METH_O, debug_frame_stacktop_doc},
+    {"_test_native_call", _aleff_test_native_call, METH_O, nullptr},
     {nullptr, nullptr, 0, nullptr}
 };
 

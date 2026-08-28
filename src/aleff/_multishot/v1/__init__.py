@@ -35,7 +35,19 @@ from .misc import loglevel
 from .winds import (
     WindBase,
     wind,
+    wind_count,
     wind_range,
+    wind_repeat,
+)
+
+from .adapters import (
+    AdapterFactory,
+    AdapterRegistry,
+    NativeContinuationUnavailableError,
+    X,
+    adapt,
+    adapter_registry,
+    native_continuation_supported,
 )
 
 __all__ = [
@@ -53,6 +65,15 @@ __all__ = [
     "loglevel",
     "WindBase",
     "wind",
+    "wind_count",
     "wind_range",
+    "wind_repeat",
+    "AdapterFactory",
+    "AdapterRegistry",
+    "NativeContinuationUnavailableError",
+    "X",
+    "adapt",
+    "adapter_registry",
+    "native_continuation_supported",
     "Ref",
 ]

@@ -23,7 +23,12 @@ from ._aleff import (
     restore_continuation,
     snapshot_from_frame,
 )
-from .winds import capture_wind_stack, rewind
+from .adapters import (
+    NativeContinuationUnavailableError,
+    native_continuation_active,
+    native_continuation_supported,
+)
+from .winds import capture_wind_stack, current_wind_stack, rewind
 
 
 def create_handler(*effects: Effect[..., Any], shallow: bool = False) -> Handler[Any]:
@@ -93,14 +98,16 @@ class _Resume[R, V](Resume[R, V]):
     def __init__(
         self,
         caller_gl: gl.greenlet,
-        snapshot: FrameSnapshot[R, V],
+        snapshot: FrameSnapshot[R, V] | None,
         token: object,
         handler: "_Handler[Any] | _AsyncHandler[Any]",
+        native_template: gl.greenlet | None = None,
     ) -> None:
         self._caller_gl = caller_gl
         self._snapshot = snapshot
         self._token = token
         self._handler = handler
+        self._native_template = native_template
         self._winds = capture_wind_stack(caller_gl)
 
     def __call__(self, value: R) -> V:
@@ -131,7 +138,14 @@ class _Resume[R, V](Resume[R, V]):
 
         debug("||> @caller (multi-shot)")
 
+        if self._native_template is not None:
+            shot = _clone_native_shot(self._native_template, self._winds)
+            v = _drive(shot, shot.switch(value))
+            debug(f"||< @caller (native multi-shot) = {v!r}")
+            return v
+
         ss = self._snapshot
+        assert ss is not None
         winds = self._winds
 
         def _body() -> V:
@@ -151,16 +165,18 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
     def __init__(
         self,
         caller_gl: gl.greenlet,
-        snapshot: FrameSnapshot[R, V],
+        snapshot: FrameSnapshot[R, V] | None,
         token: object,
         handler: "_Handler[Any] | _AsyncHandler[Any]",
         async_continuation: bool,
+        native_template: gl.greenlet | None = None,
     ) -> None:
         self._caller_gl = caller_gl
         self._snapshot = snapshot
         self._token = token
         self._handler = handler
         self._async_continuation = async_continuation
+        self._native_template = native_template
         self._winds = capture_wind_stack(caller_gl)
 
     async def __call__(self, value: R) -> V:
@@ -183,7 +199,14 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
 
         debug("||> @caller (multi-shot async)")
 
+        if self._native_template is not None:
+            shot = _clone_native_shot(self._native_template, self._winds)
+            v = await _drive_async(shot, shot.switch(value))
+            debug(f"||< @caller (native multi-shot async) = {v!r}")
+            return v
+
         ss = self._snapshot
+        assert ss is not None
         winds = self._winds
 
         def _body() -> V:
@@ -211,6 +234,43 @@ class _EffectDispatch:
     fn: Callable[..., Any]
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
+
+
+def _capture_native_template(caller_gl: gl.greenlet) -> gl.greenlet | None:
+    """Clone a caller suspended inside an explicit unsafe ``X(func)`` extent."""
+
+    if not native_continuation_active(caller_gl.gr_context):
+        return None
+    if not native_continuation_supported():
+        raise NativeContinuationUnavailableError(
+            "X(func) continuations require GIL-enabled CPython 3.12 through 3.14 on Linux x86-64"
+        )
+    try:
+        return cast(gl.greenlet, cast(Any, caller_gl).clone())
+    except gl.error as exc:
+        raise NativeContinuationUnavailableError("failed to capture the native continuation inside X(func)") from exc
+
+
+def _clone_native_shot(
+    template: gl.greenlet,
+    winds: Any,
+) -> gl.greenlet:
+    """Create one independent resume from a suspended native template."""
+
+    shot = cast(gl.greenlet, cast(Any, template).clone())
+    shot.parent = gl.getcurrent()
+
+    branch_context = shot.gr_context
+    if branch_context is None:
+        branch_context = copy_context()
+        shot.gr_context = branch_context
+
+    # The continuation owns ordinary ContextVar values from its capture point,
+    # while handler and dynamic-wind bookkeeping must reflect the invocation
+    # point of this particular k(value) call.
+    branch_context.run(_set_stack, _get_stack())
+    branch_context.run(rewind, winds, current_wind_stack())
+    return shot
 
 
 def _pre_drive(
@@ -300,11 +360,20 @@ def _drive_effect(caller_gl: Any, value: EffectContext[..., Any]) -> Any:
     if d.handler.shallow:
         _remove_all_handlers(d.token)
 
-    # Take snapshot from the handler greenlet. The caller greenlet is
-    # suspended at this point, so its frames have valid stacktop values.
-    snapshot = snapshot_from_frame(caller_gl.gr_frame, -1, value.handled_exception)
+    native_template = _capture_native_template(caller_gl)
+    # Native continuations preserve the suspended C stack exactly. Ordinary
+    # Python continuations keep using portable frame snapshots.
+    snapshot = (
+        None if native_template is not None else snapshot_from_frame(caller_gl.gr_frame, -1, value.handled_exception)
+    )
 
-    resume: Resume[Any, Any] = _Resume(caller_gl, snapshot, d.token, d.handler)
+    resume: Resume[Any, Any] = _Resume(
+        caller_gl,
+        snapshot,
+        d.token,
+        d.handler,
+        native_template,
+    )
     v = d.fn(resume, *d.args, **d.kwargs)
 
     debug(f"||< perform {eff_str(d.effect)} = {v!r}")
@@ -599,13 +668,21 @@ async def _drive_effect_async(
     if d.handler.shallow:
         _remove_all_handlers(d.token)
 
-    snapshot, async_continuation = _snapshot_for_async_resume(caller_gl, value.handled_exception)
+    native_template = _capture_native_template(caller_gl)
+    if native_template is None:
+        snapshot, async_continuation = _snapshot_for_async_resume(
+            caller_gl,
+            value.handled_exception,
+        )
+    else:
+        snapshot, async_continuation = None, False
     resume: ResumeAsync[Any, Any] = _ResumeAsync(
         caller_gl,
         snapshot,
         d.token,
         d.handler,
         async_continuation,
+        native_template,
     )
 
     # Use exclude_token so handler fn's effects skip this handler

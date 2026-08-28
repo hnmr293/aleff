@@ -1,0 +1,2 @@
+recursive-include vendor/greenlet *.cpp *.hpp *.h *.py *.pyi py.typed
+include vendor/greenlet/LICENSE vendor/greenlet/LICENSE.PSF

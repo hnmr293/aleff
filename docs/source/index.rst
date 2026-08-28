@@ -7,6 +7,7 @@
    :hidden:
 
    api/effects
+   api/native
    api/wind
 
 .. toctree::

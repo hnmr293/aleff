@@ -181,6 +181,31 @@ with wind_range(n) as r:
         v = choose()  # multi-shot safe
 ```
 
+## Native functions and adapters
+
+`X(func)` selects an explicit adapter when one is registered for the exact
+callable identity. Built-in adapters are provided for `range`,
+`itertools.count`, and `itertools.repeat`:
+
+```python
+with X(range)(10) as values:
+    for value in values:
+        result = choose()
+```
+
+Applications can register another state-preserving adapter with
+`X.register(func, adapter)`.
+
+For an unregistered callable, `X(func)` is an explicitly unsafe opt-in that
+captures its suspended native stack. This mode is available only on
+GIL-enabled CPython 3.12–3.14 on Linux x86-64. It resumes from the exact
+suspension point without calling `func` again, but references, locks,
+internal structures, external resources, and side effects owned by `func`
+remain the caller's responsibility. Misuse can crash or corrupt the process.
+Resumes must be sequential and stay on the same OS thread and interpreter.
+Free-threaded builds and runtime callback contexts such as tracing, signals,
+finalizers, event loops, and cross-thread callbacks are unsupported.
+
 ## How it works
 
 Effects are declared as typed values and invoked like regular function calls. A `Handler` intercepts these calls via greenlet-based context switching:
@@ -238,6 +263,9 @@ See [`examples/`](examples/) for demonstrations:
 | `ResumeAsync[R, V]` | Async continuation (`await k(value) -> V`) |
 | `wind(before, after, *, auto_exit=True)` | Dynamic wind context manager |
 | `wind_range(stop)` / `wind_range(start, stop, step)` | Multi-shot-safe `range()` for `for` loops |
+| `X(func)` | Use an exact registered adapter, or explicitly opt into unsafe native continuation capture |
+| `X.register(func, adapter)` | Register a state-preserving adapter by callable identity |
+| `native_continuation_supported()` | Check whether unsafe native continuation capture is available |
 | `Ref[T]` | Reference wrapper returned by `wind`; call `unwrap()` to get the value |
 
 ## Development

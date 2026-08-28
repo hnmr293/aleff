@@ -21,8 +21,8 @@ name = "aleff"
 version = "0.3.2"
 source = { editable = "." }
 dependencies = [
-    { name = "greenlet", version = "3.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14.4'" },
-    { name = "greenlet", version = "3.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14.4'" },
+    { name = "greenlet", version = "3.3.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.14.4' and implementation_name != 'cpython') or (python_full_version < '3.14.4' and platform_machine != 'x86_64') or (python_full_version < '3.14.4' and sys_platform != 'linux')" },
+    { name = "greenlet", version = "3.5.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.14.4' and implementation_name != 'cpython') or (python_full_version >= '3.14.4' and platform_machine != 'x86_64') or (python_full_version >= '3.14.4' and sys_platform != 'linux')" },
 ]
 
 [package.dev-dependencies]
@@ -41,9 +41,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "greenlet", marker = "python_full_version < '3.14'", specifier = ">=3.3.2" },
-    { name = "greenlet", marker = "python_full_version >= '3.14' and python_full_version < '3.14.4'", specifier = ">=3.3.2,<3.4.0" },
-    { name = "greenlet", marker = "python_full_version >= '3.14.4'", specifier = ">=3.5.5" },
+    { name = "greenlet", marker = "(python_full_version < '3.14' and implementation_name != 'cpython') or (python_full_version < '3.14' and platform_machine != 'x86_64') or (python_full_version < '3.14' and sys_platform != 'linux')", specifier = ">=3.3.2" },
+    { name = "greenlet", marker = "(python_full_version >= '3.14' and python_full_version < '3.14.4' and implementation_name != 'cpython') or (python_full_version >= '3.14' and python_full_version < '3.14.4' and platform_machine != 'x86_64') or (python_full_version >= '3.14' and python_full_version < '3.14.4' and sys_platform != 'linux')", specifier = ">=3.3.2,<3.4.0" },
+    { name = "greenlet", marker = "(python_full_version >= '3.14.4' and implementation_name != 'cpython') or (python_full_version >= '3.14.4' and platform_machine != 'x86_64') or (python_full_version >= '3.14.4' and sys_platform != 'linux')", specifier = ">=3.5.5" },
 ]
 
 [package.metadata.requires-dev]
