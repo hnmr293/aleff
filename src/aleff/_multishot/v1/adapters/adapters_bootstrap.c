@@ -1,3 +1,14 @@
+#include "builtins.h"
+#include "containers.h"
+#include "functools.h"
+#include "iterators.h"
+#include "itertools.h"
+#include "mappings.h"
+#include "operator.h"
+#include "protocols.h"
+#include "sets.h"
+#include "text.h"
+
 static PyMethodDef sum_method = {
     .ml_name = "sum",
     .ml_meth = (PyCFunction)(void(*)(void))adapter_sum,
@@ -828,7 +839,7 @@ aleff_adapter_install(void)
     if (
         zip_type_object == NULL || !PyType_Check(zip_type_object) ||
         ((PyTypeObject *)zip_type_object)->tp_basicsize <
-            (Py_ssize_t)sizeof(AleffZipObject)
+            adapter_zip_basicsize()
     ) {
         PyErr_SetString(PyExc_RuntimeError, "unsupported built-in zip layout");
         goto rollback;
@@ -843,7 +854,7 @@ aleff_adapter_install(void)
     if (
         enumerate_type_object == NULL || !PyType_Check(enumerate_type_object) ||
         ((PyTypeObject *)enumerate_type_object)->tp_basicsize <
-            (Py_ssize_t)sizeof(AleffEnumerateObject) ||
+            adapter_enumerate_basicsize() ||
         ((PyTypeObject *)enumerate_type_object)->tp_vectorcall == NULL
     ) {
         PyErr_SetString(PyExc_RuntimeError, "unsupported built-in enumerate layout");
@@ -861,7 +872,7 @@ aleff_adapter_install(void)
     if (
         reversed_type_object == NULL || !PyType_Check(reversed_type_object) ||
         ((PyTypeObject *)reversed_type_object)->tp_basicsize <
-            (Py_ssize_t)sizeof(AleffReversedObject) ||
+            adapter_reversed_basicsize() ||
         ((PyTypeObject *)reversed_type_object)->tp_vectorcall == NULL
     ) {
         PyErr_SetString(PyExc_RuntimeError, "unsupported built-in reversed layout");
@@ -880,7 +891,7 @@ aleff_adapter_install(void)
     if (
         filter_type_object == NULL || !PyType_Check(filter_type_object) ||
         ((PyTypeObject *)filter_type_object)->tp_basicsize <
-            (Py_ssize_t)sizeof(AleffFilterObject)
+            adapter_filter_basicsize()
     ) {
         PyErr_SetString(PyExc_RuntimeError, "unsupported built-in filter layout");
         goto rollback;
@@ -906,7 +917,7 @@ aleff_adapter_install(void)
     if (
         accumulate_type_object == NULL || !PyType_Check(accumulate_type_object) ||
         ((PyTypeObject *)accumulate_type_object)->tp_basicsize <
-            (Py_ssize_t)sizeof(AleffAccumulateObject)
+            adapter_accumulate_basicsize()
     ) {
         Py_XDECREF(accumulate_type_object);
         PyErr_SetString(PyExc_RuntimeError, "unsupported itertools.accumulate layout");
@@ -933,7 +944,7 @@ aleff_adapter_install(void)
     if (
         chain_type_object == NULL || !PyType_Check(chain_type_object) ||
         ((PyTypeObject *)chain_type_object)->tp_basicsize <
-            (Py_ssize_t)sizeof(AleffChainObject)
+            adapter_chain_basicsize()
     ) {
         Py_XDECREF(chain_type_object);
         PyErr_SetString(PyExc_RuntimeError, "unsupported itertools.chain layout");

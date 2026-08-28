@@ -1,14 +1,10 @@
+#include "internal.h"
+#include "containers.h"
+#include "iterators.h"
+#include "mappings.h"
+#include "sets.h"
 #include "sort_engine.h"
-
-typedef enum {
-    COLLECT_LIST,
-    COLLECT_TUPLE,
-    COLLECT_DICT,
-    COLLECT_SET,
-    COLLECT_FROZENSET,
-    COLLECT_BYTES,
-    COLLECT_BYTEARRAY,
-} CollectKind;
+#include "text.h"
 
 typedef enum {
     COLLECT_WAIT_ITER,
@@ -25,12 +21,10 @@ typedef struct {
     CollectPhase phase;
 } CollectState;
 
-static PyObject *collect_set_iterable(PyObject *iterable, CollectKind kind);
+initproc original_bytearray_init;
+ binaryfunc original_dict_subscript;
 
-static initproc original_bytearray_init;
-static binaryfunc original_dict_subscript;
-
-static int
+int
 dict_item_has_python_hash(PyObject *key)
 {
     PyObject *type_dict = PyType_GetDict(Py_TYPE(key));
@@ -318,7 +312,7 @@ collect_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 collect_iterable(PyObject *iterable, CollectKind kind)
 {
     if (kind == COLLECT_SET || kind == COLLECT_FROZENSET) {
@@ -488,7 +482,7 @@ static const AleffAdapterVTable list_extend_vtable = {
     .resume = list_extend_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_list_extend(PyObject *self, PyObject *iterable)
 {
     if (iterable == self || PyList_CheckExact(iterable) || PyTuple_CheckExact(iterable)) {
@@ -617,7 +611,7 @@ list_count_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_list_count(PyObject *self, PyObject *target)
 {
     ListCountState state = {
@@ -892,7 +886,7 @@ sequence_search(
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_sequence_count(PyObject *self, PyObject *target)
 {
     return sequence_search(
@@ -904,7 +898,7 @@ adapter_sequence_count(PyObject *self, PyObject *target)
     );
 }
 
-static PyObject *
+PyObject *
 adapter_sequence_index(PyObject *self, PyObject *args)
 {
     PyObject *target;
@@ -926,7 +920,7 @@ adapter_sequence_index(PyObject *self, PyObject *args)
     return sequence_search(self, target, start, stop, SEQUENCE_SEARCH_INDEX);
 }
 
-static PyObject *
+PyObject *
 adapter_list_remove(PyObject *self, PyObject *target)
 {
     return sequence_search(
@@ -938,7 +932,7 @@ adapter_list_remove(PyObject *self, PyObject *target)
     );
 }
 
-static int
+int
 adapter_sequence_contains(PyObject *self, PyObject *target)
 {
     PyObject *result = sequence_search(
@@ -1084,7 +1078,7 @@ list_repr_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_list_repr(PyObject *receiver)
 {
     int recursive = Py_ReprEnter(receiver);
@@ -1122,7 +1116,7 @@ typedef struct {
     Py_ssize_t index;
 } TupleHashState;
 
-static hashfunc original_tuple_hash;
+hashfunc original_tuple_hash;
 
 static void *
 tuple_hash_copy_state(const void *raw_state)
@@ -1239,7 +1233,7 @@ tuple_hash_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static Py_hash_t
+ Py_hash_t
 adapter_tuple_hash(PyObject *receiver)
 {
     TupleHashState state = {
@@ -1413,10 +1407,10 @@ sequence_compare_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static richcmpfunc original_list_richcompare = NULL;
-static richcmpfunc original_tuple_richcompare = NULL;
+richcmpfunc original_list_richcompare = NULL;
+richcmpfunc original_tuple_richcompare = NULL;
 
-static PyObject *
+PyObject *
 adapter_sequence_richcompare(PyObject *left, PyObject *right, int operation)
 {
     int list_comparison = PyList_Check(left) && PyList_Check(right);
@@ -1841,7 +1835,7 @@ sort_adapter_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_list_sort(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     if (PyTuple_GET_SIZE(args) != 0) {
@@ -1899,8 +1893,8 @@ typedef struct {
     int index;
 } SliceHashState;
 
-static hashfunc original_slice_hash;
-static PyObject *original_slice_indices;
+hashfunc original_slice_hash;
+PyObject *original_slice_indices;
 
 static void *
 slice_hash_copy_state(const void *raw_state)
@@ -2023,7 +2017,7 @@ slice_hash_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static Py_hash_t
+ Py_hash_t
 adapter_slice_hash(PyObject *object)
 {
     PySliceObject *slice = (PySliceObject *)object;
@@ -2047,7 +2041,7 @@ adapter_slice_hash(PyObject *object)
 }
 
 
-static PyObject *
+PyObject *
 adapter_sorted(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
 {
     Py_ssize_t positional_count = PyTuple_GET_SIZE(args);
@@ -2103,19 +2097,19 @@ adapter_sorted(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
     return result;
 }
 
-static initproc original_list_init;
-static vectorcallfunc original_list_vectorcall;
-static newfunc original_tuple_new;
-static vectorcallfunc original_tuple_vectorcall;
-static initproc original_dict_init;
-static vectorcallfunc original_dict_vectorcall;
-static initproc original_set_init;
-static vectorcallfunc original_set_vectorcall;
-static newfunc original_frozenset_new;
-static vectorcallfunc original_frozenset_vectorcall;
-static newfunc original_bytes_new;
+initproc original_list_init;
+vectorcallfunc original_list_vectorcall;
+newfunc original_tuple_new;
+vectorcallfunc original_tuple_vectorcall;
+initproc original_dict_init;
+vectorcallfunc original_dict_vectorcall;
+initproc original_set_init;
+vectorcallfunc original_set_vectorcall;
+newfunc original_frozenset_new;
+vectorcallfunc original_frozenset_vectorcall;
+newfunc original_bytes_new;
 
-static PyObject *
+PyObject *
 adapter_collect_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -2140,7 +2134,7 @@ adapter_collect_vectorcall(
     return collect_iterable(args[0], kind);
 }
 
-static PyObject *
+PyObject *
 adapter_list_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -2154,7 +2148,7 @@ adapter_list_vectorcall(
     );
 }
 
-static PyObject *
+PyObject *
 adapter_tuple_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -2168,7 +2162,7 @@ adapter_tuple_vectorcall(
     );
 }
 
-static int
+int
 adapter_list_init(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     if (kwargs != NULL && PyDict_GET_SIZE(kwargs) != 0) {
@@ -2186,7 +2180,7 @@ adapter_list_init(PyObject *self, PyObject *args, PyObject *kwargs)
     return status;
 }
 
-static PyObject *
+PyObject *
 adapter_tuple_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     if (
@@ -2628,10 +2622,6 @@ adapter_slice_indices(PyObject *self, PyObject *length_object)
     (void)slice;
     return result;
 }
-
-#include "mappings.c"
-#include "sets.c"
-#include "text.c"
 
 
 static PyMethodDef containers_range_count_method = {

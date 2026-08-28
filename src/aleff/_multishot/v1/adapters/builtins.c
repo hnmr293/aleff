@@ -1,4 +1,19 @@
-static PyObject *original_dir = NULL;
+#include "internal.h"
+#include "builtins.h"
+#include "protocols.h"
+
+PyObject *original_dir = NULL;
+
+static void *
+builtins_empty_copy_state(const void *Py_UNUSED(state))
+{
+    return NULL;
+}
+
+static void
+builtins_empty_free_state(void *Py_UNUSED(state))
+{
+}
 
 typedef struct {
     PyObject *default_value;
@@ -56,7 +71,7 @@ static const AleffAdapterVTable next_vtable = {
     .resume = next_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_next(PyObject *Py_UNUSED(self), PyObject *args)
 {
     Py_ssize_t argument_count = PyTuple_GET_SIZE(args);
@@ -132,12 +147,12 @@ len_resume(const void *Py_UNUSED(state), PyObject *value)
 }
 
 static const AleffAdapterVTable len_vtable = {
-    .copy_state = empty_copy_state,
-    .free_state = empty_free_state,
+    .copy_state = builtins_empty_copy_state,
+    .free_state = builtins_empty_free_state,
     .resume = len_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_len(PyObject *Py_UNUSED(self), PyObject *object)
 {
     AleffAdapterFrame frame;
@@ -151,8 +166,6 @@ adapter_len(PyObject *Py_UNUSED(self), PyObject *object)
     }
     return PyLong_FromSsize_t(length);
 }
-
-#include "protocols.c"
 
 static PyObject *
 ascii_from_repr(PyObject *value)
@@ -192,12 +205,12 @@ ascii_resume(const void *Py_UNUSED(state), PyObject *value)
 }
 
 static const AleffAdapterVTable ascii_vtable = {
-    .copy_state = empty_copy_state,
-    .free_state = empty_free_state,
+    .copy_state = builtins_empty_copy_state,
+    .free_state = builtins_empty_free_state,
     .resume = ascii_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_ascii(PyObject *Py_UNUSED(self), PyObject *object)
 {
     AleffAdapterFrame frame;
@@ -230,12 +243,12 @@ hasattr_resume(const void *Py_UNUSED(state), PyObject *value)
 }
 
 static const AleffAdapterVTable hasattr_vtable = {
-    .copy_state = empty_copy_state,
-    .free_state = empty_free_state,
+    .copy_state = builtins_empty_copy_state,
+    .free_state = builtins_empty_free_state,
     .resume = hasattr_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_hasattr(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *object;
@@ -303,7 +316,7 @@ static const AleffAdapterVTable getattr_vtable = {
     .resume = getattr_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_getattr(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *object;
@@ -347,12 +360,12 @@ dir_resume(const void *Py_UNUSED(state), PyObject *value)
 }
 
 static const AleffAdapterVTable dir_vtable = {
-    .copy_state = empty_copy_state,
-    .free_state = empty_free_state,
+    .copy_state = builtins_empty_copy_state,
+    .free_state = builtins_empty_free_state,
     .resume = dir_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_dir(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *object = NULL;
@@ -512,13 +525,13 @@ adapter_abstract_check(PyObject *args, int is_instance)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_isinstance(PyObject *Py_UNUSED(self), PyObject *args)
 {
     return adapter_abstract_check(args, 1);
 }
 
-static PyObject *
+PyObject *
 adapter_issubclass(PyObject *Py_UNUSED(self), PyObject *args)
 {
     return adapter_abstract_check(args, 0);
@@ -534,12 +547,12 @@ none_resume(const void *Py_UNUSED(state), PyObject *value)
 }
 
 static const AleffAdapterVTable none_vtable = {
-    .copy_state = empty_copy_state,
-    .free_state = empty_free_state,
+    .copy_state = builtins_empty_copy_state,
+    .free_state = builtins_empty_free_state,
     .resume = none_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_setattr(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *object;
@@ -560,7 +573,7 @@ adapter_setattr(PyObject *Py_UNUSED(self), PyObject *args)
     Py_RETURN_NONE;
 }
 
-static PyObject *
+PyObject *
 adapter_delattr(PyObject *Py_UNUSED(self), PyObject *args)
 {
     PyObject *object;
@@ -580,9 +593,9 @@ adapter_delattr(PyObject *Py_UNUSED(self), PyObject *args)
     Py_RETURN_NONE;
 }
 
-static PyObject *original_input = NULL;
-static PyObject *original_anext = NULL;
-static PyObject *adapter_print(PyObject *self, PyObject *args, PyObject *kwargs);
+PyObject *original_input = NULL;
+PyObject *original_anext = NULL;
+PyObject *adapter_print(PyObject *self, PyObject *args, PyObject *kwargs);
 
 typedef struct {
     PyObject_HEAD
@@ -731,7 +744,7 @@ static PyAsyncMethods anext_awaitable_as_async = {
     .am_await = anext_awaitable_await,
 };
 
-static PyTypeObject AleffAnextAwaitable_Type = {
+PyTypeObject AleffAnextAwaitable_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "aleff._continuation_anext_awaitable",
     .tp_basicsize = sizeof(AleffAnextAwaitable),
@@ -761,7 +774,7 @@ anext_awaitable_new(PyObject *awaitable, PyObject *default_value)
     return (PyObject *)self;
 }
 
-static PyObject *
+PyObject *
 adapter_anext(PyObject *Py_UNUSED(self), PyObject *args)
 {
     Py_ssize_t argument_count = PyTuple_GET_SIZE(args);
@@ -936,7 +949,7 @@ static const AleffAdapterVTable input_vtable = {
     .resume = input_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_input(PyObject *Py_UNUSED(self), PyObject *args)
 {
     Py_ssize_t count = PyTuple_GET_SIZE(args);
@@ -997,11 +1010,11 @@ typedef struct {
     OpenPhase phase;
 } OpenState;
 
-static PyObject *original_open = NULL;
-static PyObject *original_import = NULL;
-static PyObject *import_get_module_lock = NULL;
-static PyObject *import_global_lock_held = NULL;
-static PyObject *import_global_lock_acquire = NULL;
+PyObject *original_open = NULL;
+PyObject *original_import = NULL;
+PyObject *import_get_module_lock = NULL;
+PyObject *import_global_lock_held = NULL;
+PyObject *import_global_lock_acquire = NULL;
 
 static void *
 open_copy_state(const void *raw_state)
@@ -1121,7 +1134,7 @@ static const AleffAdapterVTable open_vtable = {
     .resume = open_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_open(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
 {
     if (PyTuple_GET_SIZE(args) == 0) {
@@ -1454,7 +1467,7 @@ static const AleffAdapterVTable import_vtable = {
     .prepare_resume = import_prepare_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_import(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
 {
     if (PyTuple_GET_SIZE(args) == 0) {
@@ -1720,7 +1733,7 @@ static const AleffAdapterVTable print_vtable = {
     .resume = print_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_print(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
 {
     PyObject *separator = Py_None;
@@ -1827,7 +1840,7 @@ typedef struct {
     TypeConstructionPhase phase;
 } TypeConstructionState;
 
-static PyObject *original_build_class = NULL;
+PyObject *original_build_class = NULL;
 static PyObject *type_construction_copy_namespace(PyObject *source);
 static int type_construction_prepare_resume(void *raw_state);
 
@@ -2035,20 +2048,13 @@ static const AleffAdapterVTable type_construction_vtable = {
 static TypeConstructionState *
 type_construction_shadow_outer_build_class(int *previous_value)
 {
-    for (AleffAdapterNode *node = active_adapter;
-         node != NULL;
-         node = node->previous) {
-        if (
-            node->vtable == &type_construction_vtable &&
-            node->state != NULL
-        ) {
-            TypeConstructionState *state = (TypeConstructionState *)node->state;
-            if (!state->is_type_call) {
-                *previous_value = state->shadowed_by_type_call;
-                state->shadowed_by_type_call = 1;
-                return state;
-            }
-        }
+    TypeConstructionState *state = adapter_find_state(
+        &type_construction_vtable
+    );
+    if (state != NULL && !state->is_type_call) {
+        *previous_value = state->shadowed_by_type_call;
+        state->shadowed_by_type_call = 1;
+        return state;
     }
     return NULL;
 }
@@ -2509,7 +2515,7 @@ type_construction_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_build_class(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
 {
     PyObject *body_code = NULL;
@@ -2541,7 +2547,7 @@ adapter_build_class(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_type_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -2706,7 +2712,7 @@ number_base_resume(const void *raw_state, PyObject *value)
 
 static const AleffAdapterVTable number_base_vtable = {
     .copy_state = number_base_copy_state,
-    .free_state = empty_free_state,
+    .free_state = builtins_empty_free_state,
     .resume = number_base_resume,
 };
 
@@ -2723,19 +2729,19 @@ adapter_number_base(PyObject *object, int base)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_bin(PyObject *Py_UNUSED(self), PyObject *object)
 {
     return adapter_number_base(object, 2);
 }
 
-static PyObject *
+PyObject *
 adapter_oct(PyObject *Py_UNUSED(self), PyObject *object)
 {
     return adapter_number_base(object, 8);
 }
 
-static PyObject *
+PyObject *
 adapter_hex(PyObject *Py_UNUSED(self), PyObject *object)
 {
     return adapter_number_base(object, 16);
@@ -3040,13 +3046,13 @@ adapter_extreme(PyObject *args, PyObject *kwargs, int comparison_op, const char 
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_min(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
 {
     return adapter_extreme(args, kwargs, Py_LT, "min");
 }
 
-static PyObject *
+PyObject *
 adapter_max(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
 {
     return adapter_extreme(args, kwargs, Py_GT, "max");

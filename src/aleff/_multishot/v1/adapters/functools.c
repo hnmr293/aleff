@@ -1,3 +1,5 @@
+#include "internal.h"
+#include "functools.h"
 #include <structmember.h>
 
 typedef struct {
@@ -740,7 +742,7 @@ adapter_lru_cache_wrapper(
     return functools_cache_wrap(func, maxsize, typed, cache_info_type);
 }
 
-static int
+int
 adapter_functools_install(PyObject *functools)
 {
     if (PyType_Ready(&FunctoolsCacheCallableType) < 0) {
@@ -798,7 +800,7 @@ adapter_functools_install(PyObject *functools)
     return 0;
 }
 
-static void
+void
 adapter_functools_rollback(void)
 {
     if (functools_native_key_wrapper_type != NULL &&

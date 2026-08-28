@@ -1,3 +1,6 @@
+#include "internal.h"
+#include "iterators.h"
+#include "itertools.h"
 #include <stdbool.h>
 
 typedef struct {
@@ -5,6 +8,12 @@ typedef struct {
     PyObject *source;
     PyObject *active;
 } AleffChainObject;
+
+Py_ssize_t
+adapter_chain_basicsize(void)
+{
+    return (Py_ssize_t)sizeof(AleffChainObject);
+}
 
 typedef enum {
     CHAIN_WAIT_SOURCE_NEXT,
@@ -178,7 +187,7 @@ chain_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_chain_next(PyObject *object)
 {
     AleffChainObject *chain = (AleffChainObject *)object;
@@ -262,7 +271,7 @@ static const AleffAdapterVTable chain_constructor_vtable = {
     .resume = chain_constructor_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_chain_from_iterable(PyObject *type_object, PyObject *iterable)
 {
     ChainConstructorState state = {.type = (PyTypeObject *)type_object};
@@ -287,6 +296,12 @@ typedef struct {
     PyObject *initial;
     void *module_state;
 } AleffAccumulateObject;
+
+Py_ssize_t
+adapter_accumulate_basicsize(void)
+{
+    return (Py_ssize_t)sizeof(AleffAccumulateObject);
+}
 
 static newfunc original_accumulate_new;
 
@@ -432,7 +447,7 @@ accumulate_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_accumulate_next(PyObject *object)
 {
     AleffAccumulateObject *accumulate = (AleffAccumulateObject *)object;
@@ -559,11 +574,11 @@ typedef struct {
     PyObject *kwargs;
 } BatchedConstructorState;
 
-static newfunc original_batched_new;
+newfunc original_batched_new;
 static iternextfunc original_batched_next;
-static PyTypeObject *original_batched_type = NULL;
-static iternextfunc original_accumulate_next = NULL;
-static PyTypeObject *original_accumulate_type = NULL;
+PyTypeObject *original_batched_type = NULL;
+iternextfunc original_accumulate_next = NULL;
+PyTypeObject *original_accumulate_type = NULL;
 
 static void *
 batched_constructor_copy_state(const void *raw_state)
@@ -632,7 +647,7 @@ static const AleffAdapterVTable batched_constructor_vtable = {
     .resume = batched_constructor_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_batched_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     BatchedConstructorState state = {
@@ -3050,7 +3065,7 @@ adapter_native_itertools_next(PyObject *object, PyObject **result)
 /* Called by adapters_bootstrap.c after the module and the existing special
  * adapters have been initialized.  Keeping registration here avoids exposing
  * CPython layout details to the bootstrap translation unit. */
-static int
+int
 adapter_itertools_install(PyObject *itertools)
 {
     if (PyType_Ready(&ItIteratorHolderType) < 0) {
@@ -3172,7 +3187,7 @@ adapter_itertools_install(PyObject *itertools)
     return 0;
 }
 
-static void
+void
 adapter_itertools_rollback(void)
 {
     if (original_accumulate_type != NULL && original_accumulate_new != NULL) {

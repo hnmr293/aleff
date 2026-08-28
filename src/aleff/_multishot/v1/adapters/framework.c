@@ -1,9 +1,8 @@
-#define PY_SSIZE_T_CLEAN
-#include <Python.h>
 #include <stdatomic.h>
 #include <string.h>
 
 #include "api.h"
+#include "internal.h"
 
 #if defined(_MSC_VER)
 #  define ALEFF_THREAD_LOCAL __declspec(thread)
@@ -11,12 +10,7 @@
 #  define ALEFF_THREAD_LOCAL _Thread_local
 #endif
 
-typedef struct AleffAdapterVTable AleffAdapterVTable;
 typedef struct AleffAdapterNode AleffAdapterNode;
-
-typedef struct AleffAdapterFrame {
-    AleffAdapterNode *node;
-} AleffAdapterFrame;
 
 struct AleffAdapterNode {
     _Atomic unsigned int references;
@@ -25,13 +19,6 @@ struct AleffAdapterNode {
     const AleffAdapterVTable *vtable;
     const void *state;
     PyFrameObject *outer_frame;
-};
-
-struct AleffAdapterVTable {
-    void *(*copy_state)(const void *state);
-    void (*free_state)(void *state);
-    PyObject *(*resume)(const void *state, PyObject *value);
-    int (*prepare_resume)(void *state);
 };
 
 typedef struct {
@@ -47,8 +34,6 @@ struct AleffAdapterSnapshot {
 };
 
 static ALEFF_THREAD_LOCAL AleffAdapterNode *active_adapter = NULL;
-
-static PyObject *lookup_raw_special(PyObject *object, const char *name);
 
 static void
 adapter_node_retain(AleffAdapterNode *node)
@@ -73,7 +58,7 @@ adapter_node_release(AleffAdapterNode *node)
     }
 }
 
-static int
+int
 adapter_enter(AleffAdapterFrame *frame, const AleffAdapterVTable *vtable, const void *state)
 {
     frame->node = NULL;
@@ -99,7 +84,7 @@ adapter_enter(AleffAdapterFrame *frame, const AleffAdapterVTable *vtable, const 
     return 0;
 }
 
-static void
+void
 adapter_leave(AleffAdapterFrame *frame)
 {
     AleffAdapterNode *node = frame->node;
@@ -118,6 +103,19 @@ adapter_leave(AleffAdapterFrame *frame)
         adapter_node_release(node);
     }
     adapter_node_release(node);
+}
+
+void *
+adapter_find_state(const AleffAdapterVTable *vtable)
+{
+    for (AleffAdapterNode *node = active_adapter;
+         node != NULL;
+         node = node->previous) {
+        if (node->vtable == vtable && node->state != NULL) {
+            return (void *)node->state;
+        }
+    }
+    return NULL;
 }
 
 static int
@@ -411,11 +409,3 @@ aleff_adapter_resume_before_frame(
     }
     return current;
 }
-
-
-#include "iterators.c"
-#include "builtins.c"
-#include "containers.c"
-#include "operator.c"
-#include "functools.c"
-#include "adapters_bootstrap.c"

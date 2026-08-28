@@ -1,3 +1,7 @@
+#include "internal.h"
+#include "containers.h"
+#include "sets.h"
+
 PyAPI_FUNC(int) _PySet_NextEntry(
     PyObject *set, Py_ssize_t *pos, PyObject **key, Py_hash_t *hash
 );
@@ -532,7 +536,7 @@ set_collect_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 collect_set_iterable(PyObject *iterable, CollectKind kind)
 {
     if (PyAnySet_Check(iterable)) {
@@ -570,7 +574,7 @@ collect_set_iterable(PyObject *iterable, CollectKind kind)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_set_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -584,7 +588,7 @@ adapter_set_vectorcall(
     );
 }
 
-static PyObject *
+PyObject *
 adapter_frozenset_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -599,7 +603,7 @@ adapter_frozenset_vectorcall(
     );
 }
 
-static int
+int
 adapter_set_init(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     if (
@@ -623,7 +627,7 @@ adapter_set_init(PyObject *self, PyObject *args, PyObject *kwargs)
     return status;
 }
 
-static PyObject *
+PyObject *
 adapter_frozenset_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     if (
@@ -1605,126 +1609,126 @@ static PyObject *adapter_set_issuperset(PyObject *self, PyObject *args)
     );
 }
 
-static PyMethodDef containers_set_update_method = {
+PyMethodDef containers_set_update_method = {
     .ml_name = "update",
     .ml_meth = adapter_set_update,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Update the set with elements from all supplied iterables.",
 };
 
-static PyMethodDef containers_set_intersection_update_method = {
+PyMethodDef containers_set_intersection_update_method = {
     .ml_name = "intersection_update",
     .ml_meth = adapter_set_intersection_update,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Update the set with the intersection of itself and all supplied iterables.",
 };
 
-static PyMethodDef containers_set_difference_update_method = {
+PyMethodDef containers_set_difference_update_method = {
     .ml_name = "difference_update",
     .ml_meth = adapter_set_difference_update,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Remove all elements found in any supplied iterable.",
 };
 
-static PyMethodDef containers_set_symmetric_difference_update_method = {
+PyMethodDef containers_set_symmetric_difference_update_method = {
     .ml_name = "symmetric_difference_update",
     .ml_meth = adapter_set_symmetric_difference_update,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Update the set with the symmetric difference of itself and another iterable.",
 };
 
-static PyMethodDef containers_set_union_method = {
+PyMethodDef containers_set_union_method = {
     .ml_name = "union",
     .ml_meth = adapter_set_union,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Return the union of the set and all supplied iterables.",
 };
 
-static PyMethodDef containers_set_intersection_method = {
+PyMethodDef containers_set_intersection_method = {
     .ml_name = "intersection",
     .ml_meth = adapter_set_intersection,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Return the intersection of the set and all supplied iterables.",
 };
 
-static PyMethodDef containers_set_difference_method = {
+PyMethodDef containers_set_difference_method = {
     .ml_name = "difference",
     .ml_meth = adapter_set_difference,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Return the difference of the set and all supplied iterables.",
 };
 
-static PyMethodDef containers_set_symmetric_difference_method = {
+PyMethodDef containers_set_symmetric_difference_method = {
     .ml_name = "symmetric_difference",
     .ml_meth = adapter_set_symmetric_difference,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Return the symmetric difference of the set and another iterable.",
 };
 
-static PyMethodDef containers_set_isdisjoint_method = {
+PyMethodDef containers_set_isdisjoint_method = {
     .ml_name = "isdisjoint",
     .ml_meth = adapter_set_isdisjoint,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Return True if the set has no elements in common with other.",
 };
 
-static PyMethodDef containers_set_issubset_method = {
+PyMethodDef containers_set_issubset_method = {
     .ml_name = "issubset",
     .ml_meth = adapter_set_issubset,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Report whether another set contains this set.",
 };
 
-static PyMethodDef containers_set_issuperset_method = {
+PyMethodDef containers_set_issuperset_method = {
     .ml_name = "issuperset",
     .ml_meth = adapter_set_issuperset,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Report whether this set contains another set.",
 };
 
-static PyMethodDef containers_frozenset_union_method = {
+PyMethodDef containers_frozenset_union_method = {
     .ml_name = "union",
     .ml_meth = adapter_frozenset_union,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Return the union of the frozenset and all supplied iterables.",
 };
 
-static PyMethodDef containers_frozenset_intersection_method = {
+PyMethodDef containers_frozenset_intersection_method = {
     .ml_name = "intersection",
     .ml_meth = adapter_frozenset_intersection,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Return the intersection of the frozenset and all supplied iterables.",
 };
 
-static PyMethodDef containers_frozenset_difference_method = {
+PyMethodDef containers_frozenset_difference_method = {
     .ml_name = "difference",
     .ml_meth = adapter_frozenset_difference,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Return the difference of the frozenset and all supplied iterables.",
 };
 
-static PyMethodDef containers_frozenset_symmetric_difference_method = {
+PyMethodDef containers_frozenset_symmetric_difference_method = {
     .ml_name = "symmetric_difference",
     .ml_meth = adapter_frozenset_symmetric_difference,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Return the symmetric difference of the frozenset and another iterable.",
 };
 
-static PyMethodDef containers_frozenset_isdisjoint_method = {
+PyMethodDef containers_frozenset_isdisjoint_method = {
     .ml_name = "isdisjoint",
     .ml_meth = adapter_set_isdisjoint,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Return True if the frozenset has no elements in common with other.",
 };
 
-static PyMethodDef containers_frozenset_issubset_method = {
+PyMethodDef containers_frozenset_issubset_method = {
     .ml_name = "issubset",
     .ml_meth = adapter_set_issubset,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Report whether another set contains this frozenset.",
 };
 
-static PyMethodDef containers_frozenset_issuperset_method = {
+PyMethodDef containers_frozenset_issuperset_method = {
     .ml_name = "issuperset",
     .ml_meth = adapter_set_issuperset,
     .ml_flags = METH_VARARGS,

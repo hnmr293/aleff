@@ -1,3 +1,7 @@
+#include "internal.h"
+#include "containers.h"
+#include "text.h"
+
 typedef struct {
     PyObject *source;
     PyObject *encoding;
@@ -469,7 +473,7 @@ bytes_free_state(void *raw_state)
     PyMem_Free(state);
 }
 
-static PyObject *
+PyObject *
 lookup_raw_special(PyObject *object, const char *name)
 {
     PyObject *mro = Py_TYPE(object)->tp_mro;
@@ -688,7 +692,7 @@ convert_python_buffer(PyObject *input, int make_bytearray)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_bytes_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     if (
@@ -757,7 +761,7 @@ adapter_bytes_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     return collect_iterable(input, COLLECT_BYTES);
 }
 
-static int
+int
 adapter_bytearray_init(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     if (
@@ -1373,42 +1377,42 @@ adapter_bytearray_join(PyObject *self, PyObject *iterable)
     return adapter_binary_join(self, iterable, 1);
 }
 
-static PyMethodDef containers_str_encode_method = {
+PyMethodDef containers_str_encode_method = {
     .ml_name = "encode",
     .ml_meth = (PyCFunction)(void(*)(void))adapter_str_encode,
     .ml_flags = METH_VARARGS | METH_KEYWORDS,
     .ml_doc = "Encode the string.",
 };
 
-static PyMethodDef containers_bytes_decode_method = {
+PyMethodDef containers_bytes_decode_method = {
     .ml_name = "decode",
     .ml_meth = (PyCFunction)(void(*)(void))adapter_bytes_decode,
     .ml_flags = METH_VARARGS | METH_KEYWORDS,
     .ml_doc = "Decode the bytes.",
 };
 
-static PyMethodDef containers_bytearray_decode_method = {
+PyMethodDef containers_bytearray_decode_method = {
     .ml_name = "decode",
     .ml_meth = (PyCFunction)(void(*)(void))adapter_bytearray_decode,
     .ml_flags = METH_VARARGS | METH_KEYWORDS,
     .ml_doc = "Decode the bytearray.",
 };
 
-static PyMethodDef containers_str_join_method = {
+PyMethodDef containers_str_join_method = {
     .ml_name = "join",
     .ml_meth = adapter_str_join,
     .ml_flags = METH_O,
     .ml_doc = "Concatenate any number of strings.",
 };
 
-static PyMethodDef containers_bytes_join_method = {
+PyMethodDef containers_bytes_join_method = {
     .ml_name = "join",
     .ml_meth = adapter_bytes_join,
     .ml_flags = METH_O,
     .ml_doc = "Concatenate any number of bytes-like objects.",
 };
 
-static PyMethodDef containers_bytearray_join_method = {
+PyMethodDef containers_bytearray_join_method = {
     .ml_name = "join",
     .ml_meth = adapter_bytearray_join,
     .ml_flags = METH_O,

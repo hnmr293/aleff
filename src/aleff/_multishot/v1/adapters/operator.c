@@ -1,3 +1,6 @@
+#include "internal.h"
+#include "operator.h"
+
 typedef enum {
     OPERATOR_PASSTHROUGH,
     OPERATOR_BOOL,
@@ -929,7 +932,7 @@ operator_replace_search(
     return status;
 }
 
-static int
+int
 adapter_operator_install(PyObject *operator_module)
 {
     static const struct {

@@ -1,3 +1,7 @@
+#include "internal.h"
+#include "containers.h"
+#include "mappings.h"
+
 PyAPI_FUNC(int) _PyDict_SetItem_KnownHash(
     PyObject *mapping, PyObject *key, PyObject *value, Py_hash_t hash
 );
@@ -250,7 +254,7 @@ dict_get_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_dict_get(PyObject *self, PyObject *args)
 {
     PyObject *key;
@@ -768,7 +772,7 @@ static const AleffAdapterVTable dict_pop_vtable = {
     .resume = dict_pop_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_dict_pop(PyObject *self, PyObject *args)
 {
     PyObject *key;
@@ -1059,7 +1063,7 @@ static PyObject *adapter_dict_ne(PyObject *self, PyObject *other)
     return adapter_dict_compare(self, other, 1);
 }
 
-static PyObject *
+PyObject *
 adapter_dict_richcompare(PyObject *self, PyObject *other, int operation)
 {
     if (operation == Py_EQ) {
@@ -1773,7 +1777,7 @@ adapter_dict_update(PyObject *self, PyObject *args, PyObject *kwargs)
     Py_RETURN_NONE;
 }
 
-static PyObject *
+PyObject *
 adapter_dict_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -1800,7 +1804,7 @@ adapter_dict_vectorcall(
     );
 }
 
-static int
+int
 adapter_dict_init(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     int has_keys = 0;
@@ -1827,56 +1831,56 @@ adapter_dict_init(PyObject *self, PyObject *args, PyObject *kwargs)
     return status;
 }
 
-static PyMethodDef containers_dict_fromkeys_method = {
+PyMethodDef containers_dict_fromkeys_method = {
     .ml_name = "fromkeys",
     .ml_meth = adapter_dict_fromkeys,
     .ml_flags = METH_VARARGS | METH_CLASS,
     .ml_doc = "Create a new dictionary with keys from iterable and values from value.",
 };
 
-static PyMethodDef containers_dict_update_method = {
+PyMethodDef containers_dict_update_method = {
     .ml_name = "update",
     .ml_meth = (PyCFunction)(void(*)(void))adapter_dict_update,
     .ml_flags = METH_VARARGS | METH_KEYWORDS,
     .ml_doc = "Update the dictionary with elements from another mapping or iterable.",
 };
 
-static PyMethodDef containers_dict_getitem_method = {
+PyMethodDef containers_dict_getitem_method = {
     .ml_name = "__getitem__",
     .ml_meth = adapter_dict_getitem,
     .ml_flags = METH_O,
     .ml_doc = "Return the value for key.",
 };
 
-static PyMethodDef containers_dict_setitem_method = {
+PyMethodDef containers_dict_setitem_method = {
     .ml_name = "__setitem__",
     .ml_meth = adapter_dict_setitem,
     .ml_flags = METH_VARARGS,
     .ml_doc = "Set the value for key.",
 };
 
-static PyMethodDef containers_dict_delitem_method = {
+PyMethodDef containers_dict_delitem_method = {
     .ml_name = "__delitem__",
     .ml_meth = adapter_dict_delitem,
     .ml_flags = METH_O,
     .ml_doc = "Delete the value for key.",
 };
 
-static PyMethodDef containers_dict_contains_method = {
+PyMethodDef containers_dict_contains_method = {
     .ml_name = "__contains__",
     .ml_meth = adapter_dict_contains,
     .ml_flags = METH_O,
     .ml_doc = "Return whether key is present.",
 };
 
-static PyMethodDef containers_dict_eq_method = {
+PyMethodDef containers_dict_eq_method = {
     .ml_name = "__eq__",
     .ml_meth = adapter_dict_eq,
     .ml_flags = METH_O,
     .ml_doc = "Compare dictionaries for equality.",
 };
 
-static PyMethodDef containers_dict_ne_method = {
+PyMethodDef containers_dict_ne_method = {
     .ml_name = "__ne__",
     .ml_meth = adapter_dict_ne,
     .ml_flags = METH_O,

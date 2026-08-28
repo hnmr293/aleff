@@ -1,29 +1,15 @@
-static PyObject *original_repr = NULL;
-static PyObject *original_format = NULL;
-static PyObject *original_hash = NULL;
-static vectorcallfunc original_type_vectorcall = NULL;
-static vectorcallfunc original_bool_vectorcall = NULL;
-static vectorcallfunc original_int_vectorcall = NULL;
-static vectorcallfunc original_float_vectorcall = NULL;
-static vectorcallfunc original_complex_vectorcall = NULL;
-static vectorcallfunc original_str_vectorcall = NULL;
+#include "internal.h"
+#include "protocols.h"
 
-typedef enum {
-    PROTOCOL_BOOL,
-    PROTOCOL_LEN,
-    PROTOCOL_INT,
-    PROTOCOL_INDEX,
-    PROTOCOL_TRUNC,
-    PROTOCOL_FLOAT,
-    PROTOCOL_FLOAT_INDEX,
-    PROTOCOL_COMPLEX,
-    PROTOCOL_COMPLEX_FLOAT,
-    PROTOCOL_COMPLEX_INDEX,
-    PROTOCOL_STR,
-    PROTOCOL_REPR,
-    PROTOCOL_FORMAT,
-    PROTOCOL_HASH,
-} ProtocolResumeKind;
+PyObject *original_repr = NULL;
+PyObject *original_format = NULL;
+PyObject *original_hash = NULL;
+vectorcallfunc original_type_vectorcall = NULL;
+vectorcallfunc original_bool_vectorcall = NULL;
+vectorcallfunc original_int_vectorcall = NULL;
+vectorcallfunc original_float_vectorcall = NULL;
+vectorcallfunc original_complex_vectorcall = NULL;
+vectorcallfunc original_str_vectorcall = NULL;
 
 typedef struct {
     ProtocolResumeKind kind;
@@ -384,7 +370,7 @@ protocol_call_args(
     return result;
 }
 
-static ProtocolResumeKind
+ProtocolResumeKind
 protocol_vectorcall_kind(
     PyObject *const *args,
     size_t nargsf,
@@ -428,7 +414,7 @@ protocol_type_vectorcall_with(
     return result;
 }
 
-static PyObject *
+PyObject *
 protocol_type_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -691,7 +677,7 @@ adapter_complex_two(
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_core_type_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -783,13 +769,13 @@ adapter_core_type_vectorcall(
     );
 }
 
-static PyObject *
+PyObject *
 adapter_repr(PyObject *Py_UNUSED(self), PyObject *args)
 {
     return protocol_call_args(original_repr, args, PROTOCOL_REPR);
 }
 
-static PyObject *
+PyObject *
 adapter_format(PyObject *Py_UNUSED(self), PyObject *args)
 {
     ProtocolState state = {.kind = PROTOCOL_FORMAT};
@@ -802,7 +788,7 @@ adapter_format(PyObject *Py_UNUSED(self), PyObject *args)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_hash(PyObject *Py_UNUSED(self), PyObject *args)
 {
     return protocol_call_args(original_hash, args, PROTOCOL_HASH);

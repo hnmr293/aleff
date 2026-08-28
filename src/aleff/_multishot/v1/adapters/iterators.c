@@ -1,3 +1,5 @@
+#include "internal.h"
+#include "iterators.h"
 #include <math.h>
 
 typedef enum {
@@ -380,7 +382,7 @@ sum_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_sum(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
 {
     static char *keywords[] = {"", "start", NULL};
@@ -602,7 +604,7 @@ reduce_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 #if PY_VERSION_HEX >= 0x030e0000
 adapter_reduce(
     PyObject *Py_UNUSED(self),
@@ -683,37 +685,37 @@ map_resume(const void *Py_UNUSED(state), PyObject *value)
     return Py_NewRef(value);
 }
 
-static const AleffAdapterVTable map_vtable = {
+const AleffAdapterVTable map_vtable = {
     .copy_state = empty_copy_state,
     .free_state = empty_free_state,
     .resume = map_resume,
 };
 
-static iternextfunc original_map_next = NULL;
-static newfunc original_map_new = NULL;
-static vectorcallfunc original_map_vectorcall = NULL;
-static newfunc original_filter_new = NULL;
-static vectorcallfunc original_filter_vectorcall = NULL;
+iternextfunc original_map_next = NULL;
+newfunc original_map_new = NULL;
+vectorcallfunc original_map_vectorcall = NULL;
+newfunc original_filter_new = NULL;
+vectorcallfunc original_filter_vectorcall = NULL;
 
-static PyObject *adapter_map_vectorcall(
+PyObject *adapter_map_vectorcall(
     PyObject *callable,
     PyObject *const *args,
     size_t nargsf,
     PyObject *kwnames
 );
-static PyObject *adapter_filter_new(
+PyObject *adapter_filter_new(
     PyTypeObject *type,
     PyObject *args,
     PyObject *kwargs
 );
-static PyObject *adapter_filter_vectorcall(
+PyObject *adapter_filter_vectorcall(
     PyObject *callable,
     PyObject *const *args,
     size_t nargsf,
     PyObject *kwnames
 );
 
-static PyObject *
+PyObject *
 adapter_map_next(PyObject *map)
 {
     AleffAdapterFrame frame;
@@ -892,7 +894,7 @@ adapter_iterator_constructor(
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_map_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     return adapter_iterator_constructor(
@@ -900,7 +902,7 @@ adapter_map_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     );
 }
 
-static PyObject *
+PyObject *
 adapter_filter_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     return adapter_iterator_constructor(
@@ -953,7 +955,7 @@ adapter_constructor_vectorcall(
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_map_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -966,7 +968,7 @@ adapter_map_vectorcall(
     );
 }
 
-static PyObject *
+PyObject *
 adapter_filter_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -987,7 +989,13 @@ typedef struct {
     int strict;
 } AleffZipObject;
 
-static newfunc original_zip_new = NULL;
+Py_ssize_t
+adapter_zip_basicsize(void)
+{
+    return (Py_ssize_t)sizeof(AleffZipObject);
+}
+
+newfunc original_zip_new = NULL;
 
 typedef enum {
     ZIP_CONSTRUCTOR_WAIT_STRICT,
@@ -1163,7 +1171,7 @@ zip_constructor_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_zip_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     if (kwargs != NULL) {
@@ -1249,9 +1257,9 @@ typedef struct {
     PyObject *sequence;
 } AleffTupleIterator;
 
-static PyTypeObject *tuple_iterator_type = NULL;
+PyTypeObject *tuple_iterator_type = NULL;
 
-static PyObject *
+PyObject *
 clone_iterator_for_snapshot(PyObject *iterator)
 {
     if (Py_IS_TYPE(iterator, tuple_iterator_type)) {
@@ -1469,7 +1477,7 @@ zip_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_zip_next(PyObject *object)
 {
     AleffZipObject *zip = (AleffZipObject *)object;
@@ -1504,6 +1512,12 @@ typedef struct {
     PyObject *one;
 } AleffEnumerateObject;
 
+Py_ssize_t
+adapter_enumerate_basicsize(void)
+{
+    return (Py_ssize_t)sizeof(AleffEnumerateObject);
+}
+
 typedef enum {
     ENUM_CONSTRUCTOR_WAIT_INDEX,
     ENUM_CONSTRUCTOR_WAIT_ITER,
@@ -1517,8 +1531,8 @@ typedef struct {
     EnumerateConstructorPhase phase;
 } EnumerateConstructorState;
 
-static newfunc original_enumerate_new = NULL;
-static vectorcallfunc original_enumerate_vectorcall = NULL;
+newfunc original_enumerate_new = NULL;
+vectorcallfunc original_enumerate_vectorcall = NULL;
 
 static void *
 enumerate_constructor_copy_state(const void *raw_state)
@@ -1678,7 +1692,7 @@ adapter_enumerate_construct(PyTypeObject *type, PyObject *iterable, PyObject *st
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_enumerate_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     static char *keywords[] = {"iterable", "start", NULL};
@@ -1690,7 +1704,7 @@ adapter_enumerate_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     return adapter_enumerate_construct(type, iterable, start);
 }
 
-static PyObject *
+PyObject *
 adapter_enumerate_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -1799,7 +1813,7 @@ static const AleffAdapterVTable enumerate_next_vtable = {
     .resume = enumerate_next_resume,
 };
 
-static PyObject *
+PyObject *
 adapter_enumerate_next(PyObject *object)
 {
     AleffEnumerateObject *enumerate = (AleffEnumerateObject *)object;
@@ -1828,13 +1842,19 @@ typedef struct {
     PyObject *sequence;
 } AleffReversedObject;
 
+Py_ssize_t
+adapter_reversed_basicsize(void)
+{
+    return (Py_ssize_t)sizeof(AleffReversedObject);
+}
+
 typedef struct {
     PyTypeObject *type;
     PyObject *sequence;
 } ReversedConstructorState;
 
-static newfunc original_reversed_new = NULL;
-static vectorcallfunc original_reversed_vectorcall = NULL;
+newfunc original_reversed_new = NULL;
+vectorcallfunc original_reversed_vectorcall = NULL;
 
 static void *
 reversed_constructor_copy_state(const void *raw_state)
@@ -1907,7 +1927,7 @@ reversed_uses_sequence_fallback(PyObject *sequence)
     return PySequence_Check(sequence);
 }
 
-static PyObject *
+PyObject *
 adapter_reversed_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     if (
@@ -1930,7 +1950,7 @@ adapter_reversed_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_reversed_vectorcall(
     PyObject *callable,
     PyObject *const *args,
@@ -2018,9 +2038,9 @@ static const AleffAdapterVTable reversed_next_vtable = {
     .resume = reversed_next_resume,
 };
 
-static iternextfunc original_reversed_next = NULL;
+iternextfunc original_reversed_next = NULL;
 
-static PyObject *
+PyObject *
 adapter_reversed_next(PyObject *object)
 {
     AleffReversedObject *reversed = (AleffReversedObject *)object;
@@ -2043,6 +2063,12 @@ typedef struct {
     PyObject *func;
     PyObject *iterator;
 } AleffFilterObject;
+
+Py_ssize_t
+adapter_filter_basicsize(void)
+{
+    return (Py_ssize_t)sizeof(AleffFilterObject);
+}
 
 typedef enum {
     FILTER_WAIT_NEXT,
@@ -2176,7 +2202,7 @@ filter_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_filter_next(PyObject *object)
 {
     AleffFilterObject *filter = (AleffFilterObject *)object;
@@ -2331,16 +2357,14 @@ adapter_truth(PyObject *iterable, int any_mode)
     return result;
 }
 
-static PyObject *
+PyObject *
 adapter_all(PyObject *Py_UNUSED(self), PyObject *iterable)
 {
     return adapter_truth(iterable, 0);
 }
 
-static PyObject *
+PyObject *
 adapter_any(PyObject *Py_UNUSED(self), PyObject *iterable)
 {
     return adapter_truth(iterable, 1);
 }
-
-#include "itertools.c"
