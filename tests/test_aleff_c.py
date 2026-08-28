@@ -9,6 +9,9 @@ import pytest
 import greenlet
 
 from aleff._multishot.v1._aleff import (
+    _restore_adapters,  # pyright: ignore[reportPrivateUsage]
+    _snapshot_from_frame_with_adapters,  # pyright: ignore[reportPrivateUsage]
+    _suspend_adapters,  # pyright: ignore[reportPrivateUsage]
     FrameSnapshot,
     snapshot_frames,
     snapshot_from_frame,
@@ -131,6 +134,38 @@ class TestSnapshotFromFrame:
 
         with pytest.raises(TypeError, match="function takes at most 3 arguments"):
             snapshot_from_frame(child.gr_frame, 1, None, [(2, 2147483646)])  # type: ignore[call-arg]
+
+    def test_private_adapter_snapshot_accepts_suspension_token(self):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            token = _suspend_adapters()
+            try:
+                parent.switch(token)
+            finally:
+                _restore_adapters(token)
+
+        child = greenlet.greenlet(suspend)
+        token = child.switch()
+        assert child.gr_frame is not None
+
+        snapshot = _snapshot_from_frame_with_adapters(child.gr_frame, 1, None, token)
+
+        assert snapshot_num_frames(snapshot) == 1
+        child.switch()
+
+    def test_private_adapter_snapshot_rejects_non_token(self):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            parent.switch()
+
+        child = greenlet.greenlet(suspend)
+        child.switch()
+        assert child.gr_frame is not None
+
+        with pytest.raises(ValueError, match="invalid PyCapsule"):
+            _snapshot_from_frame_with_adapters(child.gr_frame, 1, None, object())
 
     def test_send_stack_depth_does_not_depend_on_importable_python_analyzer(self):
         code = textwrap.dedent(

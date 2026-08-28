@@ -18,10 +18,10 @@ from .intf import (
 from .effects import EffectContext, ABORT, EffectAborted
 from .misc import debug, eff_str
 from ._aleff import (
+    _snapshot_from_frame_with_adapters,  # pyright: ignore[reportPrivateUsage]
     FrameSnapshot,
     restore_async_continuation,
     restore_continuation,
-    snapshot_from_frame,
 )
 from .winds import capture_wind_stack, rewind
 
@@ -302,7 +302,12 @@ def _drive_effect(caller_gl: Any, value: EffectContext[..., Any]) -> Any:
 
     # Take snapshot from the handler greenlet. The caller greenlet is
     # suspended at this point, so its frames have valid stacktop values.
-    snapshot = snapshot_from_frame(caller_gl.gr_frame, -1, value.handled_exception)
+    snapshot = _snapshot_from_frame_with_adapters(
+        caller_gl.gr_frame,
+        -1,
+        value.handled_exception,
+        value.adapter_token,
+    )
 
     resume: Resume[Any, Any] = _Resume(caller_gl, snapshot, d.token, d.handler)
     v = d.fn(resume, *d.args, **d.kwargs)
@@ -470,6 +475,7 @@ def _run_restored_async_continuation[R, V](snapshot: FrameSnapshot[R, V], value:
 def _snapshot_for_async_resume(
     caller_gl: Any,
     handled_exception: object,
+    adapter_token: object,
 ) -> tuple[FrameSnapshot[Any, Any], bool]:
     """Exclude the C coroutine bridge from a restorable Python frame chain."""
     start = caller_gl.gr_frame
@@ -477,11 +483,27 @@ def _snapshot_for_async_resume(
     depth = 0
     while frame is not None:
         if frame.f_code is _run_coroutine_in_bridge.__code__:
-            return snapshot_from_frame(start, depth, handled_exception), True
+            return (
+                _snapshot_from_frame_with_adapters(
+                    start,
+                    depth,
+                    handled_exception,
+                    adapter_token,
+                ),
+                True,
+            )
         depth += 1
         frame = frame.f_back
 
-    return snapshot_from_frame(start, -1, handled_exception), False
+    return (
+        _snapshot_from_frame_with_adapters(
+            start,
+            -1,
+            handled_exception,
+            adapter_token,
+        ),
+        False,
+    )
 
 
 async def _resolve_coroutine_request(request: _CoroutineRequest[Any]) -> None:
@@ -599,7 +621,11 @@ async def _drive_effect_async(
     if d.handler.shallow:
         _remove_all_handlers(d.token)
 
-    snapshot, async_continuation = _snapshot_for_async_resume(caller_gl, value.handled_exception)
+    snapshot, async_continuation = _snapshot_for_async_resume(
+        caller_gl,
+        value.handled_exception,
+        value.adapter_token,
+    )
     resume: ResumeAsync[Any, Any] = _ResumeAsync(
         caller_gl,
         snapshot,

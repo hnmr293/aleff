@@ -28,7 +28,10 @@ setup(
     ext_modules=[
         Extension(
             "aleff._multishot.v1._aleff",
-            sources=["src/aleff/_multishot/v1/_aleff.c"],
+            sources=[
+                "src/aleff/_multishot/v1/_aleff.c",
+                "src/aleff/_multishot/v1/continuation_adapters.c",
+            ],
         ),
     ],
     cmdclass={"build_ext": BuildExt},

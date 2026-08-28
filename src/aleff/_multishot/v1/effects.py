@@ -3,6 +3,10 @@ from functools import wraps
 from sys import exception as current_exception
 from typing import Any, Callable, cast, overload, Sequence
 import greenlet as gl
+from ._aleff import (
+    _restore_adapters,  # pyright: ignore[reportPrivateUsage]
+    _suspend_adapters,  # pyright: ignore[reportPrivateUsage]
+)
 from .intf import Effect, EffectNotHandledError
 from .misc import debug, eff_str
 
@@ -90,14 +94,19 @@ def _make_effect(name: str) -> Effect[..., Any]:
         if handler_gl is None:
             raise EffectNotHandledError(eff)
         handled_exception = current_exception()
-        result = handler_gl.switch(
-            EffectContext(
-                eff,
-                args,
-                kwargs,
-                handled_exception if handled_exception is not None else _NO_HANDLED_EXCEPTION,
+        adapter_token = _suspend_adapters()
+        try:
+            result = handler_gl.switch(
+                EffectContext(
+                    eff,
+                    args,
+                    kwargs,
+                    handled_exception if handled_exception is not None else _NO_HANDLED_EXCEPTION,
+                    adapter_token,
+                )
             )
-        )
+        finally:
+            _restore_adapters(adapter_token)
         if result is ABORT:
             raise EffectAborted()
         return result
@@ -137,6 +146,7 @@ class EffectContext[**P, R]:
     args: tuple[Any, ...] = ()
     kwargs: dict[str, Any] = field(default_factory=dict[str, Any])
     handled_exception: object = field(default=_NO_HANDLED_EXCEPTION, repr=False, compare=False)
+    adapter_token: object = field(default=None, repr=False, compare=False)
 
     def __repr__(self) -> str:
         return f"({eff_str(self.effect)} | args={self.args!r}, kwargs={self.kwargs!r})"

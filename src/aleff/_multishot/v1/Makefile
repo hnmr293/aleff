@@ -11,17 +11,17 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 TARGET = _aleff$(EXT_SUFFIX)
-SRC = _aleff.c
+SRC = _aleff.c continuation_adapters.c
 
 .PHONY: build debug clean
 
 build: $(TARGET)
 
 debug: $(SRC)
-	$(CC) $(DEBUG_CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $(TARGET) $<
+	$(CC) $(DEBUG_CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $(TARGET) $(SRC)
 
 $(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $@ $<
+	$(CC) $(CFLAGS) -shared $(LDFLAGS) -I$(INCLUDE) -o $@ $(SRC)
 
 clean:
 	rm -f _aleff*.so
