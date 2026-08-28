@@ -39,10 +39,13 @@ failed=0
 for index in "${!targets[@]}"; do
     ver=${targets[$index]}
     if wait "${pids[$index]}"; then
-        cat "${logs[$index]}"
+        status=0
     else
         status=$?
-        cat "${logs[$index]}"
+    fi
+    unset 'pids[index]'
+    cat "${logs[$index]}"
+    if [ "$status" -ne 0 ]; then
         echo "Python $ver failed with status $status" >&2
         failed=1
     fi
