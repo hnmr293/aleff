@@ -296,8 +296,8 @@ aliases = (
     ("__irshift__", "irshift"), ("__iand__", "iand"),
     ("__ixor__", "ixor"), ("__ior__", "ior"),
 )
-# These public aliases and the replacement function metadata are retained as
-# intentional compatibility checks: the audit verified that aleff changes them.
+# Adapter installation replaces operator callables, so public alias identity
+# and replacement-function metadata are part of the compatibility checks.
 alias_rows = [
     (alias, canonical, getattr(operator, alias) is getattr(operator, canonical))
     for alias, canonical in aliases
