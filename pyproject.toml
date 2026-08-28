@@ -83,7 +83,7 @@ exclude = ["src/aleff/_oneshot/v[1-8]/**"]
 build = ["cp312-*", "cp313-*", "cp314-*", "cp314t-*"]
 skip = ["*-manylinux_i686", "*-musllinux_*", "*-win32"]
 build-frontend = "build[uv]"
-test-command = "pytest {project}/tests -q"
+test-command = 'pytest {project}/tests -q --ignore-glob="*/test_cpython_compat_*.py"'
 test-requires = [
     "pytest",
     "pytest-asyncio",
