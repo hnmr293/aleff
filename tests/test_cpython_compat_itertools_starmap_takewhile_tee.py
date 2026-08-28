@@ -1,4 +1,4 @@
-"""CPython compatibility coverage for the Issue #55 itertools adapters."""
+"""CPython compatibility coverage for starmap, takewhile, and tee."""
 
 from cpython_compat_support import assert_cpython_compatible
 

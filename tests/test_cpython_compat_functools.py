@@ -1,4 +1,4 @@
-"""CPython compatibility regressions for Issue #55."""
+"""CPython compatibility regressions for functools adapters."""
 
 from __future__ import annotations
 

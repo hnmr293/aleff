@@ -1,4 +1,4 @@
-"""CPython compatibility regressions for itertools constructors (Issue #55)."""
+"""CPython compatibility regressions for combinatoric itertools."""
 
 from __future__ import annotations
 

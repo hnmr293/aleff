@@ -1,4 +1,4 @@
-"""CPython compatibility tests for operator accessors (Issue #55)."""
+"""CPython compatibility tests for operator accessors."""
 
 from textwrap import dedent
 

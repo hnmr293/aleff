@@ -1,4 +1,4 @@
-"""Differential regression tests for Issue #55's core builtins."""
+"""Differential regression tests for attribute-related built-ins."""
 
 from __future__ import annotations
 

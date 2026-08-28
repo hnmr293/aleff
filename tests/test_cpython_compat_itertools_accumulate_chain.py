@@ -1,4 +1,4 @@
-"""CPython compatibility coverage for the itertools adapters in Issue #55."""
+"""CPython compatibility coverage for itertools.accumulate and chain."""
 
 from __future__ import annotations
 

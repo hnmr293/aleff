@@ -1,4 +1,4 @@
-"""CPython compatibility tests for conversion built-ins in Issue #55."""
+"""CPython compatibility tests for conversion built-ins."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""CPython compatibility regressions for open, input, and print (Issue #55)."""
+"""CPython compatibility regressions for open, input, and print."""
 
 from __future__ import annotations
 

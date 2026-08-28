@@ -1,4 +1,4 @@
-"""CPython compatibility and continuation regression tests for Issue #55."""
+"""CPython compatibility regressions for iterable-consuming built-ins."""
 
 from __future__ import annotations
 

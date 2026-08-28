@@ -1,4 +1,4 @@
-"""CPython compatibility regressions for dictionary operations (Issue #55)."""
+"""CPython compatibility regressions for dictionary operations."""
 
 from __future__ import annotations
 

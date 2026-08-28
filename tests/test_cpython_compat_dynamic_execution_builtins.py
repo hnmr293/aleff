@@ -1,4 +1,4 @@
-"""Differential regression tests for the core built-in adapters in issue #55."""
+"""Differential regression tests for dynamic-execution built-ins."""
 
 from cpython_compat_support import assert_cpython_compatible
 

@@ -1,4 +1,4 @@
-"""CPython compatibility coverage for set methods and operators (Issue #55)."""
+"""CPython compatibility coverage for set methods and operators."""
 
 from __future__ import annotations
 

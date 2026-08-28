@@ -1,4 +1,4 @@
-"""Differential regression tests for Issue #55's bytes text adapters."""
+"""Differential regression tests for bytes and bytearray methods."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""CPython compatibility regression tests for issue #55 itertools adapters."""
+"""CPython compatibility tests for grouping and slicing itertools."""
 
 from cpython_compat_support import assert_cpython_compatible
 

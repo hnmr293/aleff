@@ -1,4 +1,4 @@
-"""Differential compatibility tests for the container methods in issue #55."""
+"""Differential compatibility tests for range, slice, and memoryview."""
 
 from cpython_compat_support import assert_cpython_compatible
 

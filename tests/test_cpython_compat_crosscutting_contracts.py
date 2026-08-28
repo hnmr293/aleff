@@ -1,4 +1,4 @@
-"""CPython compatibility regressions for Issue #55.
+"""Cross-cutting CPython compatibility regression tests.
 
 The snippets below are deliberately self-contained.  The compatibility helper
 runs each one once in pristine CPython and once after importing ``aleff`` and

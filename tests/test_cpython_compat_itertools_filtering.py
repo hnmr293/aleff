@@ -1,4 +1,4 @@
-"""Differential compatibility tests for the itertools adapters in Issue #55."""
+"""Differential compatibility tests for filtering itertools."""
 
 from textwrap import dedent
 

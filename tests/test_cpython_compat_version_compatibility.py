@@ -1,4 +1,4 @@
-"""Regression tests for CPython compatibility in Issue #55."""
+"""Regression tests for version-dependent CPython compatibility."""
 
 from __future__ import annotations
 

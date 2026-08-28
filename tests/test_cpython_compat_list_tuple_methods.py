@@ -1,4 +1,4 @@
-"""CPython differential regression tests for Issue #55 container adapters."""
+"""CPython differential regression tests for list and tuple methods."""
 
 from textwrap import dedent
 
