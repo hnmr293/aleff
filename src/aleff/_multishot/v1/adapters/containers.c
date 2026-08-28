@@ -21,6 +21,18 @@ typedef struct {
 } CollectState;
 
 static initproc original_bytearray_init;
+static binaryfunc original_dict_subscript;
+
+static int
+dict_item_has_python_hash(PyObject *key)
+{
+    PyObject *type_dict = PyType_GetDict(Py_TYPE(key));
+    if (type_dict == NULL) {
+        return 0;
+    }
+    PyObject *descriptor = PyDict_GetItemString(type_dict, "__hash__");
+    return descriptor != NULL && PyFunction_Check(descriptor);
+}
 
 static void *
 collect_copy_state(const void *raw_state)
@@ -177,7 +189,9 @@ collect_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &collect_vtable, state);
+    if (adapter_enter(&frame, &collect_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result;
     if (value == NULL) {
         if (PyErr_Occurred()) {
@@ -206,7 +220,9 @@ collect_iterable(PyObject *iterable, CollectKind kind)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &collect_vtable, &state);
+    if (adapter_enter(&frame, &collect_vtable, &state) < 0) {
+        return NULL;
+    }
     state.iterator = PyObject_GetIter(iterable);
     PyObject *result = state.iterator == NULL
         ? NULL
@@ -280,7 +296,9 @@ adapter_list_extend(PyObject *self, PyObject *iterable)
 {
     ListExtendState state = {.receiver = self};
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &list_extend_vtable, &state);
+    if (adapter_enter(&frame, &list_extend_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *items = collect_iterable(iterable, COLLECT_LIST);
     PyObject *result = items == NULL ? NULL : list_extend_apply(self, items);
     Py_XDECREF(items);
@@ -382,7 +400,9 @@ list_count_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &list_count_vtable, state);
+    if (adapter_enter(&frame, &list_count_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = list_count_continue(state, value, 1);
     adapter_leave(&frame);
     list_count_free_state(state);
@@ -400,7 +420,9 @@ adapter_list_count(PyObject *self, PyObject *target)
         .count = 0,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &list_count_vtable, &state);
+    if (adapter_enter(&frame, &list_count_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = list_count_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_XDECREF(state.item);
@@ -545,7 +567,9 @@ sequence_search_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &sequence_search_vtable, state);
+    if (adapter_enter(&frame, &sequence_search_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = sequence_search_continue(state, value, 1);
     adapter_leave(&frame);
     sequence_search_free_state(state);
@@ -586,7 +610,9 @@ sequence_search(
         .kind = kind,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &sequence_search_vtable, &state);
+    if (adapter_enter(&frame, &sequence_search_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = sequence_search_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_XDECREF(state.item);
@@ -782,7 +808,9 @@ sequence_compare_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &sequence_compare_vtable, state);
+    if (adapter_enter(&frame, &sequence_compare_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = sequence_compare_continue(state, value, 1);
     adapter_leave(&frame);
     sequence_compare_free_state(state);
@@ -811,7 +839,9 @@ adapter_sequence_richcompare(PyObject *left, PyObject *right, int operation)
         .phase = SEQUENCE_COMPARE_EQUAL,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &sequence_compare_vtable, &state);
+    if (adapter_enter(&frame, &sequence_compare_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = sequence_compare_continue(&state, NULL, 0);
     adapter_leave(&frame);
     return result;
@@ -1048,7 +1078,9 @@ list_sort_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &list_sort_vtable, state);
+    if (adapter_enter(&frame, &list_sort_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result;
     if (value == NULL) {
         result = NULL;
@@ -1116,7 +1148,9 @@ adapter_list_sort(PyObject *self, PyObject *args, PyObject *kwargs)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &list_sort_vtable, &state);
+    if (adapter_enter(&frame, &list_sort_vtable, &state) < 0) {
+        return NULL;
+    }
     int reverse = PyObject_IsTrue(reverse_object);
     PyObject *result = NULL;
     if (reverse >= 0) {
@@ -1129,237 +1163,6 @@ adapter_list_sort(PyObject *self, PyObject *args, PyObject *kwargs)
     }
     Py_DECREF(state.items);
     Py_DECREF(state.keys);
-    return result;
-}
-
-typedef enum {
-    DICT_GET_WAIT_HASH,
-    DICT_GET_WAIT_CANDIDATE_HASH,
-    DICT_GET_WAIT_EQUAL,
-} DictGetPhase;
-
-typedef struct {
-    PyObject *receiver;
-    PyObject *key;
-    PyObject *default_value;
-    PyObject *candidate_key;
-    PyObject *candidate_value;
-    Py_ssize_t position;
-    Py_hash_t hash;
-    Py_hash_t candidate_hash;
-    DictGetPhase phase;
-} DictGetState;
-
-static void *
-dict_get_copy_state(const void *raw_state)
-{
-    const DictGetState *state = raw_state;
-    DictGetState *copy = PyMem_Malloc(sizeof(*copy));
-    if (copy == NULL) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    *copy = (DictGetState){
-        .receiver = Py_NewRef(state->receiver),
-        .key = Py_NewRef(state->key),
-        .default_value = Py_NewRef(state->default_value),
-        .candidate_key = Py_XNewRef(state->candidate_key),
-        .candidate_value = Py_XNewRef(state->candidate_value),
-        .position = state->position,
-        .hash = state->hash,
-        .candidate_hash = state->candidate_hash,
-        .phase = state->phase,
-    };
-    return copy;
-}
-
-static void
-dict_get_free_state(void *raw_state)
-{
-    DictGetState *state = raw_state;
-    if (state == NULL) {
-        return;
-    }
-    Py_DECREF(state->receiver);
-    Py_DECREF(state->key);
-    Py_DECREF(state->default_value);
-    Py_XDECREF(state->candidate_key);
-    Py_XDECREF(state->candidate_value);
-    PyMem_Free(state);
-}
-
-static PyObject *dict_get_resume(const void *raw_state, PyObject *value);
-
-static const AleffAdapterVTable dict_get_vtable = {
-    .copy_state = dict_get_copy_state,
-    .free_state = dict_get_free_state,
-    .resume = dict_get_resume,
-};
-
-static int
-dict_get_normalize_hash(PyObject *value, Py_hash_t *hash)
-{
-    if (!PyLong_Check(value)) {
-        PyErr_Format(
-            PyExc_TypeError,
-            "__hash__ method should return an integer, not '%.200s'",
-            Py_TYPE(value)->tp_name
-        );
-        return -1;
-    }
-    *hash = PyObject_Hash(value);
-    return *hash == -1 ? -1 : 0;
-}
-
-static PyObject *
-dict_get_continue(DictGetState *state, PyObject *resumed_value, int is_resumed)
-{
-    int equal = -1;
-    if (is_resumed) {
-        if (state->phase == DICT_GET_WAIT_HASH) {
-            if (dict_get_normalize_hash(resumed_value, &state->hash) < 0) {
-                return NULL;
-            }
-        }
-        else if (state->phase == DICT_GET_WAIT_CANDIDATE_HASH) {
-            if (dict_get_normalize_hash(
-                resumed_value,
-                &state->candidate_hash
-            ) < 0) {
-                return NULL;
-            }
-        }
-        else {
-            equal = PyObject_IsTrue(resumed_value);
-        }
-    }
-
-    if (!is_resumed || state->phase == DICT_GET_WAIT_HASH) {
-        if (!is_resumed) {
-            state->phase = DICT_GET_WAIT_HASH;
-            state->hash = PyObject_Hash(state->key);
-            if (state->hash == -1) {
-                return NULL;
-            }
-        }
-    }
-
-    for (;;) {
-        if (state->candidate_key == NULL) {
-            PyObject *candidate_key;
-            PyObject *candidate_value;
-#if PY_VERSION_HEX < 0x030d0000
-            Py_hash_t candidate_hash;
-            while (_PyDict_Next(
-                state->receiver,
-                &state->position,
-                &candidate_key,
-                &candidate_value,
-                &candidate_hash
-            )) {
-                if (candidate_hash != state->hash) {
-                    continue;
-                }
-                if (candidate_key == state->key) {
-                    return Py_NewRef(candidate_value);
-                }
-                state->candidate_key = Py_NewRef(candidate_key);
-                state->candidate_value = Py_NewRef(candidate_value);
-                state->candidate_hash = candidate_hash;
-                break;
-            }
-#else
-            if (!PyDict_Next(
-                state->receiver,
-                &state->position,
-                &candidate_key,
-                &candidate_value
-            )) {
-                return Py_NewRef(state->default_value);
-            }
-            state->candidate_key = Py_NewRef(candidate_key);
-            state->candidate_value = Py_NewRef(candidate_value);
-            if (candidate_key == state->key) {
-                return Py_NewRef(candidate_value);
-            }
-            state->phase = DICT_GET_WAIT_CANDIDATE_HASH;
-            state->candidate_hash = PyObject_Hash(state->candidate_key);
-            if (state->candidate_hash == -1) {
-                return NULL;
-            }
-#endif
-            if (state->candidate_key == NULL) {
-                return Py_NewRef(state->default_value);
-            }
-        }
-        if (state->candidate_hash != state->hash) {
-            Py_CLEAR(state->candidate_key);
-            Py_CLEAR(state->candidate_value);
-            continue;
-        }
-        if (equal < 0) {
-            state->phase = DICT_GET_WAIT_EQUAL;
-            equal = PyObject_RichCompareBool(
-                state->candidate_key,
-                state->key,
-                Py_EQ
-            );
-        }
-        if (equal < 0) {
-            return NULL;
-        }
-        if (equal) {
-            return Py_NewRef(state->candidate_value);
-        }
-        Py_CLEAR(state->candidate_key);
-        Py_CLEAR(state->candidate_value);
-        equal = -1;
-    }
-}
-
-static PyObject *
-dict_get_resume(const void *raw_state, PyObject *value)
-{
-    if (value == NULL) {
-        return NULL;
-    }
-    DictGetState *state = dict_get_copy_state(raw_state);
-    if (state == NULL) {
-        return NULL;
-    }
-    AleffAdapterFrame frame;
-    adapter_enter(&frame, &dict_get_vtable, state);
-    PyObject *result = dict_get_continue(state, value, 1);
-    adapter_leave(&frame);
-    dict_get_free_state(state);
-    return result;
-}
-
-static PyObject *
-adapter_dict_get(PyObject *self, PyObject *args)
-{
-    PyObject *key;
-    PyObject *default_value = Py_None;
-    if (!PyArg_ParseTuple(args, "O|O:get", &key, &default_value)) {
-        return NULL;
-    }
-    DictGetState state = {
-        .receiver = self,
-        .key = key,
-        .default_value = default_value,
-        .candidate_key = NULL,
-        .candidate_value = NULL,
-        .position = 0,
-        .hash = -1,
-        .candidate_hash = -1,
-        .phase = DICT_GET_WAIT_HASH,
-    };
-    AleffAdapterFrame frame;
-    adapter_enter(&frame, &dict_get_vtable, &state);
-    PyObject *result = dict_get_continue(&state, NULL, 0);
-    adapter_leave(&frame);
-    Py_XDECREF(state.candidate_key);
-    Py_XDECREF(state.candidate_value);
     return result;
 }
 
@@ -1483,7 +1286,9 @@ slice_hash_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &slice_hash_vtable, state);
+    if (adapter_enter(&frame, &slice_hash_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = slice_hash_continue(state, value, 1);
     adapter_leave(&frame);
     slice_hash_free_state(state);
@@ -1500,7 +1305,9 @@ adapter_slice_hash(PyObject *object)
         .index = 0,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &slice_hash_vtable, &state);
+    if (adapter_enter(&frame, &slice_hash_vtable, &state) < 0) {
+        return -1;
+    }
     PyObject *result = slice_hash_continue(&state, NULL, 0);
     adapter_leave(&frame);
     if (result == NULL) {
@@ -1834,7 +1641,9 @@ sort_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &sort_vtable, state);
+    if (adapter_enter(&frame, &sort_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = sort_continue(state, value, 1);
     adapter_leave(&frame);
     sort_free_state(state);
@@ -1881,7 +1690,9 @@ adapter_sorted(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
         .phase = SORT_WAIT_REVERSE,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &sort_vtable, &state);
+    if (adapter_enter(&frame, &sort_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = sort_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_XDECREF(state.items);
@@ -1955,49 +1766,6 @@ adapter_tuple_vectorcall(
     );
 }
 
-static PyObject *
-adapter_dict_vectorcall(
-    PyObject *callable,
-    PyObject *const *args,
-    size_t nargsf,
-    PyObject *kwnames
-)
-{
-    return adapter_collect_vectorcall(
-        callable, args, nargsf, kwnames,
-        &PyDict_Type, COLLECT_DICT, original_dict_vectorcall
-    );
-}
-
-static PyObject *
-adapter_set_vectorcall(
-    PyObject *callable,
-    PyObject *const *args,
-    size_t nargsf,
-    PyObject *kwnames
-)
-{
-    return adapter_collect_vectorcall(
-        callable, args, nargsf, kwnames,
-        &PySet_Type, COLLECT_SET, original_set_vectorcall
-    );
-}
-
-static PyObject *
-adapter_frozenset_vectorcall(
-    PyObject *callable,
-    PyObject *const *args,
-    size_t nargsf,
-    PyObject *kwnames
-)
-{
-    return adapter_collect_vectorcall(
-        callable, args, nargsf, kwnames,
-        &PyFrozenSet_Type, COLLECT_FROZENSET,
-        original_frozenset_vectorcall
-    );
-}
-
 static int
 adapter_list_init(PyObject *self, PyObject *args, PyObject *kwargs)
 {
@@ -2029,409 +1797,488 @@ adapter_tuple_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     return collect_iterable(PyTuple_GET_ITEM(args, 0), COLLECT_TUPLE);
 }
 
-static int
-adapter_dict_init(PyObject *self, PyObject *args, PyObject *kwargs)
-{
-    if (
-        PyTuple_GET_SIZE(args) != 1 ||
-        (kwargs != NULL && PyDict_GET_SIZE(kwargs) != 0) ||
-        PyMapping_Check(PyTuple_GET_ITEM(args, 0))
-    ) {
-        return original_dict_init(self, args, kwargs);
-    }
-    PyObject *result = collect_iterable(PyTuple_GET_ITEM(args, 0), COLLECT_DICT);
-    if (result == NULL) {
-        return -1;
-    }
-    PyDict_Clear(self);
-    int status = PyDict_Update(self, result);
-    Py_DECREF(result);
-    return status;
-}
-
-static int
-adapter_set_init(PyObject *self, PyObject *args, PyObject *kwargs)
-{
-    if (
-        PyTuple_GET_SIZE(args) != 1 ||
-        (kwargs != NULL && PyDict_GET_SIZE(kwargs) != 0)
-    ) {
-        return original_set_init(self, args, kwargs);
-    }
-    PyObject *items = collect_iterable(PyTuple_GET_ITEM(args, 0), COLLECT_LIST);
-    if (items == NULL) {
-        return -1;
-    }
-    PyObject *replacement_args = PyTuple_Pack(1, items);
-    Py_DECREF(items);
-    if (replacement_args == NULL) {
-        return -1;
-    }
-    int status = original_set_init(self, replacement_args, NULL);
-    Py_DECREF(replacement_args);
-    return status;
-}
-
-static PyObject *
-adapter_frozenset_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
-{
-    if (
-        type != &PyFrozenSet_Type || PyTuple_GET_SIZE(args) != 1 ||
-        (kwargs != NULL && PyDict_GET_SIZE(kwargs) != 0) ||
-        PyFrozenSet_CheckExact(PyTuple_GET_ITEM(args, 0))
-    ) {
-        return original_frozenset_new(type, args, kwargs);
-    }
-    return collect_iterable(PyTuple_GET_ITEM(args, 0), COLLECT_FROZENSET);
-}
-
 typedef enum {
-    BYTES_WAIT_BYTES,
-    BYTES_WAIT_INDEX,
-    BYTES_WAIT_BUFFER_ACQUIRE,
-    BYTES_WAIT_BUFFER_RELEASE,
-} BytesPhase;
+    RANGE_SEARCH_WAIT_INDEX,
+    RANGE_SEARCH_READY,
+} RangeSearchPhase;
 
 typedef struct {
-    BytesPhase phase;
-    int make_bytearray;
-    PyObject *input;
-    PyObject *view;
-    PyObject *result;
-} BytesState;
+    PyObject *receiver;
+    PyObject *target;
+    PyObject *indexed;
+    PyObject *iterator;
+    Py_ssize_t index;
+    Py_ssize_t count;
+    int find_index;
+    RangeSearchPhase phase;
+} RangeSearchState;
 
 static void *
-bytes_copy_state(const void *raw_state)
+range_search_copy_state(const void *raw_state)
 {
-    const BytesState *state = raw_state;
-    BytesState *copy = PyMem_Malloc(sizeof(*copy));
+    const RangeSearchState *state = raw_state;
+    RangeSearchState *copy = PyMem_Malloc(sizeof(*copy));
     if (copy == NULL) {
         PyErr_NoMemory();
         return NULL;
     }
-    copy->phase = state->phase;
-    copy->make_bytearray = state->make_bytearray;
-    copy->input = Py_XNewRef(state->input);
-    copy->view = Py_XNewRef(state->view);
-    copy->result = Py_XNewRef(state->result);
+    *copy = *state;
+    copy->receiver = Py_NewRef(state->receiver);
+    copy->target = Py_NewRef(state->target);
+    copy->indexed = Py_XNewRef(state->indexed);
+    copy->iterator = Py_XNewRef(state->iterator);
     return copy;
 }
 
 static void
-bytes_free_state(void *raw_state)
+range_search_free_state(void *raw_state)
 {
-    BytesState *state = raw_state;
+    RangeSearchState *state = raw_state;
     if (state == NULL) {
         return;
     }
-    Py_XDECREF(state->input);
-    Py_XDECREF(state->view);
-    Py_XDECREF(state->result);
+    Py_DECREF(state->receiver);
+    Py_DECREF(state->target);
+    Py_XDECREF(state->indexed);
+    Py_XDECREF(state->iterator);
     PyMem_Free(state);
 }
 
-static PyObject *
-lookup_raw_special(PyObject *object, const char *name)
-{
-    PyObject *mro = Py_TYPE(object)->tp_mro;
-    if (mro == NULL || !PyTuple_Check(mro)) {
-        return NULL;
-    }
-    Py_ssize_t size = PyTuple_GET_SIZE(mro);
-    for (Py_ssize_t index = 0; index < size; index++) {
-        PyObject *base = PyTuple_GET_ITEM(mro, index);
-        if (!PyType_Check(base)) {
-            continue;
-        }
-        PyObject *dictionary = PyType_GetDict((PyTypeObject *)base);
-        PyObject *descriptor = PyDict_GetItemString(dictionary, name);
-        if (descriptor != NULL) {
-            return Py_NewRef(descriptor);
-        }
-    }
-    return NULL;
-}
+static PyObject *range_search_resume(const void *raw_state, PyObject *value);
 
-static PyObject *
-bytes_from_index_result(PyObject *value, int make_bytearray)
-{
-    PyObject *index = PyNumber_Index(value);
-    if (index == NULL) {
-        return NULL;
-    }
-    PyObject *args = PyTuple_Pack(1, index);
-    Py_DECREF(index);
-    if (args == NULL) {
-        return NULL;
-    }
-    PyObject *result;
-    if (make_bytearray) {
-        result = PyByteArray_FromStringAndSize(NULL, 0);
-        if (result != NULL && original_bytearray_init(result, args, NULL) < 0) {
-            Py_CLEAR(result);
-        }
-    }
-    else {
-        result = original_bytes_new(&PyBytes_Type, args, NULL);
-    }
-    Py_DECREF(args);
-    return result;
-}
-
-static PyObject *
-bytearray_copy_buffer(PyObject *source)
-{
-    Py_buffer view;
-    if (PyObject_GetBuffer(source, &view, PyBUF_FULL_RO) < 0) {
-        return NULL;
-    }
-    PyObject *result = PyByteArray_FromStringAndSize(NULL, view.len);
-    if (
-        result != NULL &&
-        PyBuffer_ToContiguous(PyByteArray_AS_STRING(result), &view, view.len, 'C') < 0
-    ) {
-        Py_CLEAR(result);
-    }
-    PyBuffer_Release(&view);
-    return result;
-}
-
-static int
-bytearray_replace_buffer(PyObject *target, PyObject *source)
-{
-    Py_buffer view;
-    if (PyObject_GetBuffer(source, &view, PyBUF_FULL_RO) < 0) {
-        return -1;
-    }
-    int status = PyByteArray_Resize(target, view.len);
-    if (
-        status == 0 &&
-        PyBuffer_ToContiguous(PyByteArray_AS_STRING(target), &view, view.len, 'C') < 0
-    ) {
-        status = -1;
-    }
-    PyBuffer_Release(&view);
-    return status;
-}
-
-static PyObject *
-bytes_buffer_continue(BytesState *state, PyObject *value)
-{
-    if (!PyMemoryView_Check(value)) {
-        PyErr_SetString(PyExc_TypeError, "__buffer__ returned non-memoryview object");
-        return NULL;
-    }
-    Py_XSETREF(state->view, Py_NewRef(value));
-    PyObject *converted = state->make_bytearray
-        ? bytearray_copy_buffer(state->view)
-        : PyBytes_FromObject(state->view);
-    if (converted == NULL) {
-        return NULL;
-    }
-    Py_XSETREF(state->result, converted);
-
-    PyObject *release_descriptor = lookup_raw_special(state->input, "__release_buffer__");
-    if (release_descriptor == NULL) {
-        return Py_NewRef(state->result);
-    }
-    Py_DECREF(release_descriptor);
-
-    state->phase = BYTES_WAIT_BUFFER_RELEASE;
-    PyObject *released = PyObject_CallMethod(
-        state->input,
-        "__release_buffer__",
-        "O",
-        state->view
-    );
-    if (released == NULL) {
-        PyErr_WriteUnraisable(state->input);
-    }
-    else {
-        Py_DECREF(released);
-    }
-    return Py_NewRef(state->result);
-}
-
-static const AleffAdapterVTable bytes_vtable;
-
-static PyObject *
-bytes_resume(const void *raw_state, PyObject *value)
-{
-    const BytesState *state = raw_state;
-    if (value == NULL && state->phase != BYTES_WAIT_BUFFER_RELEASE) {
-        return NULL;
-    }
-    switch (state->phase) {
-        case BYTES_WAIT_BYTES:
-            if (!PyBytes_Check(value)) {
-                PyErr_Format(
-                    PyExc_TypeError,
-                    "__bytes__ returned non-bytes (type %.200s)",
-                    Py_TYPE(value)->tp_name
-                );
-                return NULL;
-            }
-            return Py_NewRef(value);
-        case BYTES_WAIT_INDEX:
-            return bytes_from_index_result(value, state->make_bytearray);
-        case BYTES_WAIT_BUFFER_ACQUIRE: {
-            BytesState *copy = bytes_copy_state(state);
-            if (copy == NULL) {
-                return NULL;
-            }
-            AleffAdapterFrame frame;
-            adapter_enter(&frame, &bytes_vtable, copy);
-            PyObject *result = bytes_buffer_continue(copy, value);
-            adapter_leave(&frame);
-            bytes_free_state(copy);
-            return result;
-        }
-        case BYTES_WAIT_BUFFER_RELEASE:
-            if (value == NULL && PyErr_Occurred()) {
-                PyErr_WriteUnraisable(state->input);
-            }
-            return Py_NewRef(state->result);
-    }
-    PyErr_SetString(PyExc_RuntimeError, "unknown bytes conversion phase");
-    return NULL;
-}
-
-static const AleffAdapterVTable bytes_vtable = {
-    .copy_state = bytes_copy_state,
-    .free_state = bytes_free_state,
-    .resume = bytes_resume,
+static const AleffAdapterVTable range_search_vtable = {
+    .copy_state = range_search_copy_state,
+    .free_state = range_search_free_state,
+    .resume = range_search_resume,
 };
 
 static PyObject *
-convert_python_buffer(PyObject *input, int make_bytearray)
+range_search_continue(
+    RangeSearchState *state,
+    PyObject *resumed_value,
+    int is_resumed
+)
 {
-    BytesState state = {
-        .phase = BYTES_WAIT_BUFFER_ACQUIRE,
-        .make_bytearray = make_bytearray,
-        .input = Py_NewRef(input),
-        .view = NULL,
-        .result = NULL,
-    };
+    if (is_resumed) {
+        PyObject *indexed = PyNumber_Index(resumed_value);
+        if (indexed == NULL) {
+            return NULL;
+        }
+        Py_XSETREF(state->indexed, indexed);
+        state->phase = RANGE_SEARCH_READY;
+    }
+    if (state->indexed == NULL) {
+        state->phase = RANGE_SEARCH_WAIT_INDEX;
+        state->indexed = PyNumber_Index(state->target);
+        if (state->indexed == NULL) {
+            return NULL;
+        }
+        state->phase = RANGE_SEARCH_READY;
+    }
+    if (state->iterator == NULL) {
+        state->iterator = PyObject_GetIter(state->receiver);
+        if (state->iterator == NULL) {
+            return NULL;
+        }
+    }
+    for (;;) {
+        PyObject *item = Py_TYPE(state->iterator)->tp_iternext(state->iterator);
+        if (item == NULL) {
+            if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration)) {
+                return NULL;
+            }
+            PyErr_Clear();
+            if (state->find_index) {
+                PyErr_SetString(PyExc_ValueError, "range.index(x): x not in range");
+                return NULL;
+            }
+            return PyLong_FromSsize_t(state->count);
+        }
+        int equal = PyObject_RichCompareBool(item, state->indexed, Py_EQ);
+        Py_DECREF(item);
+        if (equal < 0) {
+            return NULL;
+        }
+        state->index++;
+        if (equal) {
+            if (state->find_index) {
+                return PyLong_FromSsize_t(state->index - 1);
+            }
+            state->count++;
+        }
+    }
+}
+
+static PyObject *
+range_search_resume(const void *raw_state, PyObject *value)
+{
+    if (value == NULL) {
+        return NULL;
+    }
+    RangeSearchState *state = range_search_copy_state(raw_state);
+    if (state == NULL) {
+        return NULL;
+    }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &bytes_vtable, &state);
-    PyObject *view = PyObject_CallMethod(input, "__buffer__", "i", PyBUF_FULL_RO);
-    PyObject *result = view == NULL ? NULL : bytes_buffer_continue(&state, view);
-    Py_XDECREF(view);
+    if (adapter_enter(&frame, &range_search_vtable, state) < 0) {
+        return NULL;
+    }
+    PyObject *result = range_search_continue(state, value, 1);
     adapter_leave(&frame);
-    Py_DECREF(state.input);
-    Py_XDECREF(state.view);
-    Py_XDECREF(state.result);
+    range_search_free_state(state);
     return result;
 }
 
 static PyObject *
-adapter_bytes_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+adapter_range_count(PyObject *self, PyObject *target)
 {
-    if (
-        type != &PyBytes_Type || PyTuple_GET_SIZE(args) != 1 ||
-        (kwargs != NULL && PyDict_GET_SIZE(kwargs) != 0)
-    ) {
-        return original_bytes_new(type, args, kwargs);
+    RangeSearchState state = {
+        .receiver = self,
+        .target = target,
+        .indexed = NULL,
+        .iterator = NULL,
+        .index = 0,
+        .count = 0,
+        .find_index = 0,
+        .phase = RANGE_SEARCH_WAIT_INDEX,
+    };
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &range_search_vtable, &state) < 0) {
+        return NULL;
     }
-    PyObject *input = PyTuple_GET_ITEM(args, 0);
-    if (PyBytes_CheckExact(input)) {
-        return original_bytes_new(type, args, kwargs);
-    }
-
-    PyObject *bytes_descriptor = lookup_raw_special(input, "__bytes__");
-    if (bytes_descriptor != NULL) {
-        Py_DECREF(bytes_descriptor);
-        BytesState state = {
-            .phase = BYTES_WAIT_BYTES,
-            .make_bytearray = 0,
-            .input = NULL,
-            .view = NULL,
-            .result = NULL,
-        };
-        AleffAdapterFrame frame;
-        adapter_enter(&frame, &bytes_vtable, &state);
-        PyObject *result = original_bytes_new(type, args, kwargs);
-        adapter_leave(&frame);
-        return result;
-    }
-    if (PyUnicode_Check(input)) {
-        return original_bytes_new(type, args, kwargs);
-    }
-    if (PyIndex_Check(input)) {
-        BytesState state = {
-            .phase = BYTES_WAIT_INDEX,
-            .make_bytearray = 0,
-            .input = NULL,
-            .view = NULL,
-            .result = NULL,
-        };
-        AleffAdapterFrame frame;
-        adapter_enter(&frame, &bytes_vtable, &state);
-        PyObject *result = original_bytes_new(type, args, kwargs);
-        adapter_leave(&frame);
-        return result;
-    }
-    if (PyObject_CheckBuffer(input)) {
-        PyObject *buffer_descriptor = lookup_raw_special(input, "__buffer__");
-        if (
-            buffer_descriptor == NULL ||
-            Py_IS_TYPE(buffer_descriptor, &PyWrapperDescr_Type)
-        ) {
-            Py_XDECREF(buffer_descriptor);
-            return original_bytes_new(type, args, kwargs);
-        }
-        Py_DECREF(buffer_descriptor);
-        return convert_python_buffer(input, 0);
-    }
-    return collect_iterable(input, COLLECT_BYTES);
+    PyObject *result = range_search_continue(&state, NULL, 0);
+    adapter_leave(&frame);
+    Py_XDECREF(state.indexed);
+    Py_XDECREF(state.iterator);
+    return result;
 }
 
-static int
-adapter_bytearray_init(PyObject *self, PyObject *args, PyObject *kwargs)
+static PyObject *
+adapter_range_index(PyObject *self, PyObject *target)
 {
-    if (
-        PyTuple_GET_SIZE(args) != 1 ||
-        (kwargs != NULL && PyDict_GET_SIZE(kwargs) != 0) ||
-        PyUnicode_Check(PyTuple_GET_ITEM(args, 0))
-    ) {
-        return original_bytearray_init(self, args, kwargs);
+    RangeSearchState state = {
+        .receiver = self,
+        .target = target,
+        .indexed = NULL,
+        .iterator = NULL,
+        .index = 0,
+        .count = 0,
+        .find_index = 1,
+        .phase = RANGE_SEARCH_WAIT_INDEX,
+    };
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &range_search_vtable, &state) < 0) {
+        return NULL;
     }
-    PyObject *input = PyTuple_GET_ITEM(args, 0);
-    if (PyIndex_Check(input)) {
-        BytesState state = {
-            .phase = BYTES_WAIT_INDEX,
-            .make_bytearray = 1,
-            .input = NULL,
-            .view = NULL,
-            .result = NULL,
-        };
-        AleffAdapterFrame frame;
-        adapter_enter(&frame, &bytes_vtable, &state);
-        int status = original_bytearray_init(self, args, kwargs);
-        adapter_leave(&frame);
-        return status;
-    }
+    PyObject *result = range_search_continue(&state, NULL, 0);
+    adapter_leave(&frame);
+    Py_XDECREF(state.indexed);
+    Py_XDECREF(state.iterator);
+    return result;
+}
 
-    PyObject *result;
-    if (PyObject_CheckBuffer(input)) {
-        PyObject *buffer_descriptor = lookup_raw_special(input, "__buffer__");
-        if (
-            buffer_descriptor == NULL ||
-            Py_IS_TYPE(buffer_descriptor, &PyWrapperDescr_Type)
-        ) {
-            Py_XDECREF(buffer_descriptor);
-            return original_bytearray_init(self, args, kwargs);
+typedef enum {
+    SLICE_INDICES_WAIT_LENGTH,
+    SLICE_INDICES_WAIT_COMPONENT,
+    SLICE_INDICES_READY,
+} SliceIndicesPhase;
+
+typedef struct {
+    PyObject *slice;
+    PyObject *length_object;
+    PyObject *components[3];
+    Py_ssize_t length;
+    int component;
+    SliceIndicesPhase phase;
+} SliceIndicesState;
+
+static void *
+slice_indices_copy_state(const void *raw_state)
+{
+    const SliceIndicesState *state = raw_state;
+    SliceIndicesState *copy = PyMem_Malloc(sizeof(*copy));
+    if (copy == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    *copy = *state;
+    copy->slice = Py_NewRef(state->slice);
+    copy->length_object = Py_NewRef(state->length_object);
+    for (int i = 0; i < 3; i++) {
+        copy->components[i] = Py_XNewRef(state->components[i]);
+    }
+    return copy;
+}
+
+static void
+slice_indices_free_state(void *raw_state)
+{
+    SliceIndicesState *state = raw_state;
+    if (state == NULL) {
+        return;
+    }
+    Py_DECREF(state->slice);
+    Py_DECREF(state->length_object);
+    for (int i = 0; i < 3; i++) {
+        Py_XDECREF(state->components[i]);
+    }
+    PyMem_Free(state);
+}
+
+static PyObject *slice_indices_resume(const void *raw_state, PyObject *value);
+
+static const AleffAdapterVTable slice_indices_vtable = {
+    .copy_state = slice_indices_copy_state,
+    .free_state = slice_indices_free_state,
+    .resume = slice_indices_resume,
+};
+
+static PyObject *
+slice_indices_finish(SliceIndicesState *state)
+{
+    PyObject *start = state->components[0] == NULL
+        ? Py_NewRef(Py_None) : Py_NewRef(state->components[0]);
+    PyObject *stop = state->components[1] == NULL
+        ? Py_NewRef(Py_None) : Py_NewRef(state->components[1]);
+    PyObject *step = state->components[2] == NULL
+        ? Py_NewRef(Py_None) : Py_NewRef(state->components[2]);
+    if (start == NULL || stop == NULL || step == NULL) {
+        Py_XDECREF(start); Py_XDECREF(stop); Py_XDECREF(step);
+        return NULL;
+    }
+    PyObject *normalized = PySlice_New(start, stop, step);
+    Py_DECREF(start); Py_DECREF(stop); Py_DECREF(step);
+    if (normalized == NULL) {
+        return NULL;
+    }
+    Py_ssize_t result_start, result_stop, result_step, result_length;
+    int status = PySlice_GetIndicesEx(
+        normalized,
+        state->length,
+        &result_start,
+        &result_stop,
+        &result_step,
+        &result_length
+    );
+    Py_DECREF(normalized);
+    if (status < 0) {
+        return NULL;
+    }
+    return Py_BuildValue("nnn", result_start, result_stop, result_step);
+}
+
+static PyObject *
+slice_indices_continue(
+    SliceIndicesState *state,
+    PyObject *resumed_value,
+    int is_resumed
+)
+{
+    if (is_resumed) {
+        if (state->phase == SLICE_INDICES_WAIT_LENGTH) {
+            PyObject *length = PyNumber_Index(resumed_value);
+            if (length == NULL) {
+                return NULL;
+            }
+            state->length = PyLong_AsSsize_t(length);
+            Py_DECREF(length);
+            if (state->length == -1 && PyErr_Occurred()) {
+                return NULL;
+            }
         }
-        Py_DECREF(buffer_descriptor);
-        result = convert_python_buffer(input, 1);
+        else {
+            PyObject *component = PyNumber_Index(resumed_value);
+            if (component == NULL) {
+                return NULL;
+            }
+            Py_XSETREF(state->components[state->component], component);
+            state->component++;
+        }
     }
-    else {
-        result = collect_iterable(input, COLLECT_BYTEARRAY);
+    if (!is_resumed) {
+        state->phase = SLICE_INDICES_WAIT_LENGTH;
+        PyObject *length = PyNumber_Index(state->length_object);
+        if (length == NULL) {
+            return NULL;
+        }
+        state->length = PyLong_AsSsize_t(length);
+        Py_DECREF(length);
+        if (state->length == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
     }
-    if (result == NULL) {
+    while (state->component < 3) {
+        PyObject *value = ((PySliceObject *)state->slice)->start;
+        if (state->component == 1) value = ((PySliceObject *)state->slice)->stop;
+        if (state->component == 2) value = ((PySliceObject *)state->slice)->step;
+        if (value == Py_None) {
+            state->component++;
+            continue;
+        }
+        state->phase = SLICE_INDICES_WAIT_COMPONENT;
+        PyObject *component = PyNumber_Index(value);
+        if (component == NULL) {
+            return NULL;
+        }
+        state->components[state->component++] = component;
+    }
+    state->phase = SLICE_INDICES_READY;
+    return slice_indices_finish(state);
+}
+
+static PyObject *
+slice_indices_resume(const void *raw_state, PyObject *value)
+{
+    if (value == NULL) {
+        return NULL;
+    }
+    SliceIndicesState *state = slice_indices_copy_state(raw_state);
+    if (state == NULL) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &slice_indices_vtable, state) < 0) {
+        return NULL;
+    }
+    PyObject *result = slice_indices_continue(state, value, 1);
+    adapter_leave(&frame);
+    slice_indices_free_state(state);
+    return result;
+}
+
+static PyObject *
+adapter_slice_indices(PyObject *self, PyObject *length_object)
+{
+    PySliceObject *slice = (PySliceObject *)self;
+    SliceIndicesState state = {
+        .slice = self,
+        .length_object = length_object,
+        .components = {NULL, NULL, NULL},
+        .length = 0,
+        .component = 0,
+        .phase = SLICE_INDICES_WAIT_LENGTH,
+    };
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &slice_indices_vtable, &state) < 0) {
+        return NULL;
+    }
+    PyObject *result = slice_indices_continue(&state, NULL, 0);
+    adapter_leave(&frame);
+    for (int i = 0; i < 3; i++) Py_XDECREF(state.components[i]);
+    (void)slice;
+    return result;
+}
+
+#include "mappings.c"
+#include "sets.c"
+#include "text.c"
+
+
+static PyMethodDef containers_range_count_method = {
+    .ml_name = "count",
+    .ml_meth = adapter_range_count,
+    .ml_flags = METH_O,
+    .ml_doc = "Return number of occurrences of value.",
+};
+
+static PyMethodDef containers_range_index_method = {
+    .ml_name = "index",
+    .ml_meth = adapter_range_index,
+    .ml_flags = METH_O,
+    .ml_doc = "Return the index of value.",
+};
+
+static PyMethodDef containers_slice_indices_method = {
+    .ml_name = "indices",
+    .ml_meth = adapter_slice_indices,
+    .ml_flags = METH_O,
+    .ml_doc = "Return the indices of the slice for a sequence of length length.",
+};
+
+static int
+containers_replace_type_method(
+    PyTypeObject *type,
+    const char *name,
+    PyMethodDef *method
+)
+{
+    PyObject *descriptor = (method->ml_flags & METH_CLASS) != 0
+        ? PyDescr_NewClassMethod(type, method)
+        : PyDescr_NewMethod(type, method);
+    if (descriptor == NULL) {
         return -1;
     }
-    int status = bytearray_replace_buffer(self, result);
-    Py_DECREF(result);
+    PyObject *type_dict = PyType_GetDict(type);
+    if (type_dict == NULL) {
+        Py_DECREF(descriptor);
+        return -1;
+    }
+    int status = PyDict_SetItemString(type_dict, name, descriptor);
+    Py_DECREF(descriptor);
+    if (status == 0) {
+        PyType_Modified(type);
+    }
     return status;
+}
+
+/* Called once by adapters_bootstrap.c after the container type slots are ready. */
+int
+adapter_containers_install(void)
+{
+    if (original_str_format == NULL) {
+        PyObject *unicode_dict = PyType_GetDict(&PyUnicode_Type);
+        PyObject *descriptor = unicode_dict == NULL
+            ? NULL : PyDict_GetItemString(unicode_dict, "format");
+        if (descriptor == NULL) {
+            PyErr_SetString(PyExc_RuntimeError, "cannot access str.format");
+            return -1;
+        }
+        original_str_format = Py_NewRef(descriptor);
+    }
+    if (original_dict_subscript == NULL && PyDict_Type.tp_as_mapping != NULL) {
+        original_dict_subscript = PyDict_Type.tp_as_mapping->mp_subscript;
+    }
+    PyDict_Type.tp_richcompare = adapter_dict_richcompare;
+    if (
+        containers_replace_type_method(&PyDict_Type, "fromkeys", &containers_dict_fromkeys_method) < 0 ||
+        containers_replace_type_method(&PyDict_Type, "update", &containers_dict_update_method) < 0 ||
+        containers_replace_type_method(&PyDict_Type, "__getitem__", &containers_dict_getitem_method) < 0 ||
+        containers_replace_type_method(&PyDict_Type, "__setitem__", &containers_dict_setitem_method) < 0 ||
+        containers_replace_type_method(&PyDict_Type, "__delitem__", &containers_dict_delitem_method) < 0 ||
+        containers_replace_type_method(&PyDict_Type, "__contains__", &containers_dict_contains_method) < 0 ||
+        containers_replace_type_method(&PyDict_Type, "__eq__", &containers_dict_eq_method) < 0 ||
+        containers_replace_type_method(&PyDict_Type, "__ne__", &containers_dict_ne_method) < 0 ||
+        containers_replace_type_method(&PyUnicode_Type, "join", &containers_str_join_method) < 0 ||
+        containers_replace_type_method(&PyUnicode_Type, "format", &containers_str_format_method) < 0 ||
+        containers_replace_type_method(&PyUnicode_Type, "format_map", &containers_str_format_map_method) < 0 ||
+        containers_replace_type_method(&PyUnicode_Type, "encode", &containers_str_encode_method) < 0 ||
+        containers_replace_type_method(&PyBytes_Type, "join", &containers_bytes_join_method) < 0 ||
+        containers_replace_type_method(&PyBytes_Type, "decode", &containers_bytes_decode_method) < 0 ||
+        containers_replace_type_method(&PyByteArray_Type, "join", &containers_bytearray_join_method) < 0 ||
+        containers_replace_type_method(&PyByteArray_Type, "decode", &containers_bytearray_decode_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "update", &containers_set_update_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "intersection_update", &containers_set_intersection_update_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "difference_update", &containers_set_difference_update_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "symmetric_difference_update", &containers_set_symmetric_difference_update_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "union", &containers_set_union_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "intersection", &containers_set_intersection_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "difference", &containers_set_difference_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "symmetric_difference", &containers_set_symmetric_difference_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "isdisjoint", &containers_set_isdisjoint_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "issubset", &containers_set_issubset_method) < 0 ||
+        containers_replace_type_method(&PySet_Type, "issuperset", &containers_set_issuperset_method) < 0 ||
+        containers_replace_type_method(&PyFrozenSet_Type, "union", &containers_frozenset_union_method) < 0 ||
+        containers_replace_type_method(&PyFrozenSet_Type, "intersection", &containers_frozenset_intersection_method) < 0 ||
+        containers_replace_type_method(&PyFrozenSet_Type, "difference", &containers_frozenset_difference_method) < 0 ||
+        containers_replace_type_method(&PyFrozenSet_Type, "symmetric_difference", &containers_frozenset_symmetric_difference_method) < 0 ||
+        containers_replace_type_method(&PyFrozenSet_Type, "isdisjoint", &containers_frozenset_isdisjoint_method) < 0 ||
+        containers_replace_type_method(&PyFrozenSet_Type, "issubset", &containers_frozenset_issubset_method) < 0 ||
+        containers_replace_type_method(&PyFrozenSet_Type, "issuperset", &containers_frozenset_issuperset_method) < 0 ||
+        containers_replace_type_method(&PyRange_Type, "count", &containers_range_count_method) < 0 ||
+        containers_replace_type_method(&PyRange_Type, "index", &containers_range_index_method) < 0 ||
+        containers_replace_type_method(&PySlice_Type, "indices", &containers_slice_indices_method) < 0
+    ) {
+        return -1;
+    }
+    return 0;
 }

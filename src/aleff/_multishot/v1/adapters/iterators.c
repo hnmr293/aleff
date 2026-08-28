@@ -1,12 +1,63 @@
+#include <math.h>
+
 typedef enum {
     SUM_WAIT_NEXT,
     SUM_WAIT_ADD,
 } SumPhase;
 
+typedef enum {
+    SUM_GENERIC,
+    SUM_INT,
+    SUM_FLOAT,
+#if PY_VERSION_HEX >= 0x030e0000
+    SUM_COMPLEX,
+#endif
+} SumMode;
+
+typedef struct {
+    double hi;
+    double lo;
+} AleffCompensatedSum;
+
+static inline AleffCompensatedSum
+aleff_cs_from_double(double value)
+{
+    return (AleffCompensatedSum){value, 0.0};
+}
+
+static inline AleffCompensatedSum
+aleff_cs_add(AleffCompensatedSum total, double value)
+{
+    double high = total.hi + value;
+    if (fabs(total.hi) >= fabs(value)) {
+        total.lo += (total.hi - high) + value;
+    }
+    else {
+        total.lo += (value - high) + total.hi;
+    }
+    total.hi = high;
+    return total;
+}
+
+static inline double
+aleff_cs_to_double(AleffCompensatedSum total)
+{
+    if (total.lo && isfinite(total.lo)) {
+        return total.hi + total.lo;
+    }
+    return total.hi;
+}
+
 typedef struct {
     PyObject *iterator;
     PyObject *result;
+    PyObject *item;
     SumPhase phase;
+    SumMode mode;
+    SumMode fallback_mode;
+    Py_ssize_t int_result;
+    AleffCompensatedSum real_result;
+    AleffCompensatedSum imag_result;
 } SumState;
 
 static void *
@@ -19,8 +70,14 @@ sum_copy_state(const void *raw_state)
         return NULL;
     }
     copy->iterator = Py_NewRef(state->iterator);
-    copy->result = Py_NewRef(state->result);
+    copy->result = Py_XNewRef(state->result);
+    copy->item = Py_XNewRef(state->item);
     copy->phase = state->phase;
+    copy->mode = state->mode;
+    copy->fallback_mode = state->fallback_mode;
+    copy->int_result = state->int_result;
+    copy->real_result = state->real_result;
+    copy->imag_result = state->imag_result;
     return copy;
 }
 
@@ -32,7 +89,8 @@ sum_free_state(void *raw_state)
         return;
     }
     Py_DECREF(state->iterator);
-    Py_DECREF(state->result);
+    Py_XDECREF(state->result);
+    Py_XDECREF(state->item);
     PyMem_Free(state);
 }
 
@@ -45,38 +103,212 @@ static const AleffAdapterVTable sum_vtable = {
 };
 
 static PyObject *
+sum_finish(SumState *state)
+{
+    switch (state->mode) {
+        case SUM_INT:
+            return PyLong_FromSsize_t(state->int_result);
+        case SUM_FLOAT:
+            return PyFloat_FromDouble(aleff_cs_to_double(state->real_result));
+#if PY_VERSION_HEX >= 0x030e0000
+        case SUM_COMPLEX:
+            return PyComplex_FromDoubles(
+                aleff_cs_to_double(state->real_result),
+                aleff_cs_to_double(state->imag_result)
+            );
+#endif
+        case SUM_GENERIC:
+            return Py_NewRef(state->result);
+    }
+    PyErr_SetString(PyExc_RuntimeError, "invalid sum mode");
+    return NULL;
+}
+
+static void
+sum_enter_generic(SumState *state, PyObject *result)
+{
+    state->mode = SUM_GENERIC;
+    Py_XSETREF(state->result, result);
+}
+
+static void
+sum_promote_after_fallback(SumState *state)
+{
+    if (state->fallback_mode == SUM_INT && PyFloat_CheckExact(state->result)) {
+        state->mode = SUM_FLOAT;
+        state->real_result = aleff_cs_from_double(PyFloat_AS_DOUBLE(state->result));
+        Py_CLEAR(state->result);
+    }
+#if PY_VERSION_HEX >= 0x030e0000
+    else if ((state->fallback_mode == SUM_INT || state->fallback_mode == SUM_FLOAT) &&
+             PyComplex_CheckExact(state->result)) {
+        Py_complex value = PyComplex_AsCComplex(state->result);
+        state->mode = SUM_COMPLEX;
+        state->real_result = aleff_cs_from_double(value.real);
+        state->imag_result = aleff_cs_from_double(value.imag);
+        Py_CLEAR(state->result);
+    }
+#endif
+    state->fallback_mode = SUM_GENERIC;
+}
+
+static PyObject *
+sum_copy_resumed_value(PyObject *value)
+{
+    if (PyBool_Check(value)) {
+        return PyBool_FromLong(value == Py_True);
+    }
+    if (PyLong_Check(value)) {
+        return PyNumber_Long(value);
+    }
+    if (PyFloat_Check(value)) {
+        return PyFloat_FromDouble(PyFloat_AS_DOUBLE(value));
+    }
+#if PY_VERSION_HEX >= 0x030e0000
+    if (PyComplex_Check(value)) {
+        Py_complex complex_value = PyComplex_AsCComplex(value);
+        return PyComplex_FromDoubles(complex_value.real, complex_value.imag);
+    }
+#endif
+    return Py_NewRef(value);
+}
+
+static PyObject *
 sum_continue(SumState *state, PyObject *resumed_value, int is_resumed)
 {
-    PyObject *item = NULL;
     if (is_resumed) {
         if (state->phase == SUM_WAIT_NEXT) {
-            item = Py_NewRef(resumed_value);
+            PyObject *item = sum_copy_resumed_value(resumed_value);
+            if (item == NULL) {
+                return NULL;
+            }
+            Py_XSETREF(state->item, item);
         }
         else {
-            Py_SETREF(state->result, Py_NewRef(resumed_value));
+            PyObject *result = sum_copy_resumed_value(resumed_value);
+            if (result == NULL) {
+                return NULL;
+            }
+            Py_XSETREF(state->result, result);
+            Py_CLEAR(state->item);
+            sum_promote_after_fallback(state);
         }
     }
 
     for (;;) {
-        if (item == NULL) {
+        if (state->item == NULL) {
             state->phase = SUM_WAIT_NEXT;
-            item = PyIter_Next(state->iterator);
-            if (item == NULL) {
+            state->item = PyIter_Next(state->iterator);
+            if (state->item == NULL) {
                 if (PyErr_Occurred()) {
                     return NULL;
                 }
-                return Py_NewRef(state->result);
+                return sum_finish(state);
             }
         }
 
+        if (state->mode == SUM_INT) {
+            if (PyLong_CheckExact(state->item) || PyBool_Check(state->item)) {
+                int conversion_error = 0;
+                Py_ssize_t value = PyLong_AsSsize_t(state->item);
+                if (value == -1 && PyErr_Occurred()) {
+                    if (PyErr_ExceptionMatches(PyExc_OverflowError)) {
+                        PyErr_Clear();
+                        conversion_error = 1;
+                    }
+                    else {
+                        return NULL;
+                    }
+                }
+                if (!conversion_error &&
+                    (state->int_result >= 0
+                        ? value <= PY_SSIZE_T_MAX - state->int_result
+                        : value >= PY_SSIZE_T_MIN - state->int_result)) {
+                    state->int_result += value;
+                    Py_CLEAR(state->item);
+                    continue;
+                }
+            }
+            PyObject *result = PyLong_FromSsize_t(state->int_result);
+            if (result == NULL) {
+                return NULL;
+            }
+            state->fallback_mode = SUM_INT;
+            sum_enter_generic(state, result);
+        }
+        else if (state->mode == SUM_FLOAT) {
+            if (PyFloat_CheckExact(state->item)) {
+                state->real_result = aleff_cs_add(
+                    state->real_result,
+                    PyFloat_AS_DOUBLE(state->item)
+                );
+                Py_CLEAR(state->item);
+                continue;
+            }
+            if (PyLong_Check(state->item)) {
+                double value = PyLong_AsDouble(state->item);
+                if (value == -1.0 && PyErr_Occurred()) {
+                    return NULL;
+                }
+                state->real_result = aleff_cs_add(state->real_result, value);
+                Py_CLEAR(state->item);
+                continue;
+            }
+            PyObject *result = PyFloat_FromDouble(
+                aleff_cs_to_double(state->real_result)
+            );
+            if (result == NULL) {
+                return NULL;
+            }
+            state->fallback_mode = SUM_FLOAT;
+            sum_enter_generic(state, result);
+        }
+#if PY_VERSION_HEX >= 0x030e0000
+        else if (state->mode == SUM_COMPLEX) {
+            if (PyComplex_CheckExact(state->item)) {
+                Py_complex value = PyComplex_AsCComplex(state->item);
+                state->real_result = aleff_cs_add(state->real_result, value.real);
+                state->imag_result = aleff_cs_add(state->imag_result, value.imag);
+                Py_CLEAR(state->item);
+                continue;
+            }
+            if (PyLong_Check(state->item)) {
+                double value = PyLong_AsDouble(state->item);
+                if (value == -1.0 && PyErr_Occurred()) {
+                    return NULL;
+                }
+                state->real_result = aleff_cs_add(state->real_result, value);
+                Py_CLEAR(state->item);
+                continue;
+            }
+            if (PyFloat_Check(state->item)) {
+                state->real_result = aleff_cs_add(
+                    state->real_result,
+                    PyFloat_AS_DOUBLE(state->item)
+                );
+                Py_CLEAR(state->item);
+                continue;
+            }
+            PyObject *result = PyComplex_FromDoubles(
+                aleff_cs_to_double(state->real_result),
+                aleff_cs_to_double(state->imag_result)
+            );
+            if (result == NULL) {
+                return NULL;
+            }
+            state->fallback_mode = SUM_COMPLEX;
+            sum_enter_generic(state, result);
+        }
+#endif
+
         state->phase = SUM_WAIT_ADD;
-        PyObject *next_result = PyNumber_Add(state->result, item);
-        Py_DECREF(item);
-        item = NULL;
+        PyObject *next_result = PyNumber_Add(state->result, state->item);
         if (next_result == NULL) {
             return NULL;
         }
+        Py_CLEAR(state->item);
         Py_SETREF(state->result, next_result);
+        sum_promote_after_fallback(state);
     }
 }
 
@@ -87,7 +319,7 @@ sum_resume(const void *raw_state, PyObject *value)
     if (value == NULL) {
         if (source->phase == SUM_WAIT_NEXT && PyErr_ExceptionMatches(PyExc_StopIteration)) {
             PyErr_Clear();
-            return Py_NewRef(source->result);
+            return sum_finish((SumState *)source);
         }
         return NULL;
     }
@@ -96,7 +328,9 @@ sum_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &sum_vtable, state);
+    if (adapter_enter(&frame, &sum_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = sum_continue(state, value, 1);
     adapter_leave(&frame);
     sum_free_state(state);
@@ -139,21 +373,55 @@ adapter_sum(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
     SumState state = {
         .iterator = PyObject_GetIter(iterable),
         .result = Py_NewRef(start),
+        .item = NULL,
         .phase = SUM_WAIT_NEXT,
+        .mode = SUM_GENERIC,
+        .fallback_mode = SUM_GENERIC,
+        .int_result = 0,
+        .real_result = {0.0, 0.0},
+        .imag_result = {0.0, 0.0},
     };
     if (state.iterator == NULL) {
         Py_DECREF(state.result);
         Py_XDECREF(owned_start);
         return NULL;
     }
+    if (PyLong_CheckExact(start)) {
+        Py_ssize_t value = PyLong_AsSsize_t(start);
+        if (!(value == -1 && PyErr_Occurred())) {
+            state.mode = SUM_INT;
+            state.int_result = value;
+            Py_CLEAR(state.result);
+        }
+        else if (PyErr_ExceptionMatches(PyExc_OverflowError)) {
+            PyErr_Clear();
+        }
+    }
+    if (state.mode == SUM_GENERIC && PyFloat_CheckExact(start)) {
+        state.mode = SUM_FLOAT;
+        state.real_result = aleff_cs_from_double(PyFloat_AS_DOUBLE(start));
+        Py_CLEAR(state.result);
+    }
+#if PY_VERSION_HEX >= 0x030e0000
+    if (state.mode == SUM_GENERIC && PyComplex_CheckExact(start)) {
+        Py_complex value = PyComplex_AsCComplex(start);
+        state.mode = SUM_COMPLEX;
+        state.real_result = aleff_cs_from_double(value.real);
+        state.imag_result = aleff_cs_from_double(value.imag);
+        Py_CLEAR(state.result);
+    }
+#endif
+
     Py_XDECREF(owned_start);
 
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &sum_vtable, &state);
+    if (adapter_enter(&frame, &sum_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = sum_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_DECREF(state.iterator);
-    Py_DECREF(state.result);
+    Py_XDECREF(state.result);
     return result;
 }
 
@@ -288,7 +556,9 @@ reduce_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &reduce_vtable, state);
+    if (adapter_enter(&frame, &reduce_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result;
     if (value == NULL) {
         if (PyErr_Occurred()) {
@@ -325,7 +595,9 @@ adapter_reduce(PyObject *Py_UNUSED(self), PyObject *args)
         .phase = REDUCE_WAIT_NEXT,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &reduce_vtable, &state);
+    if (adapter_enter(&frame, &reduce_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = reduce_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_DECREF(iterator);
@@ -368,7 +640,9 @@ static PyObject *
 adapter_map_next(PyObject *map)
 {
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &map_vtable, NULL);
+    if (adapter_enter(&frame, &map_vtable, NULL) < 0) {
+        return NULL;
+    }
     PyObject *result = original_map_next(map);
     adapter_leave(&frame);
     return result;
@@ -492,7 +766,9 @@ map_constructor_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &map_constructor_vtable, state);
+    if (adapter_enter(&frame, &map_constructor_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = map_constructor_continue(state, value, 1);
     adapter_leave(&frame);
     map_constructor_free_state(state);
@@ -522,7 +798,9 @@ adapter_map_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         .index = 1,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &map_constructor_vtable, &state);
+    if (adapter_enter(&frame, &map_constructor_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = map_constructor_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_DECREF(converted_args);
@@ -600,7 +878,9 @@ zip_constructor_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &zip_constructor_vtable, state);
+    if (adapter_enter(&frame, &zip_constructor_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = zip_constructor_continue(state, value, 1);
     adapter_leave(&frame);
     map_constructor_free_state(state);
@@ -622,7 +902,9 @@ adapter_zip_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         .index = 0,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &zip_constructor_vtable, &state);
+    if (adapter_enter(&frame, &zip_constructor_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = zip_constructor_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_DECREF(converted);
@@ -848,7 +1130,9 @@ zip_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &zip_vtable, state);
+    if (adapter_enter(&frame, &zip_vtable, state) < 0) {
+        return NULL;
+    }
     Py_SETREF(state->zip->ittuple, Py_NewRef(state->iterators));
     PyObject *result = zip_continue(state, value, 1);
     adapter_leave(&frame);
@@ -872,7 +1156,9 @@ adapter_zip_next(PyObject *object)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &zip_vtable, &state);
+    if (adapter_enter(&frame, &zip_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = zip_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_DECREF(state.iterators);
@@ -1014,7 +1300,9 @@ enumerate_constructor_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &enumerate_constructor_vtable, state);
+    if (adapter_enter(&frame, &enumerate_constructor_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = enumerate_constructor_continue(state, value, 1);
     adapter_leave(&frame);
     enumerate_constructor_free_state(state);
@@ -1032,7 +1320,9 @@ adapter_enumerate_construct(PyTypeObject *type, PyObject *iterable, PyObject *st
         .phase = ENUM_CONSTRUCTOR_WAIT_ITER,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &enumerate_constructor_vtable, &state);
+    if (adapter_enter(&frame, &enumerate_constructor_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = enumerate_constructor_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_XDECREF(state.start);
@@ -1173,7 +1463,9 @@ adapter_enumerate_next(PyObject *object)
     }
     EnumerateNextState state = {.enumerate = enumerate, .index = index};
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &enumerate_next_vtable, &state);
+    if (adapter_enter(&frame, &enumerate_next_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *item = Py_TYPE(enumerate->iterator)->tp_iternext(enumerate->iterator);
     PyObject *result = item == NULL ? NULL : enumerate_next_finish(&state, item);
     Py_XDECREF(item);
@@ -1282,7 +1574,9 @@ adapter_reversed_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         .sequence = PyTuple_GET_ITEM(args, 0),
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &reversed_constructor_vtable, &state);
+    if (adapter_enter(&frame, &reversed_constructor_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = original_reversed_new(type, args, kwargs);
     adapter_leave(&frame);
     return result;
@@ -1308,7 +1602,9 @@ adapter_reversed_vectorcall(
         .sequence = args[0],
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &reversed_constructor_vtable, &state);
+    if (adapter_enter(&frame, &reversed_constructor_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = original_reversed_vectorcall(callable, args, nargsf, kwnames);
     adapter_leave(&frame);
     return result;
@@ -1386,281 +1682,10 @@ adapter_reversed_next(PyObject *object)
         .sequence = reversed->sequence,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &reversed_next_vtable, &state);
+    if (adapter_enter(&frame, &reversed_next_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = original_reversed_next(object);
-    adapter_leave(&frame);
-    return result;
-}
-
-typedef struct {
-    PyObject_HEAD
-    PyObject *source;
-    PyObject *active;
-} AleffChainObject;
-
-typedef enum {
-    CHAIN_WAIT_SOURCE_NEXT,
-    CHAIN_WAIT_ACTIVE_ITER,
-    CHAIN_WAIT_ACTIVE_NEXT,
-} ChainPhase;
-
-typedef struct {
-    AleffChainObject *chain;
-    PyObject *source;
-    PyObject *active;
-    ChainPhase phase;
-} ChainState;
-
-static void *
-chain_copy_state(const void *raw_state)
-{
-    const ChainState *state = raw_state;
-    ChainState *copy = PyMem_Malloc(sizeof(*copy));
-    if (copy == NULL) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    copy->chain = (AleffChainObject *)Py_NewRef((PyObject *)state->chain);
-    copy->source = state->source == NULL
-        ? NULL
-        : clone_iterator_for_snapshot(state->source);
-    if (state->source != NULL && copy->source == NULL) {
-        Py_DECREF(copy->chain);
-        PyMem_Free(copy);
-        return NULL;
-    }
-    copy->active = Py_XNewRef(state->active);
-    copy->phase = state->phase;
-    return copy;
-}
-
-static void
-chain_free_state(void *raw_state)
-{
-    ChainState *state = raw_state;
-    if (state == NULL) {
-        return;
-    }
-    Py_DECREF(state->chain);
-    Py_XDECREF(state->source);
-    Py_XDECREF(state->active);
-    PyMem_Free(state);
-}
-
-static void
-chain_restore(ChainState *state)
-{
-    Py_XSETREF(state->chain->source, Py_XNewRef(state->source));
-    Py_XSETREF(state->chain->active, Py_XNewRef(state->active));
-}
-
-static PyObject *chain_resume(const void *raw_state, PyObject *value);
-
-static const AleffAdapterVTable chain_vtable = {
-    .copy_state = chain_copy_state,
-    .free_state = chain_free_state,
-    .resume = chain_resume,
-};
-
-static PyObject *
-chain_continue(ChainState *state, PyObject *resumed_value, int is_resumed)
-{
-    if (is_resumed) {
-        chain_restore(state);
-        if (state->phase == CHAIN_WAIT_SOURCE_NEXT) {
-            if (resumed_value == NULL) {
-                if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration)) {
-                    return NULL;
-                }
-                PyErr_Clear();
-                Py_CLEAR(state->chain->source);
-                return NULL;
-            }
-            state->phase = CHAIN_WAIT_ACTIVE_ITER;
-            PyObject *iterator = PyObject_GetIter(resumed_value);
-            if (iterator == NULL) {
-                Py_CLEAR(state->chain->source);
-                return NULL;
-            }
-            Py_XSETREF(state->chain->active, iterator);
-            Py_XSETREF(state->active, Py_NewRef(iterator));
-        }
-        else if (state->phase == CHAIN_WAIT_ACTIVE_ITER) {
-            if (!PyIter_Check(resumed_value)) {
-                PyErr_Format(
-                    PyExc_TypeError,
-                    "iter() returned non-iterator of type '%.200s'",
-                    Py_TYPE(resumed_value)->tp_name
-                );
-                Py_CLEAR(state->chain->source);
-                return NULL;
-            }
-            Py_XSETREF(state->chain->active, Py_NewRef(resumed_value));
-            Py_XSETREF(state->active, Py_NewRef(resumed_value));
-        }
-        else if (resumed_value != NULL) {
-            return Py_NewRef(resumed_value);
-        }
-        else {
-            if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration)) {
-                return NULL;
-            }
-            PyErr_Clear();
-            Py_CLEAR(state->chain->active);
-            Py_CLEAR(state->active);
-        }
-    }
-
-    while (state->chain->source != NULL) {
-        if (state->chain->active == NULL) {
-            state->phase = CHAIN_WAIT_SOURCE_NEXT;
-            PyObject *iterable = Py_TYPE(state->chain->source)->tp_iternext(
-                state->chain->source
-            );
-            if (iterable == NULL) {
-                if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration)) {
-                    return NULL;
-                }
-                PyErr_Clear();
-                Py_CLEAR(state->chain->source);
-                return NULL;
-            }
-            state->phase = CHAIN_WAIT_ACTIVE_ITER;
-            PyObject *iterator = PyObject_GetIter(iterable);
-            Py_DECREF(iterable);
-            if (iterator == NULL) {
-                Py_CLEAR(state->chain->source);
-                return NULL;
-            }
-            Py_XSETREF(state->chain->active, iterator);
-            Py_XSETREF(state->active, Py_NewRef(iterator));
-        }
-
-        state->phase = CHAIN_WAIT_ACTIVE_NEXT;
-        PyObject *item = Py_TYPE(state->chain->active)->tp_iternext(state->chain->active);
-        if (item != NULL) {
-            return item;
-        }
-        if (PyErr_Occurred()) {
-            if (!PyErr_ExceptionMatches(PyExc_StopIteration)) {
-                return NULL;
-            }
-            PyErr_Clear();
-        }
-        Py_CLEAR(state->chain->active);
-        Py_CLEAR(state->active);
-    }
-    return NULL;
-}
-
-static PyObject *
-chain_resume(const void *raw_state, PyObject *value)
-{
-    ChainState *state = chain_copy_state(raw_state);
-    if (state == NULL) {
-        return NULL;
-    }
-    AleffAdapterFrame frame;
-    adapter_enter(&frame, &chain_vtable, state);
-    PyObject *result = chain_continue(state, value, 1);
-    adapter_leave(&frame);
-    chain_free_state(state);
-    return result;
-}
-
-static PyObject *
-adapter_chain_next(PyObject *object)
-{
-    AleffChainObject *chain = (AleffChainObject *)object;
-    ChainState state = {
-        .chain = chain,
-        .source = Py_XNewRef(chain->source),
-        .active = Py_XNewRef(chain->active),
-        .phase = CHAIN_WAIT_SOURCE_NEXT,
-    };
-    AleffAdapterFrame frame;
-    adapter_enter(&frame, &chain_vtable, &state);
-    PyObject *result = chain_continue(&state, NULL, 0);
-    adapter_leave(&frame);
-    Py_XDECREF(state.source);
-    Py_XDECREF(state.active);
-    return result;
-}
-
-typedef struct {
-    PyTypeObject *type;
-} ChainConstructorState;
-
-static void *
-chain_constructor_copy_state(const void *raw_state)
-{
-    const ChainConstructorState *state = raw_state;
-    ChainConstructorState *copy = PyMem_Malloc(sizeof(*copy));
-    if (copy == NULL) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    copy->type = (PyTypeObject *)Py_NewRef((PyObject *)state->type);
-    return copy;
-}
-
-static void
-chain_constructor_free_state(void *raw_state)
-{
-    ChainConstructorState *state = raw_state;
-    if (state != NULL) {
-        Py_DECREF(state->type);
-        PyMem_Free(state);
-    }
-}
-
-static PyObject *
-chain_from_iterator(PyTypeObject *type, PyObject *iterator)
-{
-    if (!PyIter_Check(iterator)) {
-        PyErr_Format(
-            PyExc_TypeError,
-            "iter() returned non-iterator of type '%.200s'",
-            Py_TYPE(iterator)->tp_name
-        );
-        return NULL;
-    }
-    AleffChainObject *chain = (AleffChainObject *)type->tp_alloc(type, 0);
-    if (chain == NULL) {
-        return NULL;
-    }
-    chain->source = Py_NewRef(iterator);
-    chain->active = NULL;
-    return (PyObject *)chain;
-}
-
-static PyObject *
-chain_constructor_resume(const void *raw_state, PyObject *value)
-{
-    if (value == NULL) {
-        return NULL;
-    }
-    const ChainConstructorState *state = raw_state;
-    return chain_from_iterator(state->type, value);
-}
-
-static const AleffAdapterVTable chain_constructor_vtable = {
-    .copy_state = chain_constructor_copy_state,
-    .free_state = chain_constructor_free_state,
-    .resume = chain_constructor_resume,
-};
-
-static PyObject *
-adapter_chain_from_iterable(PyObject *type_object, PyObject *iterable)
-{
-    ChainConstructorState state = {.type = (PyTypeObject *)type_object};
-    AleffAdapterFrame frame;
-    adapter_enter(&frame, &chain_constructor_vtable, &state);
-    PyObject *iterator = PyObject_GetIter(iterable);
-    PyObject *result = iterator == NULL
-        ? NULL
-        : chain_from_iterator(state.type, iterator);
-    Py_XDECREF(iterator);
     adapter_leave(&frame);
     return result;
 }
@@ -1794,7 +1819,9 @@ filter_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &filter_vtable, state);
+    if (adapter_enter(&frame, &filter_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = filter_continue(state, value, 1);
     adapter_leave(&frame);
     filter_free_state(state);
@@ -1812,276 +1839,12 @@ adapter_filter_next(PyObject *object)
         .phase = FILTER_WAIT_NEXT,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &filter_vtable, &state);
+    if (adapter_enter(&frame, &filter_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = filter_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_XDECREF(state.item);
-    return result;
-}
-
-typedef struct {
-    PyObject_HEAD
-    PyObject *total;
-    PyObject *iterator;
-    PyObject *binop;
-    PyObject *initial;
-    void *module_state;
-} AleffAccumulateObject;
-
-typedef enum {
-    ACCUMULATE_WAIT_NEXT,
-    ACCUMULATE_WAIT_BINOP,
-} AccumulatePhase;
-
-typedef struct {
-    PyObject *owner;
-    PyObject *iterator;
-    PyObject *binop;
-    PyObject *total;
-    PyObject *item;
-    AccumulatePhase phase;
-} AccumulateState;
-
-static void *
-accumulate_copy_state(const void *raw_state)
-{
-    const AccumulateState *state = raw_state;
-    AccumulateState *copy = PyMem_Malloc(sizeof(*copy));
-    if (copy == NULL) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    *copy = (AccumulateState){
-        .owner = Py_NewRef(state->owner),
-        .iterator = Py_NewRef(state->iterator),
-        .binop = Py_XNewRef(state->binop),
-        .total = Py_XNewRef(state->total),
-        .item = Py_XNewRef(state->item),
-        .phase = state->phase,
-    };
-    return copy;
-}
-
-static void
-accumulate_free_state(void *raw_state)
-{
-    AccumulateState *state = raw_state;
-    if (state == NULL) {
-        return;
-    }
-    Py_DECREF(state->owner);
-    Py_DECREF(state->iterator);
-    Py_XDECREF(state->binop);
-    Py_XDECREF(state->total);
-    Py_XDECREF(state->item);
-    PyMem_Free(state);
-}
-
-static int
-accumulate_store_total(AccumulateState *state, PyObject *value)
-{
-    Py_XSETREF(state->total, Py_NewRef(value));
-    AleffAccumulateObject *owner = (AleffAccumulateObject *)state->owner;
-    Py_XSETREF(owner->total, Py_NewRef(value));
-    return 0;
-}
-
-static PyObject *accumulate_resume(const void *raw_state, PyObject *value);
-
-static const AleffAdapterVTable accumulate_vtable = {
-    .copy_state = accumulate_copy_state,
-    .free_state = accumulate_free_state,
-    .resume = accumulate_resume,
-};
-
-static PyObject *
-accumulate_continue(AccumulateState *state, PyObject *resumed_value, int is_resumed)
-{
-    if (is_resumed) {
-        if (state->phase == ACCUMULATE_WAIT_NEXT) {
-            state->item = Py_NewRef(resumed_value);
-        }
-        else {
-            accumulate_store_total(state, resumed_value);
-            return Py_NewRef(resumed_value);
-        }
-    }
-
-    if (state->item == NULL) {
-        state->phase = ACCUMULATE_WAIT_NEXT;
-        state->item = Py_TYPE(state->iterator)->tp_iternext(state->iterator);
-        if (state->item == NULL) {
-            return NULL;
-        }
-    }
-    if (state->total == NULL) {
-        accumulate_store_total(state, state->item);
-        Py_CLEAR(state->item);
-        return Py_NewRef(state->total);
-    }
-
-    state->phase = ACCUMULATE_WAIT_BINOP;
-    PyObject *next_total = state->binop == NULL || state->binop == Py_None
-        ? PyNumber_Add(state->total, state->item)
-        : PyObject_CallFunctionObjArgs(
-            state->binop,
-            state->total,
-            state->item,
-            NULL
-        );
-    Py_CLEAR(state->item);
-    if (next_total == NULL) {
-        return NULL;
-    }
-    accumulate_store_total(state, next_total);
-    Py_DECREF(next_total);
-    return Py_NewRef(state->total);
-}
-
-static PyObject *
-accumulate_resume(const void *raw_state, PyObject *value)
-{
-    const AccumulateState *source = raw_state;
-    if (value == NULL) {
-        if (source->phase != ACCUMULATE_WAIT_NEXT) {
-            return NULL;
-        }
-        if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration)) {
-            return NULL;
-        }
-        if (PyErr_Occurred()) {
-            PyErr_Clear();
-        }
-        return NULL;
-    }
-    AccumulateState *state = accumulate_copy_state(raw_state);
-    if (state == NULL) {
-        return NULL;
-    }
-    AleffAccumulateObject *owner = (AleffAccumulateObject *)state->owner;
-    Py_XSETREF(owner->total, Py_XNewRef(state->total));
-    AleffAdapterFrame frame;
-    adapter_enter(&frame, &accumulate_vtable, state);
-    PyObject *result = accumulate_continue(state, value, 1);
-    adapter_leave(&frame);
-    accumulate_free_state(state);
-    return result;
-}
-
-static PyObject *
-adapter_accumulate_next(PyObject *object)
-{
-    AleffAccumulateObject *accumulate = (AleffAccumulateObject *)object;
-    if (accumulate->initial != NULL && accumulate->initial != Py_None) {
-        PyObject *result = accumulate->initial;
-        accumulate->initial = Py_NewRef(Py_None);
-        Py_XSETREF(accumulate->total, Py_NewRef(result));
-        return result;
-    }
-    AccumulateState state = {
-        .owner = object,
-        .iterator = accumulate->iterator,
-        .binop = accumulate->binop,
-        .total = Py_XNewRef(accumulate->total),
-        .item = NULL,
-        .phase = ACCUMULATE_WAIT_NEXT,
-    };
-    AleffAdapterFrame frame;
-    adapter_enter(&frame, &accumulate_vtable, &state);
-    PyObject *result = accumulate_continue(&state, NULL, 0);
-    adapter_leave(&frame);
-    Py_XDECREF(state.total);
-    Py_XDECREF(state.item);
-    return result;
-}
-
-typedef struct {
-    PyTypeObject *type;
-    PyObject *args;
-    PyObject *kwargs;
-} BatchedConstructorState;
-
-static newfunc original_batched_new;
-
-static void *
-batched_constructor_copy_state(const void *raw_state)
-{
-    const BatchedConstructorState *state = raw_state;
-    BatchedConstructorState *copy = PyMem_Malloc(sizeof(*copy));
-    if (copy == NULL) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    copy->type = (PyTypeObject *)Py_NewRef((PyObject *)state->type);
-    copy->args = Py_NewRef(state->args);
-    copy->kwargs = Py_XNewRef(state->kwargs);
-    return copy;
-}
-
-static void
-batched_constructor_free_state(void *raw_state)
-{
-    BatchedConstructorState *state = raw_state;
-    if (state == NULL) {
-        return;
-    }
-    Py_DECREF(state->type);
-    Py_DECREF(state->args);
-    Py_XDECREF(state->kwargs);
-    PyMem_Free(state);
-}
-
-static PyObject *
-batched_constructor_resume(const void *raw_state, PyObject *value)
-{
-    const BatchedConstructorState *state = raw_state;
-    if (value == NULL) {
-        return NULL;
-    }
-    Py_ssize_t argument_count = PyTuple_GET_SIZE(state->args);
-    if (argument_count < 1) {
-        PyErr_SetString(PyExc_RuntimeError, "batched constructor lost its iterable");
-        return NULL;
-    }
-    PyObject *replacement_args = PyTuple_New(argument_count);
-    if (replacement_args == NULL) {
-        return NULL;
-    }
-    PyTuple_SET_ITEM(replacement_args, 0, Py_NewRef(value));
-    for (Py_ssize_t i = 1; i < argument_count; i++) {
-        PyTuple_SET_ITEM(
-            replacement_args,
-            i,
-            Py_NewRef(PyTuple_GET_ITEM(state->args, i))
-        );
-    }
-    PyObject *result = original_batched_new(
-        state->type,
-        replacement_args,
-        state->kwargs
-    );
-    Py_DECREF(replacement_args);
-    return result;
-}
-
-static const AleffAdapterVTable batched_constructor_vtable = {
-    .copy_state = batched_constructor_copy_state,
-    .free_state = batched_constructor_free_state,
-    .resume = batched_constructor_resume,
-};
-
-static PyObject *
-adapter_batched_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
-{
-    BatchedConstructorState state = {
-        .type = type,
-        .args = args,
-        .kwargs = kwargs,
-    };
-    AleffAdapterFrame frame;
-    adapter_enter(&frame, &batched_constructor_vtable, &state);
-    PyObject *result = original_batched_new(type, args, kwargs);
-    adapter_leave(&frame);
     return result;
 }
 
@@ -2188,7 +1951,9 @@ truth_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &truth_vtable, state);
+    if (adapter_enter(&frame, &truth_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = truth_continue(state, value, 1);
     adapter_leave(&frame);
     truth_free_state(state);
@@ -2208,7 +1973,9 @@ adapter_truth(PyObject *iterable, int any_mode)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &truth_vtable, &state);
+    if (adapter_enter(&frame, &truth_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = truth_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_DECREF(state.iterator);
@@ -2227,3 +1994,5 @@ adapter_any(PyObject *Py_UNUSED(self), PyObject *iterable)
 {
     return adapter_truth(iterable, 1);
 }
+
+#include "itertools.c"

@@ -1,5 +1,6 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "api.h"
@@ -11,13 +12,20 @@
 #endif
 
 typedef struct AleffAdapterVTable AleffAdapterVTable;
+typedef struct AleffAdapterNode AleffAdapterNode;
 
 typedef struct AleffAdapterFrame {
-    struct AleffAdapterFrame *previous;
+    AleffAdapterNode *node;
+} AleffAdapterFrame;
+
+struct AleffAdapterNode {
+    _Atomic unsigned int references;
+    _Atomic int owner_alive;
+    AleffAdapterNode *previous;
     const AleffAdapterVTable *vtable;
     const void *state;
     PyFrameObject *outer_frame;
-} AleffAdapterFrame;
+};
 
 struct AleffAdapterVTable {
     void *(*copy_state)(const void *state);
@@ -38,28 +46,78 @@ struct AleffAdapterSnapshot {
     Py_ssize_t count;
 };
 
-static ALEFF_THREAD_LOCAL AleffAdapterFrame *active_adapter = NULL;
+static ALEFF_THREAD_LOCAL AleffAdapterNode *active_adapter = NULL;
 
 static PyObject *lookup_raw_special(PyObject *object, const char *name);
 
 static void
+adapter_node_retain(AleffAdapterNode *node)
+{
+    if (node != NULL) {
+        atomic_fetch_add_explicit(&node->references, 1, memory_order_relaxed);
+    }
+}
+
+static void
+adapter_node_release(AleffAdapterNode *node)
+{
+    while (node != NULL && atomic_fetch_sub_explicit(
+        &node->references,
+        1,
+        memory_order_acq_rel
+    ) == 1) {
+        AleffAdapterNode *previous = node->previous;
+        Py_XDECREF(node->outer_frame);
+        PyMem_Free(node);
+        node = previous;
+    }
+}
+
+static int
 adapter_enter(AleffAdapterFrame *frame, const AleffAdapterVTable *vtable, const void *state)
 {
-    frame->previous = active_adapter;
-    frame->vtable = vtable;
-    frame->state = state;
-    frame->outer_frame = PyEval_GetFrame();
-    Py_XINCREF(frame->outer_frame);
-    active_adapter = frame;
+    frame->node = NULL;
+    AleffAdapterNode *node = PyMem_Calloc(1, sizeof(*node));
+    if (node == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    atomic_init(&node->references, 1);
+    atomic_init(&node->owner_alive, 1);
+    node->previous = active_adapter;
+    node->vtable = vtable;
+    node->state = state;
+    node->outer_frame = PyEval_GetFrame();
+    Py_XINCREF(node->outer_frame);
+
+    adapter_node_retain(node->previous);
+    adapter_node_retain(node);
+    AleffAdapterNode *previous = active_adapter;
+    active_adapter = node;
+    adapter_node_release(previous);
+    frame->node = node;
+    return 0;
 }
 
 static void
 adapter_leave(AleffAdapterFrame *frame)
 {
-    if (active_adapter == frame) {
-        active_adapter = frame->previous;
+    AleffAdapterNode *node = frame->node;
+    frame->node = NULL;
+    if (node == NULL) {
+        return;
     }
-    Py_CLEAR(frame->outer_frame);
+    if (atomic_exchange_explicit(&node->owner_alive, 0, memory_order_acq_rel) == 0) {
+        return;
+    }
+    node->state = NULL;
+    if (active_adapter == node) {
+        AleffAdapterNode *previous = node->previous;
+        adapter_node_retain(previous);
+        active_adapter = previous;
+        adapter_node_release(node);
+    }
+    adapter_node_release(node);
 }
 
 static int
@@ -86,8 +144,12 @@ AleffAdapterSnapshot *
 aleff_adapter_snapshot_capture(PyFrameObject *start_frame, int depth)
 {
     Py_ssize_t count = 0;
-    for (AleffAdapterFrame *frame = active_adapter; frame != NULL; frame = frame->previous) {
-        if (outer_frame_index(start_frame, depth, frame->outer_frame) >= 0) {
+    for (AleffAdapterNode *node = active_adapter; node != NULL; node = node->previous) {
+        if (!atomic_load_explicit(&node->owner_alive, memory_order_acquire)) {
+            PyErr_SetString(PyExc_RuntimeError, "adapter owner is no longer alive");
+            return NULL;
+        }
+        if (outer_frame_index(start_frame, depth, node->outer_frame) >= 0) {
             count++;
         }
     }
@@ -109,16 +171,16 @@ aleff_adapter_snapshot_capture(PyFrameObject *start_frame, int depth)
     }
 
     Py_ssize_t item_index = 0;
-    for (AleffAdapterFrame *frame = active_adapter; frame != NULL; frame = frame->previous) {
-        int index = outer_frame_index(start_frame, depth, frame->outer_frame);
+    for (AleffAdapterNode *node = active_adapter; node != NULL; node = node->previous) {
+        int index = outer_frame_index(start_frame, depth, node->outer_frame);
         if (index < 0) {
             continue;
         }
         AleffAdapterSnapshotItem *item = &snapshot->items[item_index];
-        item->vtable = frame->vtable;
+        item->vtable = node->vtable;
         item->outer_frame_index = index;
         item->prepared = 0;
-        item->state = frame->vtable->copy_state(frame->state);
+        item->state = node->vtable->copy_state(node->state);
         if (item->state == NULL && PyErr_Occurred()) {
             snapshot->count = item_index;
             aleff_adapter_snapshot_free(snapshot);
@@ -180,7 +242,9 @@ adapter_snapshot_clone(const AleffAdapterSnapshot *source)
 
 typedef struct {
     AleffAdapterSnapshot *snapshot;
-    AleffAdapterFrame *live_head;
+    AleffAdapterNode *live_head;
+    PyThreadState *owner_thread;
+    PyFrameObject *owner_frame;
     int restored;
 } AleffAdapterToken;
 
@@ -195,6 +259,8 @@ adapter_token_destructor(PyObject *capsule)
         return;
     }
     aleff_adapter_snapshot_free(token->snapshot);
+    adapter_node_release(token->live_head);
+    Py_XDECREF(token->owner_frame);
     PyMem_Free(token);
 }
 
@@ -207,25 +273,34 @@ aleff_adapter_suspend(void)
         return NULL;
     }
     AleffAdapterSnapshot *snapshot = aleff_adapter_snapshot_capture(frame, -1);
-    Py_DECREF(frame);
     if (snapshot == NULL) {
+        Py_DECREF(frame);
         return NULL;
     }
-    AleffAdapterToken *token = PyMem_Malloc(sizeof(*token));
+    AleffAdapterToken *token = PyMem_Calloc(1, sizeof(*token));
     if (token == NULL) {
         aleff_adapter_snapshot_free(snapshot);
+        Py_DECREF(frame);
         PyErr_NoMemory();
         return NULL;
     }
     token->snapshot = snapshot;
     token->live_head = active_adapter;
+    token->owner_thread = PyThreadState_Get();
+    token->owner_frame = frame;
     token->restored = 0;
+    adapter_node_retain(token->live_head);
+    adapter_node_release(active_adapter);
     active_adapter = NULL;
 
     PyObject *capsule = PyCapsule_New(token, adapter_token_name, adapter_token_destructor);
     if (capsule == NULL) {
         active_adapter = token->live_head;
+        adapter_node_retain(active_adapter);
+        adapter_node_release(token->live_head);
+        token->live_head = NULL;
         aleff_adapter_snapshot_free(snapshot);
+        Py_DECREF(token->owner_frame);
         PyMem_Free(token);
         return NULL;
     }
@@ -239,10 +314,45 @@ aleff_adapter_restore(PyObject *capsule)
     if (token == NULL) {
         return NULL;
     }
-    if (!token->restored) {
-        active_adapter = token->live_head;
-        token->restored = 1;
+    if (token->restored) {
+        PyErr_SetString(PyExc_RuntimeError, "adapter token is already restored");
+        return NULL;
     }
+    if (token->owner_thread != PyThreadState_Get()) {
+        PyErr_SetString(PyExc_RuntimeError, "adapter token belongs to another thread");
+        return NULL;
+    }
+    PyFrameObject *current_frame = PyThreadState_GetFrame(PyThreadState_Get());
+    int same_owner = current_frame == token->owner_frame;
+    Py_XDECREF(current_frame);
+    if (!same_owner) {
+        PyErr_SetString(PyExc_RuntimeError, "adapter token belongs to another owner");
+        return NULL;
+    }
+    if (active_adapter != NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "another adapter owner is active");
+        return NULL;
+    }
+    for (AleffAdapterNode *node = token->live_head; node != NULL; node = node->previous) {
+        if (!atomic_load_explicit(&node->owner_alive, memory_order_acquire)) {
+            PyErr_SetString(PyExc_RuntimeError, "adapter token owner is no longer alive");
+            return NULL;
+        }
+    }
+
+    /* The owner checks above are the last operation that needs the strong
+     * frame reference.  Release it before publishing the restored token so
+     * the token capsule cannot retain this frame through its own local
+     * ``token`` variable.  Failed restores return before this point and can
+     * therefore be retried by the original owner. */
+    token->restored = 1;
+    Py_CLEAR(token->owner_frame);
+
+    AleffAdapterNode *head = token->live_head;
+    adapter_node_retain(head);
+    active_adapter = head;
+    token->live_head = NULL;
+    adapter_node_release(head);
     Py_RETURN_NONE;
 }
 
@@ -306,4 +416,6 @@ aleff_adapter_resume_before_frame(
 #include "iterators.c"
 #include "builtins.c"
 #include "containers.c"
+#include "operator.c"
+#include "functools.c"
 #include "adapters_bootstrap.c"

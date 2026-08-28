@@ -11,8 +11,10 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 TARGET = _aleff$(EXT_SUFFIX)
-ADAPTER_SRC = adapters/framework.c adapters/iterators.c adapters/builtins.c \
-	adapters/containers.c adapters/adapters_bootstrap.c adapters/api.h
+ADAPTER_SRC = adapters/framework.c adapters/iterators.c adapters/itertools.c \
+	adapters/builtins.c adapters/protocols.c adapters/containers.c adapters/mappings.c \
+	adapters/sets.c adapters/text.c adapters/operator.c adapters/functools.c \
+	adapters/adapters_bootstrap.c adapters/api.h
 SRC = _aleff.c adapters/framework.c
 
 .PHONY: build debug clean

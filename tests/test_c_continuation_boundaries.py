@@ -2169,33 +2169,824 @@ def _functools_reduce_pending_suffix() -> None:
     _assert_equal(_resume_outcomes(run), _returns(5, 14))
 
 
-def _operator_accessor_case(accessor_name: str) -> None:
-    def run(choose: Choose) -> Any:
-        class Target:
+@_case("normal", "operator_attrgetter_dotted_multiple_pending_suffix")
+def _operator_attrgetter_dotted_multiple_pending_suffix() -> None:
+    def run(choose: Choose) -> tuple[int, str]:
+        class Nested:
             def __getattribute__(self, name: str) -> Any:
                 if name == "value":
                     return cast(int, choose()) + 100
                 return object.__getattribute__(self, name)
 
-            def __getitem__(self, key: str) -> int:
-                assert key == "value"
-                return cast(int, choose()) + 100
+        class Target:
+            nested = Nested()
+            label = "tail"
 
-            def method(self, offset: int) -> int:
-                return cast(int, choose()) + offset
+        result = operator.attrgetter("nested.value", "label")(Target())
+        assert type(result) is tuple
+        assert type(result[0]) is int
+        assert type(result[1]) is str
+        return result
 
-        accessor = {
-            "attrgetter": operator.attrgetter("value"),
-            "itemgetter": operator.itemgetter("value"),
-            "methodcaller": operator.methodcaller("method", 100),
-        }[accessor_name]
-        return accessor(Target())
+    _assert_equal(_resume_outcomes(run), _returns((101, "tail"), (110, "tail")))
+
+
+@_case("error", "operator_attrgetter_error_isolated_after_dotted_prefix")
+def _operator_attrgetter_error_isolated_after_dotted_prefix() -> None:
+    def run(choose: Choose) -> tuple[int, str]:
+        class Nested:
+            def __getattribute__(self, name: str) -> Any:
+                if name == "value":
+                    selected = cast(int, choose())
+                    if selected == 0:
+                        raise ValueError("selected failure")
+                    return selected
+                return object.__getattribute__(self, name)
+
+        class Target:
+            nested = Nested()
+            label = "tail"
+
+        return operator.attrgetter("nested.value", "label")(Target())
+
+    _assert_equal(
+        _resume_outcomes(run, (0, 10)),
+        [("raise", "ValueError"), ("return", (10, "tail"))],
+    )
+
+
+@_case("corner", "operator_attrgetter_constructor_and_single_result")
+def _operator_attrgetter_constructor_and_single_result() -> None:
+    with pytest.raises(TypeError):
+        operator.attrgetter()
+    getter = operator.attrgetter("value")
+    result = getter(type("Target", (), {"value": 3})())
+    assert type(result) is int
+    assert result == 3
+
+
+@_case("normal", "operator_itemgetter_multiple_pending_suffix")
+def _operator_itemgetter_multiple_pending_suffix() -> None:
+    def run(choose: Choose) -> tuple[int, str]:
+        class Target:
+            def __getitem__(self, key: str) -> Any:
+                if key == "first":
+                    return cast(int, choose()) + 100
+                if key == "second":
+                    return "tail"
+                raise AssertionError(key)
+
+        result = operator.itemgetter("first", "second")(Target())
+        assert type(result) is tuple
+        assert type(result[0]) is int
+        assert type(result[1]) is str
+        return result
+
+    _assert_equal(_resume_outcomes(run), _returns((101, "tail"), (110, "tail")))
+
+
+@_case("error", "operator_itemgetter_error_isolated_after_first_item")
+def _operator_itemgetter_error_isolated_after_first_item() -> None:
+    def run(choose: Choose) -> tuple[int, str]:
+        class Target:
+            def __getitem__(self, key: str) -> Any:
+                if key == "first":
+                    selected = cast(int, choose())
+                    if selected == 0:
+                        raise ValueError("selected failure")
+                    return selected
+                if key == "second":
+                    return "tail"
+                raise AssertionError(key)
+
+        return operator.itemgetter("first", "second")(Target())
+
+    _assert_equal(
+        _resume_outcomes(run, (0, 10)),
+        [("raise", "ValueError"), ("return", (10, "tail"))],
+    )
+
+
+@_case("corner", "operator_itemgetter_constructor_and_single_result")
+def _operator_itemgetter_constructor_and_single_result() -> None:
+    with pytest.raises(TypeError):
+        operator.itemgetter()
+    getter = operator.itemgetter(0)
+    result = getter((3,))
+    assert type(result) is int
+    assert result == 3
+
+
+@_case("normal", "operator_methodcaller_args_kwargs_and_result")
+def _operator_methodcaller_args_kwargs_and_result() -> None:
+    def run(choose: Choose) -> tuple[str, int, tuple[Any, ...], dict[str, Any]]:
+        class Target:
+            def method(self, *args: Any, **kwargs: Any) -> tuple[str, int, tuple[Any, ...], dict[str, Any]]:
+                assert args == (5, "suffix")
+                assert kwargs == {"flag": True, "offset": 2}
+                selected = cast(int, choose())
+                return ("ok", selected + 100, args, kwargs)
+
+        caller = operator.methodcaller(
+            "method",
+            5,
+            "suffix",
+            flag=True,
+            offset=2,
+        )
+        result = caller(Target())
+        assert type(result) is tuple
+        assert type(result[0]) is str
+        assert type(result[1]) is int
+        assert type(result[2]) is tuple
+        assert type(result[3]) is dict
+        return result
+
+    _assert_equal(
+        _resume_outcomes(run),
+        _returns(
+            ("ok", 101, (5, "suffix"), {"flag": True, "offset": 2}),
+            ("ok", 110, (5, "suffix"), {"flag": True, "offset": 2}),
+        ),
+    )
+
+
+@_case("error", "operator_methodcaller_error_isolated_after_call")
+def _operator_methodcaller_error_isolated_after_call() -> None:
+    def run(choose: Choose) -> int:
+        class Target:
+            def method(self, value: int, *, flag: bool) -> int:
+                assert value == 5
+                assert flag is True
+                selected = cast(int, choose())
+                if selected == 0:
+                    raise ValueError("selected failure")
+                return selected
+
+        return operator.methodcaller("method", 5, flag=True)(Target())
+
+    _assert_equal(
+        _resume_outcomes(run, (0, 10)),
+        [("raise", "ValueError"), ("return", 10)],
+    )
+
+
+@_case("corner", "operator_methodcaller_constructor_validation")
+def _operator_methodcaller_constructor_validation() -> None:
+    with pytest.raises(TypeError):
+        operator.methodcaller()
+    with pytest.raises(TypeError):
+        operator.methodcaller(3)
+
+
+@_case("normal", "functools_partial_call_pending_suffix")
+def _functools_partial_call_pending_suffix() -> None:
+    def run(choose: Choose) -> int:
+        def callback(prefix: int, *, offset: int) -> int:
+            return prefix + cast(int, choose()) + offset
+
+        operation = functools.partial(callback, 100, offset=10)
+        return operation() + 1000
+
+    _assert_equal(_resume_outcomes(run), _returns(1111, 1120))
+
+
+@_case("error", "functools_partial_call_exception_isolated_per_shot")
+def _functools_partial_call_exception_isolated_per_shot() -> None:
+    class ExpectedPartialError(Exception):
+        pass
+
+    def run(choose: Choose) -> int:
+        def callback() -> int:
+            value = choose()
+            if value == "raise":
+                raise ExpectedPartialError
+            return cast(int, value)
+
+        return functools.partial(callback)() + 100
+
+    _assert_equal(
+        _resume_outcomes(run, ("raise", 10)),
+        [("raise", "ExpectedPartialError"), ("return", 110)],
+    )
+
+
+@_case("corner", "functools_nested_partial_args_and_keywords")
+def _functools_nested_partial_args_and_keywords() -> None:
+    def run(choose: Choose) -> tuple[int, int, int]:
+        def callback(first: int, second: int, *, third: int) -> tuple[int, int, int]:
+            return first, second + cast(int, choose()), third
+
+        inner = functools.partial(callback, 100)
+        outer = functools.partial(inner, third=1000)
+        return outer(10)
+
+    _assert_equal(
+        _resume_outcomes(run),
+        _returns((100, 11, 1000), (100, 20, 1000)),
+    )
+
+
+if sys.version_info >= (3, 14) and hasattr(functools, "Placeholder"):
+    _Placeholder = functools.Placeholder
+
+    @_case("normal", "functools_partial_placeholder_positions")
+    def _functools_partial_placeholder_positions() -> None:
+        def callback(*args: object) -> tuple[object, ...]:
+            result = tuple(args)
+            assert type(result) is tuple
+            return result
+
+        leading = functools.partial(callback, _Placeholder, 2)(1)
+        middle = functools.partial(callback, 1, _Placeholder, 3)(2)
+        multiple = functools.partial(callback, _Placeholder, 2, _Placeholder, 4)(1, 3)
+        assert type(leading) is tuple
+        assert type(middle) is tuple
+        assert type(multiple) is tuple
+        _assert_equal(leading, (1, 2))
+        _assert_equal(middle, (1, 2, 3))
+        _assert_equal(multiple, (1, 2, 3, 4))
+
+    @_case("normal", "functools_partial_placeholder_nested_retention_and_fill")
+    def _functools_partial_placeholder_nested_retention_and_fill() -> None:
+        remove = functools.partial(str.replace, _Placeholder, _Placeholder, "")
+        remove_dear = functools.partial(remove, _Placeholder, " dear")
+        remove_first_dear = functools.partial(remove_dear, _Placeholder, 1)
+
+        retained = remove_dear("Hello, dear dear world!")
+        filled = functools.partial(remove, "Hello, dear dear world!", " dear")()
+        first = remove_first_dear("Hello, dear dear world!")
+        assert type(retained) is str
+        assert type(filled) is str
+        assert type(first) is str
+        _assert_equal(retained, "Hello, world!")
+        _assert_equal(filled, "Hello, world!")
+        _assert_equal(first, "Hello, dear world!")
+
+    @_case("normal", "functools_partial_placeholder_effectful_callback_pending_suffix")
+    def _functools_partial_placeholder_effectful_callback_pending_suffix() -> None:
+        def run(choose: Choose) -> tuple[int, int, int, int, int, str]:
+            def callback(
+                first: int,
+                second: int,
+                third: int,
+                fourth: int,
+            ) -> tuple[int, int, int, int, int]:
+                selected = cast(int, choose())
+                return first, selected, second, third, fourth
+
+            result = functools.partial(callback, _Placeholder, 20, _Placeholder, 30)(1, 3)
+            return (*result, "suffix")
+
+        outcomes = _resume_outcomes(run)
+        assert all(tag == "return" and type(value) is tuple for tag, value in outcomes)
+        _assert_equal(
+            outcomes,
+            _returns(
+                (1, 1, 20, 3, 30, "suffix"),
+                (1, 10, 20, 3, 30, "suffix"),
+            ),
+        )
+
+    @_case("error", "functools_partial_placeholder_callback_error_isolation")
+    def _functools_partial_placeholder_callback_error_isolation() -> None:
+        class ExpectedPlaceholderError(Exception):
+            pass
+
+        def run(choose: Choose) -> tuple[int, object, int, int, int]:
+            def callback(
+                first: int,
+                second: int,
+                third: int,
+                fourth: int,
+            ) -> tuple[int, object, int, int, int]:
+                selected = choose()
+                if selected == "raise":
+                    raise ExpectedPlaceholderError
+                return first, selected, second, third, fourth
+
+            return functools.partial(callback, _Placeholder, 20, _Placeholder, 30)(1, 3)
+
+        _assert_equal(
+            _resume_outcomes(run, ("raise", 10)),
+            [
+                ("raise", "ExpectedPlaceholderError"),
+                ("return", (1, 10, 20, 3, 30)),
+            ],
+        )
+
+    @_case("error", "functools_partial_placeholder_insufficient_arguments")
+    def _functools_partial_placeholder_insufficient_arguments() -> None:
+        def callback(*args: object) -> tuple[object, ...]:
+            return tuple(args)
+
+        operation = functools.partial(callback, _Placeholder, 2, _Placeholder, 4)
+        with pytest.raises(TypeError, match="missing positional arguments"):
+            operation(1)
+
+    @_case("corner", "functools_partial_placeholder_validation_and_type")
+    def _functools_partial_placeholder_validation_and_type() -> None:
+        def callback(*args: object) -> tuple[object, ...]:
+            return tuple(args)
+
+        with pytest.raises(TypeError, match="trailing Placeholders are not allowed"):
+            functools.partial(callback, _Placeholder)
+        with pytest.raises(TypeError, match="Placeholder cannot be passed as a keyword argument"):
+            functools.partial(callback, value=_Placeholder)
+
+        assert _Placeholder is type(_Placeholder)()
+        assert type(_Placeholder).__name__ == "_PlaceholderType"
+        assert type(functools.partial(callback, 1)).__name__ == "partial"
+
+
+def _cmp_to_key_case(operation: str) -> None:
+    comparisons = {
+        "lt": operator.lt,
+        "le": operator.le,
+        "eq": operator.eq,
+        "ne": operator.ne,
+        "gt": operator.gt,
+        "ge": operator.ge,
+    }
+
+    def run(choose: Choose) -> bool:
+        def compare(_left: int, _right: int) -> int:
+            return cast(int, choose())
+
+        key = functools.cmp_to_key(compare)
+        return cast(bool, comparisons[operation](key(1), key(2)))
+
+    expected = {
+        "lt": (True, False),
+        "le": (True, False),
+        "eq": (False, True),
+        "ne": (True, False),
+        "gt": (False, True),
+        "ge": (False, True),
+    }[operation]
+    values = {
+        "lt": (-1, 1),
+        "le": (0, 1),
+        "eq": (1, 0),
+        "ne": (1, 0),
+        "gt": (-1, 1),
+        "ge": (-1, 0),
+    }[operation]
+    outcomes = _resume_outcomes(run, values)
+    _assert_equal(outcomes, _returns(*expected))
+    assert all(tag == "return" and type(value) is bool for tag, value in outcomes), outcomes
+
+
+for _name in ("lt", "le", "eq", "ne", "gt", "ge"):
+    _case("normal", f"functools_cmp_to_key_{_name}")(
+        functools.partial(_cmp_to_key_case, _name)
+    )
+
+
+@_case("error", "functools_cmp_to_key_invalid_result_isolated_per_shot")
+def _functools_cmp_to_key_invalid_result_isolated_per_shot() -> None:
+    def run(choose: Choose) -> bool:
+        def compare(_left: int, _right: int) -> Any:
+            return choose()
+
+        key = functools.cmp_to_key(compare)
+        return key(1) < key(2)
+
+    outcomes = _resume_outcomes(run, ("invalid", -1))
+    _assert_equal(
+        outcomes,
+        [("raise", "TypeError"), ("return", True)],
+    )
+    assert type(outcomes[1][1]) is bool, outcomes
+
+
+@_case("normal", "functools_lru_cache_wrapper_call_pending_suffix")
+def _functools_lru_cache_wrapper_call_pending_suffix() -> None:
+    def run(choose: Choose) -> int:
+        @functools.lru_cache(maxsize=4)
+        def cached(_key: int) -> int:
+            return cast(int, choose()) + 100
+
+        return cached(1) + 1000
+
+    _assert_equal(_resume_outcomes(run), _returns(1101, 1110))
+
+
+@_case("error", "functools_lru_cache_exception_isolated_per_shot")
+def _functools_lru_cache_exception_isolated_per_shot() -> None:
+    class ExpectedCacheError(Exception):
+        pass
+
+    def run(choose: Choose) -> int:
+        @functools.lru_cache(maxsize=None, typed=True)
+        def cached(*, key: int) -> int:
+            value = choose()
+            if value == "raise":
+                raise ExpectedCacheError
+            return cast(int, value)
+
+        return cached(key=1) + 100
+
+    _assert_equal(
+        _resume_outcomes(run, ("raise", 10)),
+        [("raise", "ExpectedCacheError"), ("return", 110)],
+    )
+
+
+@_case("corner", "functools_lru_cache_each_shot_updates_cache")
+def _functools_lru_cache_each_shot_updates_cache() -> None:
+    def run(choose: Choose) -> tuple[int, int]:
+        @functools.lru_cache(maxsize=1)
+        def cached(_key: int) -> int:
+            return cast(int, choose())
+
+        first = cached(1)
+        return first, cached(1)
+
+    outcomes = _resume_outcomes(run)
+    _assert_equal(outcomes, _returns((1, 1), (10, 10)))
+    assert all(
+        tag == "return"
+        and type(value) is tuple
+        and all(type(item) is int for item in value)
+        for tag, value in outcomes
+    ), outcomes
+
+
+@_case("normal", "functools_lru_cache_cache_info_tracks_continuation_hits")
+def _functools_lru_cache_cache_info_tracks_continuation_hits() -> None:
+    def run(choose: Choose) -> tuple[int, int, int, Any]:
+        calls = 0
+
+        @functools.lru_cache(maxsize=2)
+        def cached(_key: int) -> int:
+            nonlocal calls
+            calls += 1
+            return cast(int, choose()) + 100
+
+        first = cached(1)
+        second = cached(1)
+        return first, second, calls, cached.cache_info()
+
+    outcomes = _resume_outcomes(run)
+    expected_info = functools._CacheInfo(hits=1, misses=1, maxsize=2, currsize=1)
+    _assert_equal(
+        outcomes,
+        _returns((101, 101, 1, expected_info), (110, 110, 1, expected_info)),
+    )
+
+
+@_case("error", "functools_lru_cache_exception_does_not_pollute_stats")
+def _functools_lru_cache_exception_does_not_pollute_stats() -> None:
+    class ExpectedCacheError(Exception):
+        pass
+
+    def run(choose: Choose) -> tuple[int, int, int, Any]:
+        calls = 0
+
+        @functools.lru_cache(maxsize=2)
+        def cached(_key: int) -> int:
+            nonlocal calls
+            calls += 1
+            value = choose()
+            if value == "raise":
+                raise ExpectedCacheError
+            return cast(int, value)
+
+        first = cached(1)
+        second = cached(1)
+        return first, second, calls, cached.cache_info()
+
+    expected_info = functools._CacheInfo(hits=1, misses=1, maxsize=2, currsize=1)
+    _assert_equal(
+        _resume_outcomes(run, ("raise", 7)),
+        [("raise", "ExpectedCacheError"), ("return", (7, 7, 1, expected_info))],
+    )
+
+
+@_case("corner", "functools_lru_cache_preserves_lru_recency_on_continuation")
+def _functools_lru_cache_preserves_lru_recency_on_continuation() -> None:
+    def run(choose: Choose) -> tuple[tuple[int, ...], tuple[int, ...], Any]:
+        calls: list[int] = []
+
+        @functools.lru_cache(maxsize=2)
+        def cached(key: int) -> int:
+            calls.append(key)
+            if key == 1:
+                return cast(int, choose())
+            return key * 10
+
+        first = cached(1)
+        first_again = cached(1)
+        cached(2)
+        first_after_other = cached(1)
+        cached(3)
+        second_after_eviction = cached(2)
+        return (
+            (first, first_again, first_after_other, second_after_eviction),
+            tuple(calls),
+            cached.cache_info(),
+        )
+
+    expected_info = functools._CacheInfo(hits=2, misses=4, maxsize=2, currsize=2)
+    _assert_equal(
+        _resume_outcomes(run),
+        _returns(
+            ((1, 1, 1, 20), (1, 2, 3, 2), expected_info),
+            ((10, 10, 10, 20), (1, 2, 3, 2, 2, 3, 2), expected_info),
+        ),
+    )
+
+
+@_case("corner", "functools_lru_cache_typed_false_separates_int_and_bool")
+def _functools_lru_cache_typed_false_separates_int_and_bool() -> None:
+    def run(choose: Choose) -> tuple[int, int, str, tuple[tuple[Any, type], ...], Any]:
+        calls: list[tuple[Any, type]] = []
+
+        @functools.lru_cache(maxsize=None, typed=False)
+        def cached(value: int | bool) -> int | str:
+            calls.append((value, type(value)))
+            if type(value) is int:
+                return cast(int, choose())
+            return str(value)
+
+        integer = cast(int, cached(1))
+        integer_again = cast(int, cached(1))
+        boolean = cast(str, cached(True))
+        return integer, integer_again, boolean, tuple(calls), cached.cache_info()
+
+    expected_info = functools._CacheInfo(hits=1, misses=2, maxsize=None, currsize=2)
+    _assert_equal(
+        _resume_outcomes(run),
+        _returns(
+            (1, 1, "True", ((1, int), (True, bool)), expected_info),
+            (
+                10,
+                10,
+                "True",
+                ((1, int), (True, bool), (True, bool)),
+                expected_info,
+            ),
+        ),
+    )
+
+
+@_case("normal", "functools_lru_cache_continuation_preserves_public_wrapper_attributes")
+def _functools_lru_cache_continuation_preserves_public_wrapper_attributes() -> None:
+    def run(choose: Choose) -> tuple[int, str, str, str, Any, Any]:
+        def implementation(_key: int) -> int:
+            """Original cached implementation."""
+            return cast(int, choose())
+
+        cached = functools.lru_cache(maxsize=2, typed=True)(implementation)
+        result = cached(1)
+        return (
+            result,
+            cached.__name__,
+            cached.__doc__,
+            cached.__wrapped__.__name__,
+            cached.cache_parameters(),
+            cached.cache_info(),
+        )
+
+    expected_info = functools._CacheInfo(hits=0, misses=1, maxsize=2, currsize=1)
+    _assert_equal(
+        _resume_outcomes(run),
+        _returns(
+            (1, "implementation", "Original cached implementation.", "implementation", {"maxsize": 2, "typed": True}, expected_info),
+            (10, "implementation", "Original cached implementation.", "implementation", {"maxsize": 2, "typed": True}, expected_info),
+        ),
+    )
+
+
+_OPERATOR_PROTOCOL_CASES: dict[str, tuple[str, Callable[..., Any], tuple[Any, ...]]] = {
+    "abs": ("__abs__", operator.abs, ()),
+    "add": ("__add__", operator.add, (2,)),
+    "and_": ("__and__", operator.and_, (2,)),
+    "call": ("__call__", operator.call, ()),
+    "eq": ("__eq__", operator.eq, (2,)),
+    "floordiv": ("__floordiv__", operator.floordiv, (2,)),
+    "ge": ("__ge__", operator.ge, (2,)),
+    "getitem": ("__getitem__", operator.getitem, ("key",)),
+    "gt": ("__gt__", operator.gt, (2,)),
+    "iadd": ("__iadd__", operator.iadd, (2,)),
+    "iand": ("__iand__", operator.iand, (2,)),
+    "ifloordiv": ("__ifloordiv__", operator.ifloordiv, (2,)),
+    "ilshift": ("__ilshift__", operator.ilshift, (2,)),
+    "imatmul": ("__imatmul__", operator.imatmul, (2,)),
+    "imod": ("__imod__", operator.imod, (2,)),
+    "imul": ("__imul__", operator.imul, (2,)),
+    "index": ("__index__", operator.index, ()),
+    "inv": ("__invert__", operator.inv, ()),
+    "invert": ("__invert__", operator.invert, ()),
+    "ior": ("__ior__", operator.ior, (2,)),
+    "ipow": ("__ipow__", operator.ipow, (2,)),
+    "irshift": ("__irshift__", operator.irshift, (2,)),
+    "isub": ("__isub__", operator.isub, (2,)),
+    "itruediv": ("__itruediv__", operator.itruediv, (2,)),
+    "ixor": ("__ixor__", operator.ixor, (2,)),
+    "le": ("__le__", operator.le, (2,)),
+    "lshift": ("__lshift__", operator.lshift, (2,)),
+    "lt": ("__lt__", operator.lt, (2,)),
+    "matmul": ("__matmul__", operator.matmul, (2,)),
+    "mod": ("__mod__", operator.mod, (2,)),
+    "mul": ("__mul__", operator.mul, (2,)),
+    "ne": ("__ne__", operator.ne, (2,)),
+    "neg": ("__neg__", operator.neg, ()),
+    "or_": ("__or__", operator.or_, (2,)),
+    "pos": ("__pos__", operator.pos, ()),
+    "pow": ("__pow__", operator.pow, (2,)),
+    "rshift": ("__rshift__", operator.rshift, (2,)),
+    "sub": ("__sub__", operator.sub, (2,)),
+    "truediv": ("__truediv__", operator.truediv, (2,)),
+    "xor": ("__xor__", operator.xor, (2,)),
+}
+
+
+def _operator_protocol_case(name: str) -> None:
+    method_name, operation, arguments = _OPERATOR_PROTOCOL_CASES[name]
+
+    def run(choose: Choose) -> int:
+        def protocol(_self: Any, *_args: Any) -> int:
+            return cast(int, choose())
+
+        namespace: dict[str, Any] = {method_name: protocol}
+        target = type("EffectfulOperatorTarget", (), namespace)()
+        if len(arguments) == 0:
+            result = operation(target)
+        elif len(arguments) == 1:
+            result = operation(target, arguments[0])
+        else:
+            result = operation(target, arguments[0], arguments[1])
+        return cast(int, result) + 100
 
     _assert_equal(_resume_outcomes(run), _returns(101, 110))
 
 
-for _name in ("attrgetter", "itemgetter", "methodcaller"):
-    _case("normal", f"operator_{_name}")(functools.partial(_operator_accessor_case, _name))
+@_case("error", "operator_concat_requires_sequence")
+def _operator_concat_requires_sequence() -> None:
+    class Target:
+        def __add__(self, _other: Any) -> int:
+            return 1
+
+        def __getitem__(self, _index: Any) -> int:
+            return 0
+
+    for operation in (operator.concat, operator.iconcat):
+        with pytest.raises(TypeError, match="can't be concatenated"):
+            operation(Target(), 2)
+
+
+for _name in _OPERATOR_PROTOCOL_CASES:
+    _case("normal", f"operator_public_{_name}")(
+        functools.partial(_operator_protocol_case, _name)
+    )
+
+
+def _operator_truth_case(name: str) -> None:
+    operation = {"truth": operator.truth, "not_": operator.not_}[name]
+
+    def run(choose: Choose) -> bool:
+        class Target:
+            def __bool__(self) -> bool:
+                return cast(bool, choose())
+
+        return cast(bool, operation(Target()))
+
+    expected = (False, True) if name == "truth" else (True, False)
+    outcomes = _resume_outcomes(run, (False, True))
+    _assert_equal(outcomes, _returns(*expected))
+    assert all(tag == "return" and type(value) is bool for tag, value in outcomes), outcomes
+
+
+for _name in ("truth", "not_"):
+    _case("normal", f"operator_public_{_name}")(
+        functools.partial(_operator_truth_case, _name)
+    )
+
+
+@_case("normal", "operator_public_length_hint")
+def _operator_public_length_hint() -> None:
+    def run(choose: Choose) -> int:
+        class Target:
+            def __length_hint__(self) -> int:
+                return cast(int, choose())
+
+        return operator.length_hint(Target()) + 100
+
+    _assert_equal(_resume_outcomes(run), _returns(101, 110))
+
+
+@_case("error", "operator_index_invalid_result_isolated_per_shot")
+def _operator_index_invalid_result_isolated_per_shot() -> None:
+    def run(choose: Choose) -> int:
+        class Target:
+            def __index__(self) -> Any:
+                return choose()
+
+        return operator.index(Target()) + 100
+
+    _assert_equal(
+        _resume_outcomes(run, ("invalid", 10)),
+        [("raise", "TypeError"), ("return", 110)],
+    )
+
+
+@_case("error", "operator_index_of_failure_isolated_per_shot")
+def _operator_index_of_failure_isolated_per_shot() -> None:
+    def run(choose: Choose) -> int:
+        class Candidate:
+            def __eq__(self, _other: Any) -> bool:
+                return cast(bool, choose())
+
+        return operator.indexOf([Candidate()], object())
+
+    outcomes = _resume_outcomes(run, (False, True))
+    _assert_equal(
+        outcomes,
+        [("raise", "ValueError"), ("return", 0)],
+    )
+    assert type(outcomes[1][1]) is int, outcomes
+
+
+@_case("normal", "operator_count_of_pending_suffix")
+def _operator_count_of_pending_suffix() -> None:
+    def run(choose: Choose) -> int:
+        class Candidate:
+            def __eq__(self, _other: Any) -> bool:
+                return cast(bool, choose())
+
+        return operator.countOf([Candidate()], object()) + 100
+
+    outcomes = _resume_outcomes(run, (False, True))
+    _assert_equal(outcomes, _returns(100, 101))
+    assert all(tag == "return" and type(value) is int for tag, value in outcomes), outcomes
+
+
+@_case("normal", "operator_contains_normalizes_result")
+def _operator_contains_normalizes_result() -> None:
+    def run(choose: Choose) -> bool:
+        class Container:
+            def __contains__(self, _item: Any) -> bool:
+                return cast(bool, choose())
+
+        return operator.contains(Container(), object())
+
+    outcomes = _resume_outcomes(run, (False, True))
+    _assert_equal(outcomes, _returns(False, True))
+    assert all(tag == "return" and type(value) is bool for tag, value in outcomes), outcomes
+
+
+def _operator_mutation_case(name: str) -> None:
+    operation = {"setitem": operator.setitem, "delitem": operator.delitem}[name]
+
+    def run(choose: Choose) -> int:
+        class Target:
+            selected = 0
+
+            def __setitem__(self, _key: str, _value: int) -> None:
+                self.selected = cast(int, choose())
+
+            def __delitem__(self, _key: str) -> None:
+                self.selected = cast(int, choose())
+
+        target = Target()
+        if name == "setitem":
+            result = operation(target, "key", 100)
+        else:
+            result = operation(target, "key")
+        assert result is None
+        return target.selected + 100
+
+    _assert_equal(_resume_outcomes(run), _returns(101, 110))
+
+
+for _name in ("setitem", "delitem"):
+    _case("normal", f"operator_public_{_name}")(
+        functools.partial(_operator_mutation_case, _name)
+    )
+
+
+@_case("corner", "operator_public_function_coverage")
+def _operator_public_function_coverage() -> None:
+    identity_only = {"is_", "is_not", "is_none", "is_not_none"}
+    tested = set(_OPERATOR_PROTOCOL_CASES) | {
+        "attrgetter",
+        "contains",
+        "concat",
+        "countOf",
+        "delitem",
+        "indexOf",
+        "itemgetter",
+        "iconcat",
+        "length_hint",
+        "methodcaller",
+        "not_",
+        "setitem",
+        "truth",
+    }
+    expected = set(operator.__all__) - identity_only
+    _assert_equal(tested, expected)
 
 
 if hasattr(itertools, "batched"):
@@ -2253,6 +3044,46 @@ if sys.version_info >= (3, 14):
             _resume_outcomes(run, (1 + 2j, 10 + 20j)),
             _returns(101 + 202j, 110 + 220j),
         )
+
+    @_case("corner", "version_sum_compensated_fast_paths")
+    def _version_sum_compensated_fast_paths() -> None:
+        _assert_equal(sum([1e16, 1.0, -1e16]), 1.0)
+        _assert_equal(sum([1.0, 1e100, 1.0, -1e100]), 2.0)
+
+        if sys.version_info >= (3, 14):
+            _assert_equal(sum([1e16 + 2e16j, 1 + 2j, 1 + 1j, -1e16 - 2e16j]), 2 + 3j)
+
+        def effectful_iterator(choose: Choose) -> float:
+            return sum(map(lambda _item: choose(), (None,)), 1e16)
+
+        _assert_equal(
+            _resume_outcomes(effectful_iterator, (1.0, 10.0)),
+            _returns(1e16 + 1.0, 1e16 + 10.0),
+        )
+
+        def fallback_callback(choose: Choose) -> Any:
+            class Fallback:
+                def __radd__(self, left: object) -> float:
+                    return choose()
+
+            return sum((1.0, Fallback()))
+
+        _assert_equal(
+            _resume_outcomes(fallback_callback),
+            _returns(1, 10),
+        )
+
+        class FailingFallback:
+            def __radd__(self, left: object) -> Any:
+                raise ValueError("fallback failure")
+
+        with pytest.raises(ValueError, match="fallback failure"):
+            sum((1.0, FailingFallback()))
+
+        _assert_equal(sum([sys.maxsize, 1]), sys.maxsize + 1)
+        with pytest.raises(OverflowError):
+            sum([1.0, 10**400])
+        assert type(sum([True, False, True])) is int
 
 
 @_case("normal", "version_hashable_slice_component")

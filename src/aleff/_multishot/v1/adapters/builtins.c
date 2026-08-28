@@ -1,3 +1,5 @@
+static PyObject *original_dir = NULL;
+
 typedef struct {
     PyObject *default_value;
 } NextState;
@@ -73,7 +75,9 @@ adapter_next(PyObject *Py_UNUSED(self), PyObject *args)
 
     NextState state = {.default_value = default_value};
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &next_vtable, &state);
+    if (adapter_enter(&frame, &next_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = Py_TYPE(iterator)->tp_iternext(iterator);
     adapter_leave(&frame);
 
@@ -120,7 +124,9 @@ static PyObject *
 adapter_len(PyObject *Py_UNUSED(self), PyObject *object)
 {
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &len_vtable, NULL);
+    if (adapter_enter(&frame, &len_vtable, NULL) < 0) {
+        return NULL;
+    }
     Py_ssize_t length = PyObject_Size(object);
     adapter_leave(&frame);
     if (length < 0) {
@@ -128,6 +134,8 @@ adapter_len(PyObject *Py_UNUSED(self), PyObject *object)
     }
     return PyLong_FromSsize_t(length);
 }
+
+#include "protocols.c"
 
 static PyObject *
 ascii_from_repr(PyObject *value)
@@ -176,7 +184,9 @@ static PyObject *
 adapter_ascii(PyObject *Py_UNUSED(self), PyObject *object)
 {
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &ascii_vtable, NULL);
+    if (adapter_enter(&frame, &ascii_vtable, NULL) < 0) {
+        return NULL;
+    }
     PyObject *result = PyObject_ASCII(object);
     adapter_leave(&frame);
     return result;
@@ -217,7 +227,9 @@ adapter_hasattr(PyObject *Py_UNUSED(self), PyObject *args)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &hasattr_vtable, NULL);
+    if (adapter_enter(&frame, &hasattr_vtable, NULL) < 0) {
+        return NULL;
+    }
     PyObject *value = PyObject_GetAttr(object, name);
     adapter_leave(&frame);
     return hasattr_result(value);
@@ -285,7 +297,9 @@ adapter_getattr(PyObject *Py_UNUSED(self), PyObject *args)
     }
     GetattrState state = {.default_value = default_value};
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &getattr_vtable, &state);
+    if (adapter_enter(&frame, &getattr_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = PyObject_GetAttr(object, name);
     adapter_leave(&frame);
     if (
@@ -296,6 +310,257 @@ adapter_getattr(PyObject *Py_UNUSED(self), PyObject *args)
         return Py_NewRef(default_value);
     }
     return result;
+}
+
+static PyObject *
+dir_resume(const void *Py_UNUSED(state), PyObject *value)
+{
+    if (value == NULL) {
+        return NULL;
+    }
+    PyObject *result = PySequence_List(value);
+    if (result == NULL) {
+        return NULL;
+    }
+    if (PyList_Sort(result) < 0) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
+}
+
+static const AleffAdapterVTable dir_vtable = {
+    .copy_state = empty_copy_state,
+    .free_state = empty_free_state,
+    .resume = dir_resume,
+};
+
+static PyObject *
+adapter_dir(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *object = NULL;
+    if (!PyArg_UnpackTuple(args, "dir", 0, 1, &object)) {
+        return NULL;
+    }
+    if (object == NULL) {
+        return PyObject_CallNoArgs(original_dir);
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &dir_vtable, NULL) < 0) {
+        return NULL;
+    }
+    PyObject *result = PyObject_Dir(object);
+    adapter_leave(&frame);
+    return result;
+}
+
+typedef struct {
+    PyObject *candidate;
+    PyObject *items;
+    Py_ssize_t index;
+    int is_instance;
+} AbstractCheckState;
+
+static int
+abstract_check_flatten(PyObject *classinfo, PyObject *items)
+{
+    if (PyTuple_Check(classinfo)) {
+        Py_ssize_t size = PyTuple_GET_SIZE(classinfo);
+        for (Py_ssize_t i = 0; i < size; i++) {
+            if (
+                abstract_check_flatten(PyTuple_GET_ITEM(classinfo, i), items) < 0
+            ) {
+                return -1;
+            }
+        }
+        return 0;
+    }
+    return PyList_Append(items, classinfo);
+}
+
+static void *
+abstract_check_copy_state(const void *raw_state)
+{
+    const AbstractCheckState *state = raw_state;
+    AbstractCheckState *copy = PyMem_Malloc(sizeof(*copy));
+    if (copy == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    copy->candidate = Py_NewRef(state->candidate);
+    copy->items = PyList_GetSlice(state->items, 0, PyList_GET_SIZE(state->items));
+    if (copy->items == NULL) {
+        Py_DECREF(copy->candidate);
+        PyMem_Free(copy);
+        return NULL;
+    }
+    copy->index = state->index;
+    copy->is_instance = state->is_instance;
+    return copy;
+}
+
+static void
+abstract_check_free_state(void *raw_state)
+{
+    AbstractCheckState *state = raw_state;
+    if (state == NULL) {
+        return;
+    }
+    Py_DECREF(state->candidate);
+    Py_DECREF(state->items);
+    PyMem_Free(state);
+}
+
+static PyObject *
+abstract_check_continue(
+    AbstractCheckState *state,
+    PyObject *resumed_value,
+    int is_resumed
+)
+{
+    if (is_resumed) {
+        int truth = PyObject_IsTrue(resumed_value);
+        if (truth < 0) {
+            return NULL;
+        }
+        if (truth) {
+            Py_RETURN_TRUE;
+        }
+        state->index++;
+    }
+    while (state->index < PyList_GET_SIZE(state->items)) {
+        PyObject *classinfo = PyList_GET_ITEM(state->items, state->index);
+        int result = state->is_instance
+            ? PyObject_IsInstance(state->candidate, classinfo)
+            : PyObject_IsSubclass(state->candidate, classinfo);
+        if (result < 0) {
+            return NULL;
+        }
+        if (result) {
+            Py_RETURN_TRUE;
+        }
+        state->index++;
+    }
+    Py_RETURN_FALSE;
+}
+
+static PyObject *
+abstract_check_resume(const void *raw_state, PyObject *value)
+{
+    AbstractCheckState *state = abstract_check_copy_state(raw_state);
+    if (state == NULL) {
+        return NULL;
+    }
+    PyObject *result = abstract_check_continue(state, value, 1);
+    abstract_check_free_state(state);
+    return result;
+}
+
+static const AleffAdapterVTable abstract_check_vtable = {
+    .copy_state = abstract_check_copy_state,
+    .free_state = abstract_check_free_state,
+    .resume = abstract_check_resume,
+};
+
+static PyObject *
+adapter_abstract_check(PyObject *args, int is_instance)
+{
+    PyObject *candidate;
+    PyObject *classinfo;
+    const char *name = is_instance ? "OO:isinstance" : "OO:issubclass";
+    if (!PyArg_ParseTuple(args, name, &candidate, &classinfo)) {
+        return NULL;
+    }
+    PyObject *items = PyList_New(0);
+    if (items == NULL) {
+        return NULL;
+    }
+    if (abstract_check_flatten(classinfo, items) < 0) {
+        Py_DECREF(items);
+        return NULL;
+    }
+    AbstractCheckState state = {
+        .candidate = candidate,
+        .items = items,
+        .index = 0,
+        .is_instance = is_instance,
+    };
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &abstract_check_vtable, &state) < 0) {
+        return NULL;
+    }
+    PyObject *result = abstract_check_continue(&state, NULL, 0);
+    adapter_leave(&frame);
+    Py_DECREF(items);
+    return result;
+}
+
+static PyObject *
+adapter_isinstance(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    return adapter_abstract_check(args, 1);
+}
+
+static PyObject *
+adapter_issubclass(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    return adapter_abstract_check(args, 0);
+}
+
+static PyObject *
+none_resume(const void *Py_UNUSED(state), PyObject *value)
+{
+    if (value == NULL) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static const AleffAdapterVTable none_vtable = {
+    .copy_state = empty_copy_state,
+    .free_state = empty_free_state,
+    .resume = none_resume,
+};
+
+static PyObject *
+adapter_setattr(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *object;
+    PyObject *name;
+    PyObject *value;
+    if (!PyArg_ParseTuple(args, "OOO:setattr", &object, &name, &value)) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &none_vtable, NULL) < 0) {
+        return NULL;
+    }
+    int result = PyObject_SetAttr(object, name, value);
+    adapter_leave(&frame);
+    if (result < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+adapter_delattr(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *object;
+    PyObject *name;
+    if (!PyArg_ParseTuple(args, "OO:delattr", &object, &name)) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &none_vtable, NULL) < 0) {
+        return NULL;
+    }
+    int result = PyObject_DelAttr(object, name);
+    adapter_leave(&frame);
+    if (result < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
 }
 
 static PyObject *original_input = NULL;
@@ -402,7 +667,9 @@ anext_awaitable_next(PyObject *object)
     }
     AnextAwaitState state = {.default_value = self->default_value};
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &anext_await_vtable, &state);
+    if (adapter_enter(&frame, &anext_await_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = Py_TYPE(self->iterator)->tp_iternext(self->iterator);
     adapter_leave(&frame);
     if (
@@ -624,7 +891,9 @@ input_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &input_vtable, state);
+    if (adapter_enter(&frame, &input_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result = input_read_line(state);
     adapter_leave(&frame);
     input_free_state(state);
@@ -653,7 +922,9 @@ adapter_input(PyObject *Py_UNUSED(self), PyObject *args)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &input_vtable, &state);
+    if (adapter_enter(&frame, &input_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = NULL;
     if (count == 1) {
         PyObject *prompt_args = PyTuple_Pack(1, PyTuple_GET_ITEM(args, 0));
@@ -826,7 +1097,9 @@ adapter_open(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
         .phase = OPEN_WAIT_PATH,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &open_vtable, &state);
+    if (adapter_enter(&frame, &open_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result;
     if (PyLong_Check(file)) {
         state.phase = OPEN_WAIT_OPEN;
@@ -1062,7 +1335,9 @@ adapter_import(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
         .global_lock_held = 0,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &import_vtable, &state);
+    if (adapter_enter(&frame, &import_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = PyObject_Call(original_import, args, kwargs);
     adapter_leave(&frame);
     Py_DECREF(module_lock);
@@ -1335,7 +1610,9 @@ adapter_print(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
         .phase = PRINT_WAIT_FLUSH_BOOL,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &print_vtable, &state);
+    if (adapter_enter(&frame, &print_vtable, &state) < 0) {
+        return NULL;
+    }
     int flush = PyObject_IsTrue(flush_object);
     PyObject *result = NULL;
     if (flush >= 0) {
@@ -1367,7 +1644,6 @@ typedef struct {
 } TypeConstructionState;
 
 static PyObject *original_build_class = NULL;
-static vectorcallfunc original_type_vectorcall = NULL;
 
 static int
 type_construction_capture_frame(TypeConstructionState *state)
@@ -1661,7 +1937,9 @@ type_construction_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &type_construction_vtable, state);
+    if (adapter_enter(&frame, &type_construction_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result;
     if (state->phase == TYPE_CONSTRUCTION_BODY) {
         result = type_construction_build_from_namespace(state);
@@ -1703,7 +1981,9 @@ adapter_build_class(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
         .phase = TYPE_CONSTRUCTION_UNKNOWN,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &type_construction_vtable, &state);
+    if (adapter_enter(&frame, &type_construction_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = PyObject_Call(original_build_class, args, kwargs);
     adapter_leave(&frame);
     Py_XDECREF(body_code);
@@ -1718,6 +1998,65 @@ adapter_type_vectorcall(
     PyObject *kwnames
 )
 {
+    ProtocolResumeKind kind;
+    if (callable == (PyObject *)&PyBool_Type) {
+        kind = protocol_vectorcall_kind(
+            args, nargsf, "__bool__", "__len__", NULL,
+            PROTOCOL_BOOL, PROTOCOL_LEN, PROTOCOL_BOOL
+        );
+        if (kind < 0) {
+            return NULL;
+        }
+        return protocol_type_vectorcall(
+            callable, args, nargsf, kwnames, kind
+        );
+    }
+    if (callable == (PyObject *)&PyLong_Type) {
+        kind = protocol_vectorcall_kind(
+            args, nargsf, "__int__", "__index__",
+#if PY_VERSION_HEX < 0x030e0000
+            "__trunc__",
+#else
+            NULL,
+#endif
+            PROTOCOL_INT, PROTOCOL_INDEX, PROTOCOL_TRUNC
+        );
+        if (kind < 0) {
+            return NULL;
+        }
+        return protocol_type_vectorcall(
+            callable, args, nargsf, kwnames, kind
+        );
+    }
+    if (callable == (PyObject *)&PyFloat_Type) {
+        kind = protocol_vectorcall_kind(
+            args, nargsf, "__float__", "__index__", NULL,
+            PROTOCOL_FLOAT, PROTOCOL_FLOAT_INDEX, PROTOCOL_FLOAT
+        );
+        if (kind < 0) {
+            return NULL;
+        }
+        return protocol_type_vectorcall(
+            callable, args, nargsf, kwnames, kind
+        );
+    }
+    if (callable == (PyObject *)&PyComplex_Type) {
+        kind = protocol_vectorcall_kind(
+            args, nargsf, "__complex__", "__float__", "__index__",
+            PROTOCOL_COMPLEX, PROTOCOL_COMPLEX_FLOAT, PROTOCOL_COMPLEX_INDEX
+        );
+        if (kind < 0) {
+            return NULL;
+        }
+        return protocol_type_vectorcall(
+            callable, args, nargsf, kwnames, kind
+        );
+    }
+    if (callable == (PyObject *)&PyUnicode_Type) {
+        return protocol_type_vectorcall(
+            callable, args, nargsf, kwnames, PROTOCOL_STR
+        );
+    }
     if (
         callable != (PyObject *)&PyType_Type ||
         PyVectorcall_NARGS(nargsf) != 3
@@ -1734,7 +2073,9 @@ adapter_type_vectorcall(
         .phase = TYPE_CONSTRUCTION_UNKNOWN,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &type_construction_vtable, &state);
+    if (adapter_enter(&frame, &type_construction_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = original_type_vectorcall(callable, args, nargsf, kwnames);
     adapter_leave(&frame);
     return result;
@@ -1778,7 +2119,9 @@ adapter_number_base(PyObject *object, int base)
 {
     NumberBaseState state = {.base = base};
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &number_base_vtable, &state);
+    if (adapter_enter(&frame, &number_base_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = PyNumber_ToBase(object, base);
     adapter_leave(&frame);
     return result;
@@ -1981,7 +2324,9 @@ extreme_resume(const void *raw_state, PyObject *value)
         return NULL;
     }
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &extreme_vtable, state);
+    if (adapter_enter(&frame, &extreme_vtable, state) < 0) {
+        return NULL;
+    }
     PyObject *result;
     if (value == NULL) {
         if (PyErr_Occurred()) {
@@ -2057,7 +2402,9 @@ adapter_extreme(PyObject *args, PyObject *kwargs, int comparison_op, const char 
         .phase = EXTREME_WAIT_NEXT,
     };
     AleffAdapterFrame frame;
-    adapter_enter(&frame, &extreme_vtable, &state);
+    if (adapter_enter(&frame, &extreme_vtable, &state) < 0) {
+        return NULL;
+    }
     PyObject *result = extreme_continue(&state, NULL, 0);
     adapter_leave(&frame);
     Py_DECREF(iterator);
