@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from typing import Final
@@ -11,12 +12,15 @@ _IMPORT_ALEFF: Final = "import aleff\n"
 
 
 def _run_isolated(source: str, timeout: float) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [sys.executable, "-c", source],
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
+        env=environment,
     )
 
 

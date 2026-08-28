@@ -8,6 +8,18 @@ PROJECT_ROOT = Path(__file__).parents[1]
 TARGETS = ("3.12.13", "3.13.12", "3.14.3", "3.14.3t")
 
 
+def bash_executable() -> str:
+    if os.name != "nt":
+        return "bash"
+    git_executable = shutil.which("git")
+    if git_executable is not None:
+        for parent in Path(git_executable).parents:
+            candidate = parent / "bin" / "bash.exe"
+            if candidate.is_file():
+                return str(candidate)
+    raise RuntimeError("Git Bash is required to test run_tests.sh on Windows")
+
+
 def prepare_runner(tmp_path: Path) -> tuple[Path, Path]:
     runner_dir = tmp_path / "runner"
     runner_dir.mkdir()
@@ -52,7 +64,7 @@ def run_parallel_runner(
     if fail_target is not None:
         environment["FAIL_TARGET"] = fail_target
     return subprocess.run(
-        ["bash", "run_tests.sh"],
+        [bash_executable(), "run_tests.sh"],
         cwd=runner_dir,
         env=environment,
         text=True,
