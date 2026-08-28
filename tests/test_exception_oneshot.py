@@ -4,10 +4,7 @@ Defines and verifies the semantics for how exceptions interact with
 effect handlers in all supported scenarios.
 """
 
-import asyncio  # pyright: ignore[reportUnusedImport]
-
 import pytest
-import pytest_asyncio  # pyright: ignore[reportUnusedImport]
 
 from aleff.oneshot import (
     effect,

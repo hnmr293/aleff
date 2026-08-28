@@ -1,1 +1,1 @@
-from aleff._multishot import *
+from aleff._multishot import *  # noqa: F403

@@ -1,15 +1,22 @@
 """Tests for the _aleff C extension (frame snapshot/restore)."""
 
 import sys
+import subprocess
+import textwrap
 from typing import Any
 
 import pytest
 import greenlet
 
 from aleff._multishot.v1._aleff import (
+    _restore_adapters,  # pyright: ignore[reportPrivateUsage]
+    _snapshot_from_frame_with_adapters,  # pyright: ignore[reportPrivateUsage]
+    _suspend_adapters,  # pyright: ignore[reportPrivateUsage]
     FrameSnapshot,
     snapshot_frames,
+    snapshot_from_frame,
     snapshot_num_frames,
+    restore_async_continuation,
     restore_continuation,
     HAS_RESTORE,
 )
@@ -97,6 +104,212 @@ class TestSnapshotFrames:
         assert snapshot_num_frames(s1) == 1
         assert snapshot_num_frames(s2) == 1
         assert s1 is not s2
+
+
+class TestSnapshotFromFrame:
+    def test_restore_releases_owner_frame_after_success(self):
+        """A restored token must not keep its suspend frame alive."""
+        import gc
+
+        def suspend_and_restore() -> None:
+            token = _suspend_adapters()
+            _restore_adapters(token)
+
+        gc.collect()
+        refs_before = (
+            sys.getrefcount(suspend_and_restore),
+            sys.getrefcount(suspend_and_restore.__code__),
+        )
+
+        for _ in range(5):
+            suspend_and_restore()
+        gc.collect()
+
+        refs_after = (
+            sys.getrefcount(suspend_and_restore),
+            sys.getrefcount(suspend_and_restore.__code__),
+        )
+        assert refs_after == refs_before
+
+    @pytest.mark.parametrize("handled_exception", [None, object()])
+    def test_non_exception_marker_is_treated_as_no_handled_exception(self, handled_exception: object):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            parent.switch()
+
+        child = greenlet.greenlet(suspend)
+        child.switch()
+        assert child.gr_frame is not None
+
+        snapshot = snapshot_from_frame(child.gr_frame, 1, handled_exception)
+
+        assert snapshot_num_frames(snapshot) == 1
+
+    def test_rejects_internal_send_metadata_argument(self):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            parent.switch()
+
+        child = greenlet.greenlet(suspend)
+        child.switch()
+        assert child.gr_frame is not None
+
+        with pytest.raises(TypeError, match="function takes at most 3 arguments"):
+            snapshot_from_frame(child.gr_frame, 1, None, [(2, 2147483646)])  # type: ignore[call-arg]
+
+    def test_private_adapter_snapshot_accepts_suspension_token(self):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            token = _suspend_adapters()
+            try:
+                parent.switch(token)
+            finally:
+                _restore_adapters(token)
+
+        child = greenlet.greenlet(suspend)
+        token = child.switch()
+        assert child.gr_frame is not None
+
+        snapshot = _snapshot_from_frame_with_adapters(child.gr_frame, 1, None, token)
+
+        assert snapshot_num_frames(snapshot) == 1
+        child.switch()
+
+    def test_private_adapter_snapshot_rejects_non_token(self):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            parent.switch()
+
+        child = greenlet.greenlet(suspend)
+        child.switch()
+        assert child.gr_frame is not None
+
+        with pytest.raises(ValueError, match="invalid PyCapsule"):
+            _snapshot_from_frame_with_adapters(child.gr_frame, 1, None, object())
+
+    def test_restore_rejects_a_token_from_another_greenlet(self):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            token = _suspend_adapters()
+            try:
+                parent.switch(token)
+            finally:
+                _restore_adapters(token)
+
+        child = greenlet.greenlet(suspend)
+        token = child.switch()
+
+        with pytest.raises(RuntimeError, match="owner"):
+            _restore_adapters(token)
+
+        child.switch()
+
+    def test_restore_rejects_a_token_after_owner_greenlet_finished(self):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            parent.switch(_suspend_adapters())
+
+        child = greenlet.greenlet(suspend)
+        token = child.switch()
+        child.switch()
+        assert child.dead
+
+        with pytest.raises(RuntimeError, match="owner"):
+            _restore_adapters(token)
+
+    def test_restore_rejects_double_restore(self):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            token = _suspend_adapters()
+            parent.switch(token)
+            _restore_adapters(token)
+            with pytest.raises(RuntimeError, match="already restored"):
+                _restore_adapters(token)
+            parent.switch()
+
+        child = greenlet.greenlet(suspend)
+        child.switch()
+        child.switch()
+        child.switch()
+
+    def test_nested_tokens_restore_in_their_owner(self):
+        parent = greenlet.getcurrent()
+
+        def suspend():
+            outer = _suspend_adapters()
+            inner = _suspend_adapters()
+            parent.switch()
+            _restore_adapters(inner)
+            _restore_adapters(outer)
+
+        child = greenlet.greenlet(suspend)
+        child.switch()
+        child.switch()
+        assert child.dead
+
+    def test_restore_rejects_non_token(self):
+        with pytest.raises((TypeError, ValueError)):
+            _restore_adapters(object())
+
+    def test_send_stack_depth_does_not_depend_on_importable_python_analyzer(self):
+        code = textwrap.dedent(
+            """
+            import dis
+            import sys
+            import types
+
+            analyzer = types.ModuleType("aleff._multishot.v1._send_metadata")
+
+            def malicious_metadata(frame):
+                current = next(
+                    (
+                        instruction
+                        for instruction in dis.get_instructions(frame.f_code)
+                        if instruction.offset == frame.f_lasti
+                    ),
+                    None,
+                )
+                if current is None or current.opname != "SEND":
+                    return False, 0, 0
+                return True, frame.f_code.co_stacksize, current.argval
+
+            analyzer.send_stack_metadata = malicious_metadata
+            sys.modules[analyzer.__name__] = analyzer
+
+            import asyncio
+            from aleff import create_async_handler, effect
+
+            choose = effect("choose")
+            handler = create_async_handler(choose)
+
+            @handler.on(choose)
+            async def handle_choose(k):
+                return await k(1) + await k(2)
+
+            async def values():
+                yield choose()
+
+            async def run():
+                try:
+                    raise ValueError("enter exception handler")
+                except ValueError:
+                    iterator = values()
+                    return [10, 20, await anext(iterator)]
+
+            assert asyncio.run(handler(run)) == [10, 20, 1, 10, 20, 2]
+            """
+        )
+
+        result = subprocess.run([sys.executable, "-c", code], text=True, capture_output=True)
+
+        assert result.returncode == 0, result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +417,40 @@ class TestRestoreContinuationErrors:
         assert HAS_RESTORE == 1, (
             "_PyEval_EvalFrameDefault was not found; restore_continuation will not work on this platform"
         )
+
+
+class TestRestoreAsyncContinuationErrors:
+    def test_negative_start_raises(self):
+        snapshot = snapshot_frames(1)
+
+        with pytest.raises(ValueError, match="invalid async continuation frame index"):
+            restore_async_continuation(snapshot, 42, -1)
+
+    def test_start_past_frame_count_raises(self):
+        snapshot = snapshot_frames(1)
+        frame_count = snapshot_num_frames(snapshot)
+
+        with pytest.raises(ValueError, match="invalid async continuation frame index"):
+            restore_async_continuation(snapshot, 42, frame_count + 1)
+
+    def test_start_at_frame_count_returns_completed_outcome(self):
+        snapshot = snapshot_frames(1)
+        frame_count = snapshot_num_frames(snapshot)
+
+        done, payload, next_frame, initial, is_exception = restore_async_continuation(snapshot, 42, frame_count)
+
+        assert done is True
+        assert payload == 42
+        assert next_frame == frame_count
+        assert initial is None
+        assert is_exception is False
+
+    def test_rejects_non_dict_replacements(self):
+        snapshot = snapshot_frames(1)
+        frame_count = snapshot_num_frames(snapshot)
+
+        with pytest.raises(TypeError, match="replacements must be a dict or None"):
+            restore_async_continuation(snapshot, 42, frame_count, False, False, [])  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

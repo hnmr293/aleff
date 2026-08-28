@@ -1,7 +1,7 @@
 import asyncio
+from collections.abc import Generator
 
 import pytest
-import pytest_asyncio  # pyright: ignore[reportUnusedImport]
 
 from aleff.oneshot import (
     effect,
@@ -14,6 +14,22 @@ from aleff.oneshot import (
     ResumeAsync,
     EffectNotHandledError,
 )
+
+
+class _TaskProtocolAwaitable:
+    """Awaitable that verifies Task-style resumption after its Future completes."""
+
+    def __init__(self, value: int) -> None:
+        loop = asyncio.get_running_loop()
+        self._future: asyncio.Future[int] = loop.create_future()
+        loop.call_soon(self._future.set_result, value)
+
+    def __await__(self) -> Generator[asyncio.Future[int], None, int]:
+        if not self._future.done():
+            self._future._asyncio_future_blocking = True
+            resume_value = yield self._future
+            assert resume_value is None
+        return self._future.result()
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +86,117 @@ class TestAsyncHandler:
         assert result == "after_sleep"
 
     @pytest.mark.asyncio
+    async def test_await_sleep_zero_in_handler(self):
+        """sleep(0) in a handler yields and then resumes the continuation."""
+        e: Effect[[], int] = effect("e")
+        h: AsyncHandler[int] = create_async_handler(e)
+
+        @h.on(e)
+        async def _handle(k: ResumeAsync[int, int]):
+            await asyncio.sleep(0)
+            return await k(1)
+
+        assert await h(lambda: e()) == 1
+
+    @pytest.mark.asyncio
+    async def test_await_sleep_zero_in_handler_yields_to_event_loop(self):
+        """sleep(0) preserves its contract to yield for one loop iteration."""
+        e: Effect[[], int] = effect("e")
+        h: AsyncHandler[int] = create_async_handler(e)
+        order: list[str] = []
+
+        @h.on(e)
+        async def _handle(k: ResumeAsync[int, int]):
+            order.append("before_sleep")
+            asyncio.get_running_loop().call_soon(order.append, "scheduled")
+            await asyncio.sleep(0)
+            order.append("after_sleep")
+            return await k(1)
+
+        assert await h(lambda: e()) == 1
+        assert order == ["before_sleep", "scheduled", "after_sleep"]
+
+    @pytest.mark.asyncio
+    async def test_await_negative_sleep_in_handler(self):
+        """A non-positive sleep delay follows asyncio's zero-delay path."""
+        e: Effect[[], int] = effect("e")
+        h: AsyncHandler[int] = create_async_handler(e)
+
+        @h.on(e)
+        async def _handle(k: ResumeAsync[int, int]):
+            await asyncio.sleep(-1)
+            return await k(1)
+
+        assert await h(lambda: e()) == 1
+
+    @pytest.mark.asyncio
+    async def test_awaited_future_exception_is_caught_in_handler(self):
+        """An exception from an awaited Future is thrown into the handler coroutine."""
+        e: Effect[[], int] = effect("e")
+        h: AsyncHandler[int] = create_async_handler(e)
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        @h.on(e)
+        async def _handle(k: ResumeAsync[int, int]):
+            try:
+                await future
+            except ValueError as exc:
+                assert str(exc) == "boom"
+                await asyncio.sleep(0)
+                return await k(1)
+
+            pytest.fail("the Future exception was not thrown into the handler")
+
+        asyncio.get_running_loop().call_soon(future.set_exception, ValueError("boom"))
+        assert await h(lambda: e()) == 1
+
+    @pytest.mark.asyncio
+    async def test_awaited_future_resumes_handler_with_none(self):
+        """A completed Future resumes the handler using Task's send(None) protocol."""
+        e: Effect[[], int] = effect("e")
+        h: AsyncHandler[int] = create_async_handler(e)
+
+        @h.on(e)
+        async def _handle(k: ResumeAsync[int, int]):
+            value = await _TaskProtocolAwaitable(7)
+            return await k(value)
+
+        assert await h(lambda: e()) == 7
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("delay", [0, 3600], ids=["bare-yield", "future"])
+    async def test_cancellation_during_handler_await_is_propagated_and_finalized(self, delay: float):
+        """Cancellation reaches the handler and permits asynchronous finalization."""
+        e: Effect[[], int] = effect("e")
+        h: AsyncHandler[int] = create_async_handler(e)
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        finalized = asyncio.Event()
+
+        @h.on(e)
+        async def _handle(k: ResumeAsync[int, int]):
+            try:
+                started.set()
+                await asyncio.sleep(delay)
+                return await k(1)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            finally:
+                await asyncio.sleep(0)
+                finalized.set()
+
+        task = asyncio.create_task(h(lambda: e()))
+        await started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert cancelled.is_set()
+        assert finalized.is_set()
+
+    @pytest.mark.asyncio
     async def test_abort_without_resume(self):
         e: Effect[[], int] = effect("e")
         h: AsyncHandler[int] = create_async_handler(e)
@@ -83,37 +210,42 @@ class TestAsyncHandler:
 
     @pytest.mark.asyncio
     async def test_nested_handlers(self):
+        """An inner async handler runs to completion inside the outer handler fn.
+
+        The `order` list is a contract, not an artefact of the current implementation:
+        nesting means the inner handler finishes before the outer continuation resumes.
+        """
         inner_eff: Effect[[], str] = effect("inner")
         outer_eff: Effect[[], int] = effect("outer")
+        order: list[str] = []
 
         async def run_inner():
             h: AsyncHandler[str] = create_async_handler(inner_eff)
 
             @h.on(inner_eff)
             async def _handle(k: ResumeAsync[str, str]):
+                order.append("inner_handle")
                 return await k("from_inner")
 
-            return await h(lambda: inner_eff())
+            order.append("inner_enter")
+            result = await h(lambda: inner_eff())
+            order.append("inner_exit")
+            return result
 
         async def run_outer():
             h: AsyncHandler[int] = create_async_handler(outer_eff)
 
             @h.on(outer_eff)
             async def _handle(k: ResumeAsync[int, int]):
-                return await k(99)
+                order.append("outer_handle")
+                result = await k(len(await run_inner()))
+                order.append("outer_resumed")
+                return result
 
-            def body():
-                run_inner_result = run_inner()  # pyright: ignore[reportUnusedVariable]
-                # run_inner returns a coroutine; it will be awaited by _drive_async
-                # But we need the inner handler to complete first.
-                # For nesting, inner must be sync or handled differently.
-                return outer_eff()
+            return await h(lambda: outer_eff())
 
-            return await h(body)
-
-        # Nested async handlers require the inner to complete before outer effect.
-        # Use a different pattern: inner as sync handler.
-        pass
+        assert await run_outer() == 10
+        assert order == ["outer_handle", "inner_enter", "inner_handle", "inner_exit", "outer_resumed"]
 
     @pytest.mark.asyncio
     async def test_effect_with_arguments(self):

@@ -17,5 +17,5 @@ clean:
 install:
 	uv pip install -e ".[dev]"
 
-test: build
-	uv run pytest tests/ -v
+test:
+	./run_tests.sh

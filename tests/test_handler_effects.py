@@ -5,10 +5,7 @@ enclosing (outer) handler on the stack, enabling handler-to-handler
 communication and layered architectures.
 """
 
-import asyncio  # pyright: ignore[reportUnusedImport]
-
 import pytest
-import pytest_asyncio  # pyright: ignore[reportUnusedImport]
 
 from aleff import (
     effect,

@@ -1,4 +1,4 @@
-from asyncio import Lock, iscoroutine
+from asyncio import Lock, iscoroutine, sleep
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from inspect import iscoroutinefunction
@@ -17,7 +17,12 @@ from .intf import (
 )
 from .effects import EffectContext, ABORT, EffectAborted
 from .misc import debug, eff_str
-from ._aleff import FrameSnapshot, restore_continuation, snapshot_from_frame
+from ._aleff import (
+    _snapshot_from_frame_with_adapters,  # pyright: ignore[reportPrivateUsage]
+    FrameSnapshot,
+    restore_async_continuation,
+    restore_continuation,
+)
 from .winds import capture_wind_stack, rewind
 
 
@@ -149,11 +154,13 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
         snapshot: FrameSnapshot[R, V],
         token: object,
         handler: "_Handler[Any] | _AsyncHandler[Any]",
+        async_continuation: bool,
     ) -> None:
         self._caller_gl = caller_gl
         self._snapshot = snapshot
         self._token = token
         self._handler = handler
+        self._async_continuation = async_continuation
         self._winds = capture_wind_stack(caller_gl)
 
     async def __call__(self, value: R) -> V:
@@ -167,12 +174,12 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
             caller_gl.parent = gl.getcurrent()
             try:
                 v = caller_gl.switch(value)
+                debug(f"||< @caller = {v!r}")
+                return await _drive_async(caller_gl, v)
             finally:
                 if not caller_gl.dead:
                     assert old_parent is not None
                     caller_gl.parent = old_parent
-            debug(f"||< @caller = {v!r}")
-            return await _drive_async(caller_gl, v)
 
         debug("||> @caller (multi-shot async)")
 
@@ -181,6 +188,8 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
 
         def _body() -> V:
             rewind(winds)
+            if self._async_continuation:
+                return _run_restored_async_continuation(ss, value)
             return restore_continuation(ss, value)
 
         new_gl = gl.greenlet(_body)
@@ -239,8 +248,24 @@ def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
 
     # effect performed
     # switch to the handler greenlet
+    #
+    # From here the caller is suspended mid-effect.  Whatever happens next --
+    # the handler returning without resuming, the handler raising, or dispatch
+    # failing outright -- it must not be left that way: its finally blocks and
+    # wind guards are still pending.  _abort_caller in the finally below makes
+    # that a single invariant of this function.
+    ctx = cast(EffectContext[..., Any], value)
+    try:
+        return _drive_effect(caller_gl, ctx)
+    finally:
+        if not caller_gl.dead:
+            debug(f"||< **abort** perform {eff_str(ctx.effect)}")
+            _abort_caller(caller_gl)
 
-    d = _pre_drive(caller_gl, cast(EffectContext[..., Any], value))
+
+def _drive_effect(caller_gl: Any, value: EffectContext[..., Any]) -> Any:
+    """Dispatch one performed effect.  The caller is suspended throughout."""
+    d = _pre_drive(caller_gl, value)
 
     if isinstance(d.handler, _AsyncHandler):
         # async handler found in sync context — relay to parent greenlet.
@@ -277,16 +302,15 @@ def _drive[V](caller_gl: Any, value: V | EffectContext[..., Any]) -> V:
 
     # Take snapshot from the handler greenlet. The caller greenlet is
     # suspended at this point, so its frames have valid stacktop values.
-    snapshot = snapshot_from_frame(caller_gl.gr_frame)
+    snapshot = _snapshot_from_frame_with_adapters(
+        caller_gl.gr_frame,
+        -1,
+        value.handled_exception,
+        value.adapter_token,
+    )
 
     resume: Resume[Any, Any] = _Resume(caller_gl, snapshot, d.token, d.handler)
     v = d.fn(resume, *d.args, **d.kwargs)
-
-    if not caller_gl.dead:
-        # resume not called in the handler
-        # discard the result
-        debug(f"||< **abort** perform {eff_str(d.effect)} = {v!r}")
-        _abort_caller(caller_gl)
 
     debug(f"||< perform {eff_str(d.effect)} = {v!r}")
 
@@ -303,18 +327,50 @@ def _abort_caller(caller_gl: Any) -> None:
     blocks but is not caught by ``except Exception``.
     """
 
+    # A dying greenlet hands its exception to its *parent*, not to whoever
+    # switched into it.  Redirect the parent here so that EffectAborted -- and
+    # any exception the caller's cleanup raises -- surfaces in this greenlet
+    # rather than in whichever one happens to be caller_gl.parent.
+    # (See _Resume.__call__ for the same redirection.)
+    old_parent = caller_gl.parent
+    caller_gl.parent = gl.getcurrent()
     try:
-        abort_v = caller_gl.switch(ABORT)
-    except EffectAborted:
-        return
-    while not caller_gl.dead:
-        if isinstance(abort_v, EffectContext):
+        try:
+            abort_v: Any = caller_gl.switch(ABORT)
+        except EffectAborted:
+            return
+        while not caller_gl.dead:
+            if not isinstance(abort_v, EffectContext):
+                break
             try:
-                abort_v = caller_gl.switch(ABORT)
+                abort_v = cast(Any, _drive(caller_gl, cast(EffectContext[..., Any], abort_v)))
             except EffectAborted:
                 return
-        else:
-            break
+    finally:
+        if not caller_gl.dead:
+            caller_gl.parent = old_parent
+
+
+async def _abort_caller_async(caller_gl: Any, exclude_token: object | None) -> None:
+    """Abort a caller while allowing its cleanup to perform async-dispatched effects."""
+
+    old_parent = caller_gl.parent
+    caller_gl.parent = gl.getcurrent()
+    try:
+        try:
+            abort_v: Any = caller_gl.switch(ABORT)
+        except EffectAborted:
+            return
+        while not caller_gl.dead:
+            if not (_is_effect_context(abort_v) or _is_coroutine_request(abort_v)):
+                break
+            try:
+                abort_v = await _drive_async(caller_gl, abort_v, exclude_token=exclude_token)
+            except EffectAborted:
+                return
+    finally:
+        if not caller_gl.dead:
+            caller_gl.parent = old_parent
 
 
 class _AwaitRequest[V]:
@@ -333,12 +389,128 @@ class _AwaitRequest[V]:
         self.awaitable = awaitable
 
 
+class _BareYieldRequest:
+    """Requests resumption on the next event-loop turn without an awaitable."""
+
+    __slots__ = ()
+
+
+_BARE_YIELD_REQUEST = _BareYieldRequest()
+type _CoroutineRequest[V] = _AwaitRequest[V] | _BareYieldRequest
+
+
 def _is_effect_context(v: Any) -> TypeGuard[EffectContext[..., Any]]:
     return isinstance(v, EffectContext)
 
 
-def _is_await_request(v: Any) -> TypeGuard[_AwaitRequest[Any]]:
-    return isinstance(v, _AwaitRequest)
+def _is_coroutine_request(v: Any) -> TypeGuard[_CoroutineRequest[Any]]:
+    return isinstance(v, (_AwaitRequest, _BareYieldRequest))
+
+
+def _run_coroutine_in_bridge[V](
+    coro: Coroutine[Any, Any, V],
+    initial: Any = None,
+    initial_is_exception: bool = False,
+) -> V:
+    """Relay coroutine await requests and exceptions across a greenlet boundary."""
+    pending_exception = cast(BaseException, initial) if initial_is_exception else None
+    send_value = None if initial_is_exception else initial
+    try:
+        while True:
+            if pending_exception is None:
+                awaitable = coro.send(send_value)
+                send_value = None
+            else:
+                exc = pending_exception
+                pending_exception = None
+                awaitable = coro.throw(exc)
+
+            # Futures yielded via __await__() are marked as blocking for
+            # asyncio.Task. Clear the marker before awaiting them externally.
+            if hasattr(awaitable, "_asyncio_future_blocking"):
+                awaitable._asyncio_future_blocking = False
+
+            request = _BARE_YIELD_REQUEST if awaitable is None else _AwaitRequest(awaitable)
+            try:
+                parent = gl.getcurrent().parent
+                assert parent is not None
+                parent.switch(request)
+            except BaseException as exc:
+                pending_exception = exc
+    except StopIteration as exc:
+        return cast(V, exc.value)
+
+
+def _run_restored_async_continuation[R, V](snapshot: FrameSnapshot[R, V], value: R) -> V:
+    """Drive independently restored coroutine frames from inner to outer."""
+    outcome: object = value
+    is_exception = False
+    from_coroutine = False
+    next_frame = 1
+    replacements: dict[object, object] = {}
+
+    while True:
+        done, payload, next_frame, initial, initial_is_exception = restore_async_continuation(
+            snapshot,
+            outcome,
+            next_frame,
+            is_exception,
+            from_coroutine,
+            replacements,
+        )
+        if done:
+            return cast(V, payload)
+
+        coro = cast(Coroutine[Any, Any, Any], payload)
+        try:
+            outcome = _run_coroutine_in_bridge(coro, initial, initial_is_exception)
+        except BaseException as exc:
+            outcome = exc
+            is_exception = True
+        else:
+            is_exception = False
+        from_coroutine = True
+
+
+def _snapshot_for_async_resume(
+    caller_gl: Any,
+    handled_exception: object,
+    adapter_token: object,
+) -> tuple[FrameSnapshot[Any, Any], bool]:
+    """Exclude the C coroutine bridge from a restorable Python frame chain."""
+    start = caller_gl.gr_frame
+    frame = start
+    depth = 0
+    while frame is not None:
+        if frame.f_code is _run_coroutine_in_bridge.__code__:
+            return (
+                _snapshot_from_frame_with_adapters(
+                    start,
+                    depth,
+                    handled_exception,
+                    adapter_token,
+                ),
+                True,
+            )
+        depth += 1
+        frame = frame.f_back
+
+    return (
+        _snapshot_from_frame_with_adapters(
+            start,
+            -1,
+            handled_exception,
+            adapter_token,
+        ),
+        False,
+    )
+
+
+async def _resolve_coroutine_request(request: _CoroutineRequest[Any]) -> None:
+    if isinstance(request, _BareYieldRequest):
+        await sleep(0)
+    else:
+        await request.awaitable
 
 
 async def _run_handler_fn_in_bridge(
@@ -351,21 +523,7 @@ async def _run_handler_fn_in_bridge(
     and relaying ``await`` requests back to the event loop."""
 
     def _bridge() -> Any:
-        coro = fn(*args, **kwargs)
-        val: Any = None
-        parent = gl.getcurrent().parent
-        assert parent is not None
-        try:
-            while True:
-                awaitable = coro.send(val)
-                # asyncio Futures set _asyncio_future_blocking when
-                # yielded via __await__().  Reset it so the awaitable
-                # can be properly re-awaited in the outer event loop.
-                if hasattr(awaitable, "_asyncio_future_blocking"):
-                    awaitable._asyncio_future_blocking = False
-                val = parent.switch(_AwaitRequest(awaitable))
-        except StopIteration as e:
-            return e.value
+        return _run_coroutine_in_bridge(fn(*args, **kwargs))
 
     handler_fn_gl = gl.greenlet(_bridge)
     handler_fn_gl.gr_context = copy_context()
@@ -374,13 +532,13 @@ async def _run_handler_fn_in_bridge(
     while not handler_fn_gl.dead:
         if _is_effect_context(v):
             v = await _drive_async(handler_fn_gl, v, exclude_token=exclude_token)
-        elif _is_await_request(v):
+        elif _is_coroutine_request(v):
             try:
-                result: Any = await v.awaitable
+                await _resolve_coroutine_request(v)
             except BaseException as e:
-                v = handler_fn_gl.throw(type(e), e, e.__traceback__)
+                v = handler_fn_gl.throw(e)
             else:
-                v = handler_fn_gl.switch(result)
+                v = handler_fn_gl.switch(None)
         else:
             break
 
@@ -410,21 +568,20 @@ async def _run_handler_fn_in_greenlet(
 
 async def _drive_async[V](
     caller_gl: Any,
-    value: V | _AwaitRequest[V] | EffectContext[..., Any],
+    value: V | _CoroutineRequest[V] | EffectContext[..., Any],
     exclude_token: object | None = None,
 ) -> V:
     debug("||> @main")
 
-    if isinstance(value, _AwaitRequest):
+    while _is_coroutine_request(value):
         # Bridge greenlet needs an awaitable resolved
         debug("||> bridge await")
-        req = cast(_AwaitRequest[V], value)
         try:
-            result = await req.awaitable
+            await _resolve_coroutine_request(value)
         except BaseException as e:
-            return await _drive_async(caller_gl, caller_gl.throw(e))
+            value = caller_gl.throw(e)
         else:
-            return await _drive_async(caller_gl, caller_gl.switch(result))
+            value = caller_gl.switch(None)
 
     if caller_gl.dead:
         # computation finished
@@ -439,16 +596,43 @@ async def _drive_async[V](
 
     # effect performed
     # switch to the handler greenlet
+    # See _drive for why the abort belongs in a finally.
+    if not _is_effect_context(value):
+        raise RuntimeError(f"invalid value passed to caller: {value!r}")
+    ctx = value
+    try:
+        return await _drive_effect_async(caller_gl, ctx, exclude_token)
+    finally:
+        if not caller_gl.dead:
+            debug(f"||< **abort** perform {eff_str(ctx.effect)}")
+            await _abort_caller_async(caller_gl, exclude_token=exclude_token)
 
-    d = _pre_drive(caller_gl, cast(EffectContext[..., Any], value), exclude_token=exclude_token)
+
+async def _drive_effect_async(
+    caller_gl: Any,
+    value: EffectContext[..., Any],
+    exclude_token: object | None,
+) -> Any:
+    """Dispatch one performed effect.  The caller is suspended throughout."""
+    d = _pre_drive(caller_gl, value, exclude_token=exclude_token)
 
     # For shallow handlers, remove all entries before calling fn so that
     # resumed computation will not find this handler on the stack.
     if d.handler.shallow:
         _remove_all_handlers(d.token)
 
-    snapshot = snapshot_from_frame(caller_gl.gr_frame)
-    resume: ResumeAsync[Any, Any] = _ResumeAsync(caller_gl, snapshot, d.token, d.handler)
+    snapshot, async_continuation = _snapshot_for_async_resume(
+        caller_gl,
+        value.handled_exception,
+        value.adapter_token,
+    )
+    resume: ResumeAsync[Any, Any] = _ResumeAsync(
+        caller_gl,
+        snapshot,
+        d.token,
+        d.handler,
+        async_continuation,
+    )
 
     # Use exclude_token so handler fn's effects skip this handler
     # (for deep handlers, entries stay on the stack for the caller).
@@ -468,12 +652,6 @@ async def _drive_async[V](
             d.kwargs,
             _exclude,
         )
-
-    if not caller_gl.dead:
-        # resume not called in the handler
-        # discard the result
-        debug(f"||< **abort** perform {eff_str(d.effect)} = {v!r}")
-        _abort_caller(caller_gl)
 
     debug(f"||< perform {eff_str(d.effect)} = {v!r}")
 
@@ -618,16 +796,8 @@ class _AsyncHandler[V](
                 _orig = caller
 
                 def actual_caller() -> Any:
-                    coro = _orig()
-                    value: Any = None
-                    parent = gl.getcurrent().parent
-                    assert parent is not None
-                    try:
-                        while True:
-                            awaitable = coro.send(value)
-                            value = parent.switch(_AwaitRequest(awaitable))
-                    except StopIteration as e:
-                        return e.value
+                    coro = cast(Coroutine[Any, Any, V], _orig())
+                    return _run_coroutine_in_bridge(coro)
 
             caller_gl = gl.greenlet(actual_caller)
             caller_gl.gr_context = copy_context()

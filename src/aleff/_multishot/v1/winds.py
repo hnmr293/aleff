@@ -9,6 +9,11 @@ import greenlet as gl
 from .intf import Ref, Wind
 
 
+def _noop() -> None:
+    """Default `before`/`after` for a wind that only marks a dynamic extent."""
+    return None
+
+
 @overload
 def wind[T, B: bool | None](
     before: Callable[[], AbstractContextManager[T, B]],
@@ -49,9 +54,9 @@ def wind[T, B: bool | None](  # pyright: ignore[reportInconsistentOverload]
 ) -> Wind[T, B]:
     if before is None:
         # T is None
-        before = cast(Callable[[], T], lambda: None)
+        before = cast(Callable[[], T], _noop)
     if after is None:
-        after = lambda: None
+        after = _noop
     return _Wind[T](before, after, auto_exit=auto_exit)  # pyright: ignore[reportReturnType]
 
 
@@ -95,8 +100,13 @@ class WindBase[T, S](ABC):
         Default: no-op.
     """
 
+    def __init__(self) -> None:
+        # Number of times this entry has been entered without a matching exit.
+        # Nesting the same object is allowed, so this is a depth, not a flag.
+        self._wind_depth = 0
+
     def __enter__(self) -> T:
-        result = self._wind_enter()
+        result = self._enter_extent()
         _push_wind_entry(self)
         return result
 
@@ -106,8 +116,32 @@ class WindBase[T, S](ABC):
         exc_value: BaseException | None,
         traceback: Any,
     ) -> bool:
+        # Checked before the pop so that an unbalanced __exit__ is reported as
+        # such instead of corrupting the stack (or failing inside pop).
+        self._check_active()
         _pop_wind_entry()
-        return self._wind_exit(exc_type, exc_value, traceback)
+        return self._exit_extent(exc_type, exc_value, traceback)
+
+    def _enter_extent(self) -> T:
+        """Enter the dynamic extent, tracking the enter/exit balance."""
+        result = self._wind_enter()
+        self._wind_depth += 1
+        return result
+
+    def _exit_extent(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: TracebackType | None = None,
+    ) -> bool:
+        """Exit the dynamic extent, tracking the enter/exit balance."""
+        self._check_active()
+        self._wind_depth -= 1
+        return self._wind_exit(exc_type, exc_val, exc_tb)
+
+    def _check_active(self) -> None:
+        if self._wind_depth <= 0:
+            raise RuntimeError("wind exit without active entry")
 
     @abstractmethod
     def _wind_enter(self) -> T: ...
@@ -139,57 +173,45 @@ class WindBase[T, S](ABC):
         return [_CapturedWindEntry(entry, entry._wind_snapshot()) for entry in entries]
 
     @staticmethod
-    def _rewind(
-        from_winds: list["WindBase[Any, Any]"],
-        to_winds: "_CapturedWinds",
-    ) -> None:
-        """Transition the wind stack from *from_winds* to *to_winds*.
+    def _rewind(to_winds: "_CapturedWinds") -> None:
+        """Re-enter the captured dynamic extents in the current context.
 
-        Called by :func:`rewind` during multi-shot continuation re-entry.
-        The two stacks may share a common prefix (same ``WindBase`` objects
-        at the same positions).  Entries in the common prefix are left
-        untouched — only the differing tails are unwound / rewound.
+        Called by :func:`rewind` at the start of a multi-shot re-entry, from
+        inside a freshly created greenlet whose context was copied from the
+        *invoker* of ``k()`` — the handler.  The wind stack visible here
+        therefore describes the handler's branch of the dynamic tree, not the
+        continuation's.  ``k()`` returns to the handler, so that branch stays
+        active: nothing is ever unwound here.
 
-        Steps:
+        The two branches share a prefix — the extents established outside the
+        handler boundary.  Those are already active and must not be entered
+        twice.  Entries below the shared prefix belong to the captured branch
+        alone and are entered outermost first, each preceded by
+        ``_wind_restore(snapshot)`` to restore the state captured at
+        continuation capture time.
 
-        1. Find the longest common prefix by identity (``is``) comparison.
-        Shared entries represent dynamic extents that are active in both
-        the current context and the captured context.
-        2. Unwind entries leaving: call ``_wind_exit()`` on entries in
-        *from_winds* beyond the common prefix, innermost first (reversed).
-        3. Rewind entries entering: for each entry in *to_winds* beyond the
-        common prefix, call ``_wind_restore(snapshot)`` to restore the
-        state captured at continuation capture time, then ``_wind_enter()``
-        to re-enter the dynamic extent.
-        4. Replace the wind stack with the entry list from *to_winds*.
+        Finally the stack is replaced by the captured entries, so a nested
+        capture inside the resumed continuation cannot observe the handler's.
         """
 
         to_entries = [item.entry for item in to_winds]
+        shared = _shared_prefix_len(_get_wind_stack(), to_entries)
 
-        # 1. find the longest common prefix
-        n = min(len(from_winds), len(to_entries))
-        common = 0
-        for i in range(n):
-            if from_winds[i] is to_entries[i]:
-                common = i + 1
-            else:
-                break
+        entered: list[WindBase[Any, Any]] = []
+        try:
+            for item in to_winds[shared:]:
+                item.entry._wind_restore(item.snapshot)
+                item.entry._enter_extent()
+                entered.append(item.entry)
+        except BaseException:
+            # _rewind runs before restore_continuation(), so there is no Python
+            # frame yet whose __exit__ would unwind these on propagation.
+            # Undo them here, innermost first, or the extents are lost.
+            for entry in reversed(entered):
+                entry._exit_extent()
+            raise
 
-        exiting = from_winds[common:]
-        entering = to_winds[common:]
-
-        # 2. Unwind: exit extents we are leaving (innermost first).
-        for entry in reversed(exiting):
-            entry._wind_exit()
-
-        # 3. Rewind: restore snapshot then enter extents we are entering (outermost first).
-        for item in entering:
-            entry, snapshot = item.entry, item.snapshot
-            entry._wind_restore(snapshot)
-            entry._wind_enter()
-
-        # 4. Set the wind stack to the target state.
-        _set_wind_stack(list(to_entries))
+        _set_wind_stack(to_entries)
 
 
 class _Wind[T](WindBase[Ref[T], None]):
@@ -216,6 +238,7 @@ class _Wind[T](WindBase[Ref[T], None]):
         *,
         auto_exit: bool = True,
     ) -> None:
+        super().__init__()
         self._before = before
         self._after = after
         self._auto_exit = auto_exit
@@ -223,8 +246,10 @@ class _Wind[T](WindBase[Ref[T], None]):
         self._ref: _Ref[T] | None = None  # lifetime: ~_Wind
 
     def _wind_enter(self) -> Ref[T]:
-        # In the normal lifecycle, _wind_exit (via __exit__ or _do_winds unwinding) always clears _item before _wind_enter is called again.
-        # A non-None _item here means the wind stack management has a bug — either __exit__ was skipped or _do_winds failed to unwind properly.
+        # A single _cm slot means an auto_exit guard cannot be nested inside
+        # itself.  WindBase already tracks the enter/exit balance, so a live
+        # _cm here means the same object was re-entered — not that an exit
+        # was skipped.
         if self._cm is not None:
             raise RuntimeError("wind entry already active")
 
@@ -243,8 +268,8 @@ class _Wind[T](WindBase[Ref[T], None]):
         exc_val: BaseException | None = None,
         exc_tb: TracebackType | None = None,
     ) -> bool:
-        if self._ref is None:
-            raise RuntimeError("wind exit without active entry")
+        # WindBase tracks the enter/exit balance, so _wind_enter has run.
+        assert self._ref is not None
 
         suppress = False
         value = self._ref.unwrap()
@@ -313,6 +338,7 @@ class wind_range(WindBase["wind_range", int]):
     def __init__(self, start: int, stop: int, step: int = 1, /) -> None: ...
 
     def __init__(self, start: int, stop: int | None = None, step: int = 1) -> None:
+        super().__init__()
         if stop is None:
             # wind_range(stop) form: start=0, stop=start
             start, stop = 0, start
@@ -388,8 +414,25 @@ def capture_wind_stack(caller_gl: gl.greenlet) -> _CapturedWinds:
 
 # for handlers.py
 def rewind(captured: _CapturedWinds) -> None:
-    """Transition from the current wind stack to *captured*."""
-    WindBase._rewind(_get_wind_stack(), captured)  # pyright: ignore[reportPrivateUsage]
+    """Re-enter the *captured* dynamic extents for a multi-shot continuation."""
+    WindBase._rewind(captured)  # pyright: ignore[reportPrivateUsage]
+
+
+def _shared_prefix_len(
+    current: list[WindBase[Any, Any]],
+    captured: list[WindBase[Any, Any]],
+) -> int:
+    """Length of the deepest common ancestor of two dynamic-extent paths.
+
+    A wind stack is the path from the dynamic root to a dynamic point, so the
+    longest common prefix (by identity) is the extents both paths are inside.
+    """
+    n = 0
+    for a, b in zip(current, captured):
+        if a is not b:
+            break
+        n += 1
+    return n
 
 
 def _get_wind_stack() -> list[WindBase[Any, Any]]:

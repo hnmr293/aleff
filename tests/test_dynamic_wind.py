@@ -7,15 +7,22 @@ wind(before, after, *, auto_exit=True) establishes a dynamic extent guard:
 - The return value of before() is wrapped in a Ref for multi-shot safety
 """
 
+from contextlib import contextmanager
+from typing import Any, Iterator
+
 import pytest
 
 from aleff import (
     effect,
     Effect,
     Resume,
+    ResumeAsync,
     Handler,
+    AsyncHandler,
     create_handler,
+    create_async_handler,
     wind,
+    wind_range,
     Ref,
 )
 from aleff._multishot.v1.winds import _get_wind_stack  # pyright: ignore[reportPrivateUsage]
@@ -974,3 +981,432 @@ class TestRefCornerCases:
         # Both shots should see the same Ref object (heap-shared)
         assert len(ref_ids) == 2
         assert ref_ids[0] == ref_ids[1]
+
+
+# ---------------------------------------------------------------------------
+# Handler-side dynamic extents must survive multi-shot re-entry (#36)
+#
+# A multi-shot resume runs the continuation in a fresh greenlet whose context
+# is copied from the *invoker* of k() -- the handler.  The wind entries visible
+# there belong to the handler's branch of the dynamic tree, not to the
+# continuation's.  k() returns to the handler, so that branch stays active and
+# must never be unwound by the re-entry.
+# ---------------------------------------------------------------------------
+
+
+class TestWindHandlerExtentIsolation:
+    def test_wind_inside_handler_fn_two_shots(self):
+        """A wind in the handler fn pairs 1:1 when k is resumed twice."""
+        e: Effect[[], int] = effect("e")
+        h: Handler[int] = create_handler(e)
+
+        log: list[str] = []
+
+        @h.on(e)
+        def _handle(k: Resume[int, int]) -> int:
+            with wind(lambda: log.append("before"), lambda: log.append("after")):
+                return k(1) + k(2)
+
+        def body() -> int:
+            log.append("body start")
+            v = e()
+            log.append(f"body v={v}")
+            return v
+
+        assert h(body) == 3
+        assert log == ["body start", "before", "body v=1", "body v=2", "after"]
+        assert _get_wind_stack() == []
+
+    def test_wind_inside_handler_fn_three_shots(self):
+        """The extra after() must not scale with the number of shots."""
+        e: Effect[[], int] = effect("e")
+        h: Handler[int] = create_handler(e)
+
+        log: list[str] = []
+
+        @h.on(e)
+        def _handle(k: Resume[int, int]) -> int:
+            with wind(lambda: log.append("before"), lambda: log.append("after")):
+                return k(1) + k(2) + k(3)
+
+        assert h(lambda: e()) == 6
+        assert log.count("before") == 1
+        assert log.count("after") == 1
+        assert log[-1] == "after"
+        assert _get_wind_stack() == []
+
+    def test_nested_wind_inside_handler_fn_multishot(self):
+        """Nested handler-side winds unwind innermost-first, exactly once."""
+        e: Effect[[], int] = effect("e")
+        h: Handler[int] = create_handler(e)
+
+        log: list[str] = []
+
+        @h.on(e)
+        def _handle(k: Resume[int, int]) -> int:
+            with wind(lambda: log.append("before(outer)"), lambda: log.append("after(outer)")):
+                with wind(lambda: log.append("before(inner)"), lambda: log.append("after(inner)")):
+                    return k(1) + k(2)
+
+        assert h(lambda: e()) == 3
+        assert log == [
+            "before(outer)",
+            "before(inner)",
+            "after(inner)",
+            "after(outer)",
+        ]
+        assert _get_wind_stack() == []
+
+    def test_wind_in_caller_and_handler_multishot(self):
+        """Caller-side and handler-side extents are independent under multi-shot."""
+        e: Effect[[], int] = effect("e")
+        h: Handler[int] = create_handler(e)
+
+        log: list[str] = []
+
+        @h.on(e)
+        def _handle(k: Resume[int, int]) -> int:
+            with wind(lambda: log.append("before(H)"), lambda: log.append("after(H)")):
+                return k(1) + k(2)
+
+        def body() -> int:
+            with wind(lambda: log.append("before(C)"), lambda: log.append("after(C)")):
+                v = e()
+                log.append(f"v={v}")
+                return v
+
+        assert h(body) == 3
+        # The caller's extent is re-entered per shot; the handler's is not.
+        assert log == [
+            "before(C)",
+            "before(H)",
+            "v=1",
+            "after(C)",
+            "before(C)",
+            "v=2",
+            "after(C)",
+            "after(H)",
+        ]
+        assert _get_wind_stack() == []
+
+    def test_escaping_continuation_under_unrelated_wind(self):
+        """An escaped k() must not unwind a wind it knows nothing about.
+
+        No handler-side wind is involved here: the continuation is stored by the
+        handler, h() returns, and k is then invoked from inside an unrelated
+        dynamic extent at top level.
+        """
+        e: Effect[[], int] = effect("e")
+        h: Handler[int] = create_handler(e)
+
+        log: list[str] = []
+        saved: list[Resume[int, int]] = []
+
+        @h.on(e)
+        def _handle(k: Resume[int, int]) -> int:
+            saved.append(k)
+            return 0
+
+        assert h(lambda: e()) == 0
+
+        with wind(lambda: log.append("before"), lambda: log.append("after")):
+            assert saved[0](99) == 99
+
+        assert log == ["before", "after"]
+        assert _get_wind_stack() == []
+
+    def test_nested_multishot_does_not_unwind_rewound_wind(self):
+        """An inner resume must not unwind what an outer rewind re-entered."""
+        inner_e: Effect[[], int] = effect("inner")
+        outer_e: Effect[[int], int] = effect("outer")
+
+        h_outer: Handler[Any] = create_handler(outer_e)
+        h_inner: Handler[Any] = create_handler(inner_e)
+
+        log: list[str] = []
+
+        @h_outer.on(outer_e)
+        def _handle_outer(k: Resume[int, Any], v: int) -> list[Any]:
+            return [k(v), k(v + 100)]
+
+        @h_inner.on(inner_e)
+        def _handle_inner(k: Resume[int, Any]) -> Any:
+            with wind(lambda: log.append("before"), lambda: log.append("after")):
+                return k(outer_e(7))
+
+        h_outer(lambda: h_inner(lambda: inner_e()))
+
+        # The outer handler drives the inner handler fn twice, so the guard is
+        # entered twice -- and must be exited exactly twice.
+        assert log.count("before") == 2
+        assert log.count("after") == 2
+        assert log == ["before", "after", "before", "after"]
+        assert _get_wind_stack() == []
+
+    def test_recursive_multishot_wind_in_handler(self):
+        """Recursive multi-shot must not amplify the handler-side after()."""
+        choose: Effect[[list[int]], int] = effect("choose")
+        h: Handler[Any] = create_handler(choose)
+
+        log: list[str] = []
+        first = [True]
+
+        @h.on(choose)
+        def _choose(k: Resume[int, Any], opts: list[int]) -> list[Any]:
+            if first[0]:
+                first[0] = False
+                with wind(lambda: log.append("before"), lambda: log.append("after")):
+                    return [k(o) for o in opts]
+            return [k(o) for o in opts]
+
+        def body() -> int:
+            a = choose([1, 2])
+            b = choose([10, 20])
+            return a + b
+
+        h(body)
+        assert log == ["before", "after"]
+        assert _get_wind_stack() == []
+
+    def test_wind_outside_handler_invocation_multishot(self):
+        """A wind wrapping h(...) is shared, so it is neither re-entered nor exited.
+
+        Regression guard: a fix that simply clears the re-entry greenlet's wind
+        stack would re-enter this extent once per shot.
+        """
+        e: Effect[[], int] = effect("e")
+        h: Handler[int] = create_handler(e)
+
+        log: list[str] = []
+
+        @h.on(e)
+        def _handle(k: Resume[int, int]) -> int:
+            return k(1) + k(2)
+
+        def run() -> int:
+            with wind(lambda: log.append("before"), lambda: log.append("after")):
+                return h(lambda: e())
+
+        assert run() == 3
+        assert log == ["before", "after"]
+        assert _get_wind_stack() == []
+
+    def test_wind_range_inside_handler_fn_multishot(self):
+        """A handler-side wind_range keeps its position across shots.
+
+        Its snapshot belongs to the handler's branch and must never be restored
+        by a continuation re-entry, which would rewind the loop.
+        """
+        e: Effect[[], int] = effect("e")
+        h: Handler[int] = create_handler(e)
+
+        seen: list[int] = []
+
+        @h.on(e)
+        def _handle(k: Resume[int, int]) -> int:
+            total = 0
+            with wind_range(3) as r:
+                for i in r:
+                    seen.append(i)
+                    total += k(i)
+            return total
+
+        assert h(lambda: e()) == 0 + 1 + 2
+        assert seen == [0, 1, 2]
+        assert _get_wind_stack() == []
+
+    def test_cm_resource_stays_open_across_shots_in_handler(self):
+        """An auto_exit resource in the handler fn is not released between shots."""
+        e: Effect[[], int] = effect("e")
+        h: Handler[int] = create_handler(e)
+
+        log: list[str] = []
+
+        @contextmanager
+        def resource() -> Iterator[dict[str, bool]]:
+            log.append("open")
+            state = {"closed": False}
+            try:
+                yield state
+            finally:
+                state["closed"] = True
+                log.append("close")
+
+        closed_after_shot: list[bool] = []
+
+        @h.on(e)
+        def _handle(k: Resume[int, int]) -> int:
+            with wind(resource) as ref:
+                a = k(1)
+                closed_after_shot.append(ref.unwrap()["closed"])
+                b = k(2)
+                closed_after_shot.append(ref.unwrap()["closed"])
+                return a + b
+
+        assert h(lambda: e()) == 3
+        # The resource must still be usable inside the with block after every shot.
+        assert closed_after_shot == [False, False]
+        assert log == ["open", "close"]
+        assert _get_wind_stack() == []
+
+    def test_exception_in_later_shot_with_handler_wind(self):
+        """after() runs once when a later shot raises out of the continuation."""
+        e: Effect[[], int] = effect("e")
+        h: Handler[int] = create_handler(e)
+
+        log: list[str] = []
+
+        @h.on(e)
+        def _handle(k: Resume[int, int]) -> int:
+            with wind(lambda: log.append("before"), lambda: log.append("after")):
+                k(1)
+                return k(2)
+
+        def body() -> int:
+            v = e()
+            if v == 2:
+                raise ValueError("boom")
+            return v
+
+        with pytest.raises(ValueError, match="boom"):
+            h(body)
+
+        assert log == ["before", "after"]
+        assert _get_wind_stack() == []
+
+
+class TestWindAsyncHandlerExtentIsolation:
+    @pytest.mark.asyncio
+    async def test_wind_inside_async_handler_fn_multishot(self):
+        """The async re-entry path has the same isolation requirement."""
+        e: Effect[[], int] = effect("e")
+        h: AsyncHandler[int] = create_async_handler(e)
+
+        log: list[str] = []
+
+        @h.on(e)
+        async def _handle(k: ResumeAsync[int, int]) -> int:
+            with wind(lambda: log.append("before"), lambda: log.append("after")):
+                return await k(1) + await k(2) + await k(3)
+
+        assert await h(lambda: e()) == 6
+        assert log == ["before", "after"]
+        assert _get_wind_stack() == []
+
+    @pytest.mark.asyncio
+    async def test_wind_in_async_caller_and_handler_multishot(self):
+        """Caller-side extents still rewind per shot under an async handler."""
+        e: Effect[[], int] = effect("e")
+        h: AsyncHandler[int] = create_async_handler(e)
+
+        log: list[str] = []
+
+        @h.on(e)
+        async def _handle(k: ResumeAsync[int, int]) -> int:
+            with wind(lambda: log.append("before(H)"), lambda: log.append("after(H)")):
+                return await k(1) + await k(2)
+
+        def body() -> int:
+            with wind(lambda: log.append("before(C)"), lambda: log.append("after(C)")):
+                return e()
+
+        assert await h(body) == 3
+        assert log == [
+            "before(C)",
+            "before(H)",
+            "after(C)",
+            "before(C)",
+            "after(C)",
+            "after(H)",
+        ]
+        assert _get_wind_stack() == []
+
+
+# ---------------------------------------------------------------------------
+# Rewind failure handling
+#
+# rewind() runs before restore_continuation(), so no Python frame exists yet
+# that would __exit__ the extents it has just re-entered.  If a before() raises
+# part-way through, the re-entry must undo itself or those extents are lost.
+# ---------------------------------------------------------------------------
+
+
+class TestWindRewindRollback:
+    def test_before_raising_on_reentry_unwinds_partial_extents(self):
+        """A before() that raises mid-rewind must not orphan the outer extent."""
+        e: Effect[[], int] = effect("e")
+        h: Handler[int] = create_handler(e)
+
+        log: list[str] = []
+        calls = {"n": 0}
+
+        def flaky_before() -> None:
+            calls["n"] += 1
+            log.append(f"before(inner)#{calls['n']}")
+            if calls["n"] == 2:
+                raise RuntimeError("inner before failed")
+
+        outer = wind(lambda: log.append("before(outer)"), lambda: log.append("after(outer)"))
+        inner = wind(flaky_before, lambda: log.append("after(inner)"))
+
+        @h.on(e)
+        def _handle(k: Resume[int, int]) -> int:
+            return k(1) + k(2)
+
+        def body() -> int:
+            with outer:
+                with inner:
+                    return e()
+
+        with pytest.raises(RuntimeError, match="inner before failed"):
+            h(body)
+
+        assert log == [
+            "before(outer)",
+            "before(inner)#1",
+            "after(inner)",
+            "after(outer)",
+            # second shot: outer is re-entered, inner's before() then fails
+            "before(outer)",
+            "before(inner)#2",
+            # the re-entered outer extent must be unwound, not lost
+            "after(outer)",
+        ]
+        assert log.count("before(outer)") == log.count("after(outer)")
+        assert _get_wind_stack() == []
+
+
+# ---------------------------------------------------------------------------
+# enter/exit pairing is enforced by WindBase
+# ---------------------------------------------------------------------------
+
+
+class TestWindPairingGuard:
+    def test_exit_without_entry_raises(self):
+        """__exit__ on a wind that was never entered is an error."""
+        w = wind(lambda: None, lambda: None)
+        with pytest.raises(RuntimeError, match="wind exit without active entry"):
+            w.__exit__(None, None, None)
+
+    def test_exit_more_times_than_entered_raises(self):
+        """A second __exit__ after a balanced with-block is an error."""
+        w = wind(lambda: None, lambda: None)
+        with w:
+            pass
+        with pytest.raises(RuntimeError, match="wind exit without active entry"):
+            w.__exit__(None, None, None)
+        assert _get_wind_stack() == []
+
+    def test_same_wind_object_can_nest(self):
+        """Recursive reuse of one wind object keeps working (no auto_exit cm)."""
+        log: list[str] = []
+        w = wind(lambda: log.append("before"), lambda: log.append("after"))
+
+        def rec(n: int) -> None:
+            with w:
+                if n:
+                    rec(n - 1)
+
+        rec(2)
+        assert log == ["before"] * 3 + ["after"] * 3
+        assert _get_wind_stack() == []

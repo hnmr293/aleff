@@ -123,6 +123,6 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Create GitHub Release
-        run: gh release create "${{ needs.check-version.outputs.tag }}" --generate-notes
+        run: gh release create "${{ needs.check-version.outputs.tag }}" --target main --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
