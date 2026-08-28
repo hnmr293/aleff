@@ -87,9 +87,6 @@ test-command = "pytest {project}/tests -q"
 test-requires = [
     "pytest",
     "pytest-asyncio",
-    "greenlet>=3.3.2; python_version < '3.14'",
-    "greenlet>=3.3.2,<3.4.0; python_full_version >= '3.14' and python_full_version < '3.14.4'",
-    "greenlet>=3.5.5; python_full_version >= '3.14.4'",
 ]
 
 [tool.cibuildwheel.linux]
