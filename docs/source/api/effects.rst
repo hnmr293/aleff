@@ -16,6 +16,7 @@ Prohibited callback contexts
    * weak-reference callbacks;
    * garbage-collector callbacks;
    * ``__del__`` methods or other finalizers;
+   * callbacks invoked by ``dict.setdefault``;
    * ``atexit`` callbacks; or
    * GUI callbacks, event-loop callbacks, or callbacks running on another
      thread.
