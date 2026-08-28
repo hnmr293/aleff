@@ -1211,6 +1211,46 @@ def _builtin_print_effectful_flush() -> None:
     _assert_equal(_resume_outcomes(run), _returns(None, None))
 
 
+@_case("error", "builtin_print_effectful_flush_precedes_invalid_sep")
+def _builtin_print_effectful_flush_precedes_invalid_sep() -> None:
+    def run(choose: Choose) -> str:
+        class Flush:
+            def __bool__(self) -> bool:
+                return bool(choose())
+
+        class Output:
+            def write(self, text: str) -> int:
+                return len(text)
+
+        try:
+            print("value", sep=object(), file=Output(), flush=Flush())
+        except TypeError:
+            return "TypeError"
+        return "returned"
+
+    _assert_equal(_resume_outcomes(run), _returns("TypeError", "TypeError"))
+
+
+@_case("error", "builtin_print_effectful_flush_precedes_invalid_end")
+def _builtin_print_effectful_flush_precedes_invalid_end() -> None:
+    def run(choose: Choose) -> str:
+        class Flush:
+            def __bool__(self) -> bool:
+                return bool(choose())
+
+        class Output:
+            def write(self, text: str) -> int:
+                return len(text)
+
+        try:
+            print("value", end=object(), file=Output(), flush=Flush())
+        except TypeError:
+            return "TypeError"
+        return "returned"
+
+    _assert_equal(_resume_outcomes(run), _returns("TypeError", "TypeError"))
+
+
 @_case("normal", "builtin_open_effectful_path_protocol")
 def _builtin_open_effectful_path_protocol() -> None:
     paths = (str(Path(__file__).resolve()), str(Path(__file__).resolve().parents[1] / "README.md"))
@@ -1305,7 +1345,11 @@ def _builtin_input_newline_eof_and_crlf_isolated_per_shot() -> None:
 
     _assert_equal(
         _resume_outcomes(run, ("one\n", "", "ten\r\n")),
-        [("return", "one"), ("raise", "EOFError"), ("return", "ten")],
+        [
+            ("return", "one"),
+            ("raise", "EOFError"),
+            ("return", "ten\r"),
+        ],
     )
 
 
@@ -2001,6 +2045,133 @@ def _list_sort_effectful_key() -> None:
     _assert_equal(_resume_outcomes(run, (0, 10)), _returns((1, 2), (2, 1)))
 
 
+@_case("corner", "list_sort_completed_shot_is_not_reported_as_mutation")
+def _list_sort_completed_shot_is_not_reported_as_mutation() -> None:
+    def run(choose: Choose) -> tuple[int, ...]:
+        target = [1, 2]
+        target.sort(key=lambda value: choose() if value == 1 else 5)
+        return tuple(target)
+
+    _assert_equal(
+        _resume_outcomes(run, (0, 10, 0)),
+        _returns((1, 2), (2, 1), (1, 2)),
+    )
+
+
+def _sort_comparison_effect_case(
+    operation: str,
+    values: tuple[int, ...],
+    target_pair: tuple[int, int],
+) -> None:
+    expected = tuple(sorted(values))
+
+    def run(choose: Choose) -> tuple[int, ...]:
+        class Key:
+            def __init__(self, value: int, index: int) -> None:
+                self.value = value
+                self.index = index
+
+            def __lt__(self, other: Key) -> bool:
+                if (self.index, other.index) == target_pair:
+                    selected = choose()
+                    assert selected in {"first", "second"}
+                return self.value < other.value
+
+        indexed = list(enumerate(values))
+
+        def key(item: tuple[int, int]) -> Key:
+            return Key(item[1], item[0])
+
+        if operation == "sorted":
+            result = sorted(indexed, key=key)
+        else:
+            result = indexed
+            method_result = result.sort(key=key)
+            assert method_result is None
+        return tuple(value for _, value in result)
+
+    _assert_equal(
+        _resume_outcomes(run, ("first", "second")),
+        _returns(expected, expected),
+    )
+
+
+_SORT_RUN_PHASE_CASES: tuple[tuple[str, tuple[int, ...], tuple[int, int], tuple[int, int], CaseKind], ...] = (
+    ("ascending_scan", (1, 3, 2), (1, 0), (3, 12), "normal"),
+    ("descending_scan", (3, 2, 1), (2, 1), (3, 12), "normal"),
+    ("binary_insertion", (1, 3, 2), (2, 0), (3, 12), "normal"),
+    (
+        "merge",
+        tuple(range(40)) + tuple(range(-40, 0)),
+        (40, 0),
+        (3, 12),
+        "normal",
+    ),
+    ("ascending_drop_disambiguation", (1, 3, 2), (0, 1), (3, 13), "corner"),
+    ("equal_descending_run", (3, 2, 2, 1), (1, 2), (3, 13), "corner"),
+    (
+        "post_reverse_ascending_suffix",
+        (3, 2, 1, 3, 4, 0),
+        (2, 3),
+        (3, 13),
+        "corner",
+    ),
+)
+
+for _operation in ("sorted", "list_sort"):
+    for _phase, _values, _target_pair, _minimum_version, _kind in _SORT_RUN_PHASE_CASES:
+        if sys.version_info >= _minimum_version:
+            _case(_kind, f"{_operation}_{_phase}_comparison_multishot")(
+                functools.partial(
+                    _sort_comparison_effect_case,
+                    _operation,
+                    _values,
+                    _target_pair,
+                )
+            )
+
+
+def _sort_disambiguation_error_effect_case(operation: str) -> None:
+    class SelectedSortComparisonError(Exception):
+        pass
+
+    def run(choose: Choose) -> tuple[int, ...]:
+        class Key:
+            def __init__(self, value: int, index: int) -> None:
+                self.value = value
+                self.index = index
+
+            def __lt__(self, other: Key) -> bool:
+                if (self.index, other.index) == (0, 1):
+                    if choose() == "raise":
+                        raise SelectedSortComparisonError
+                return self.value < other.value
+
+        values = list(enumerate((1, 3, 2)))
+
+        def key(item: tuple[int, int]) -> Key:
+            return Key(item[1], item[0])
+
+        if operation == "sorted":
+            result = sorted(values, key=key)
+        else:
+            result = values
+            result.sort(key=key)
+        return tuple(value for _, value in result)
+
+    _assert_equal(
+        _resume_outcomes(run, ("raise", "continue")),
+        [("raise", "SelectedSortComparisonError"), ("return", (1, 2, 3))],
+    )
+
+
+if sys.version_info >= (3, 13):
+    for _operation in ("sorted", "list_sort"):
+        _case("error", f"{_operation}_disambiguation_error_isolated_per_shot")(
+            functools.partial(_sort_disambiguation_error_effect_case, _operation)
+        )
+
+
 def _sequence_search_case(sequence_type: type[list[Any]] | type[tuple[Any, ...]], operation: str) -> None:
     def run(choose: Choose) -> Any:
         class Item:
@@ -2538,9 +2709,7 @@ def _cmp_to_key_case(operation: str) -> None:
 
 
 for _name in ("lt", "le", "eq", "ne", "gt", "ge"):
-    _case("normal", f"functools_cmp_to_key_{_name}")(
-        functools.partial(_cmp_to_key_case, _name)
-    )
+    _case("normal", f"functools_cmp_to_key_{_name}")(functools.partial(_cmp_to_key_case, _name))
 
 
 @_case("error", "functools_cmp_to_key_invalid_result_isolated_per_shot")
@@ -2606,10 +2775,7 @@ def _functools_lru_cache_each_shot_updates_cache() -> None:
     outcomes = _resume_outcomes(run)
     _assert_equal(outcomes, _returns((1, 1), (10, 10)))
     assert all(
-        tag == "return"
-        and type(value) is tuple
-        and all(type(item) is int for item in value)
-        for tag, value in outcomes
+        tag == "return" and type(value) is tuple and all(type(item) is int for item in value) for tag, value in outcomes
     ), outcomes
 
 
@@ -2753,8 +2919,22 @@ def _functools_lru_cache_continuation_preserves_public_wrapper_attributes() -> N
     _assert_equal(
         _resume_outcomes(run),
         _returns(
-            (1, "implementation", "Original cached implementation.", "implementation", {"maxsize": 2, "typed": True}, expected_info),
-            (10, "implementation", "Original cached implementation.", "implementation", {"maxsize": 2, "typed": True}, expected_info),
+            (
+                1,
+                "implementation",
+                "Original cached implementation.",
+                "implementation",
+                {"maxsize": 2, "typed": True},
+                expected_info,
+            ),
+            (
+                10,
+                "implementation",
+                "Original cached implementation.",
+                "implementation",
+                {"maxsize": 2, "typed": True},
+                expected_info,
+            ),
         ),
     )
 
@@ -2838,9 +3018,7 @@ def _operator_concat_requires_sequence() -> None:
 
 
 for _name in _OPERATOR_PROTOCOL_CASES:
-    _case("normal", f"operator_public_{_name}")(
-        functools.partial(_operator_protocol_case, _name)
-    )
+    _case("normal", f"operator_public_{_name}")(functools.partial(_operator_protocol_case, _name))
 
 
 def _operator_truth_case(name: str) -> None:
@@ -2860,9 +3038,7 @@ def _operator_truth_case(name: str) -> None:
 
 
 for _name in ("truth", "not_"):
-    _case("normal", f"operator_public_{_name}")(
-        functools.partial(_operator_truth_case, _name)
-    )
+    _case("normal", f"operator_public_{_name}")(functools.partial(_operator_truth_case, _name))
 
 
 @_case("normal", "operator_public_length_hint")
@@ -2962,9 +3138,7 @@ def _operator_mutation_case(name: str) -> None:
 
 
 for _name in ("setitem", "delitem"):
-    _case("normal", f"operator_public_{_name}")(
-        functools.partial(_operator_mutation_case, _name)
-    )
+    _case("normal", f"operator_public_{_name}")(functools.partial(_operator_mutation_case, _name))
 
 
 @_case("corner", "operator_public_function_coverage")

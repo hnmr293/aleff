@@ -57,7 +57,9 @@ record("count_bool_equal", lambda: values.count(True))
 record("count_float_missing", lambda: values.count(3.0))
 record("index_int", lambda: values.index(6))
 record("index_float_equal", lambda: values.index(6.0))
-record("index_missing", lambda: values.index(7))
+record("index_missing_int", lambda: values.index(7))
+record("index_missing_bool", lambda: values.index(True))
+record("index_missing_float", lambda: values.index(7.0))
 
 class Needle:
     def __init__(self):
@@ -70,6 +72,12 @@ class Needle:
 needle = Needle()
 record("count_custom_equality", lambda: values.count(needle))
 print(("custom_equality_comparisons", needle.comparisons))
+
+class MissingNeedle:
+    def __eq__(self, other):
+        return False
+
+record("index_missing_custom", lambda: values.index(MissingNeedle()))
 
 large_start = 10**100
 large_values = range(large_start, large_start + 8, 2)

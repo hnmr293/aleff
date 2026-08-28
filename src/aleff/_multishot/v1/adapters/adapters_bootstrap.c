@@ -7,9 +7,36 @@ static PyMethodDef sum_method = {
 
 static PyMethodDef reduce_method = {
     .ml_name = "reduce",
+#if PY_VERSION_HEX >= 0x030e0000
+    .ml_meth = (PyCFunction)(void(*)(void))adapter_reduce,
+    .ml_flags = METH_VARARGS | METH_KEYWORDS,
+    .ml_doc =
+        "reduce($module, function, iterable, /, initial=<unrepresentable>)\n"
+        "--\n\n"
+        "Apply a function of two arguments cumulatively to the items of an "
+        "iterable, from left to right.\n\n"
+        "This effectively reduces the iterable to a single value.  If initial "
+        "is present,\n"
+        "it is placed before the items of the iterable in the calculation, "
+        "and serves as\n"
+        "a default when the iterable is empty.\n\n"
+        "For example, reduce(lambda x, y: x+y, [1, 2, 3, 4, 5])\n"
+        "calculates ((((1 + 2) + 3) + 4) + 5).",
+#else
     .ml_meth = adapter_reduce,
     .ml_flags = METH_VARARGS,
-    .ml_doc = "Apply a function of two arguments cumulatively to an iterable.",
+    .ml_doc =
+        "reduce(function, iterable[, initial], /) -> value\n\n"
+        "Apply a function of two arguments cumulatively to the items of an "
+        "iterable, from left to right.\n\n"
+        "This effectively reduces the iterable to a single value.  If initial "
+        "is present,\n"
+        "it is placed before the items of the iterable in the calculation, "
+        "and serves as\n"
+        "a default when the iterable is empty.\n\n"
+        "For example, reduce(lambda x, y: x+y, [1, 2, 3, 4, 5])\n"
+        "calculates ((((1 + 2) + 3) + 4) + 5).",
+#endif
 };
 
 static PyMethodDef bin_method = {
@@ -142,7 +169,11 @@ static PyMethodDef chain_from_iterable_method = {
     .ml_name = "from_iterable",
     .ml_meth = adapter_chain_from_iterable,
     .ml_flags = METH_O | METH_CLASS,
-    .ml_doc = "Alternative chain() constructor taking a single iterable argument.",
+    .ml_doc =
+        "from_iterable($type, iterable, /)\n"
+        "--\n\n"
+        "Alternative chain() constructor taking a single iterable argument "
+        "that evaluates lazily.",
 };
 
 static PyMethodDef all_method = {
@@ -285,7 +316,7 @@ typedef struct {
     int present;
 } AleffInstallAttribute;
 
-#define ALEFF_INSTALL_ATTRIBUTE_MAX 160
+#define ALEFF_INSTALL_ATTRIBUTE_MAX 256
 
 typedef struct {
     AleffInstallAttribute attributes[ALEFF_INSTALL_ATTRIBUTE_MAX];
@@ -294,6 +325,7 @@ typedef struct {
 
 typedef struct {
     newfunc map_new;
+    vectorcallfunc map_vectorcall;
     iternextfunc map_next;
     newfunc zip_new;
     iternextfunc zip_next;
@@ -304,6 +336,8 @@ typedef struct {
     vectorcallfunc reversed_vectorcall;
     iternextfunc reversed_next;
     iternextfunc filter_next;
+    newfunc filter_new;
+    vectorcallfunc filter_vectorcall;
     initproc list_init;
     vectorcallfunc list_vectorcall;
     newfunc tuple_new;
@@ -317,6 +351,8 @@ typedef struct {
     newfunc bytes_new;
     initproc bytearray_init;
     hashfunc slice_hash;
+    reprfunc list_repr;
+    hashfunc tuple_hash;
     richcmpfunc list_richcompare;
     richcmpfunc tuple_richcompare;
     richcmpfunc dict_richcompare;
@@ -327,6 +363,9 @@ typedef struct {
     vectorcallfunc float_vectorcall;
     vectorcallfunc complex_vectorcall;
     vectorcallfunc str_vectorcall;
+    PyTypeObject *operator_accessor_types[3];
+    ternaryfunc operator_accessor_calls[3];
+    unsigned long operator_accessor_flags[3];
     PySequenceMethods *list_sequence;
     PySequenceMethods *tuple_sequence;
     objobjproc list_contains;
@@ -442,7 +481,20 @@ restore_install_backup(AleffInstallBackup *backup)
 static int
 replace_builtin(PyObject *builtins, const char *name, PyMethodDef *method)
 {
-    PyObject *function = PyCFunction_NewEx(method, NULL, NULL);
+    PyObject *original = PyDict_GetItemString(builtins, name);
+    PyObject *self = NULL;
+    PyObject *module = NULL;
+    if (original != NULL && PyCFunction_Check(original)) {
+        PyMethodDef *original_method = ((PyCFunctionObject *)original)->m_ml;
+        method->ml_doc = original_method->ml_doc;
+        self = PyCFunction_GET_SELF(original);
+        module = PyObject_GetAttrString(original, "__module__");
+        if (module == NULL) {
+            return -1;
+        }
+    }
+    PyObject *function = PyCFunction_NewEx(method, self, module);
+    Py_XDECREF(module);
     if (function == NULL) {
         return -1;
     }
@@ -454,15 +506,18 @@ replace_builtin(PyObject *builtins, const char *name, PyMethodDef *method)
 static int
 replace_type_method(PyTypeObject *type, const char *name, PyMethodDef *method)
 {
+    PyObject *type_dict = PyType_GetDict(type);
+    if (type_dict == NULL) {
+        return -1;
+    }
+    PyObject *original = PyDict_GetItemString(type_dict, name);
+    if (original != NULL && Py_IS_TYPE(original, &PyMethodDescr_Type)) {
+        method->ml_doc = ((PyMethodDescrObject *)original)->d_method->ml_doc;
+    }
     PyObject *descriptor = (method->ml_flags & METH_CLASS) != 0
         ? PyDescr_NewClassMethod(type, method)
         : PyDescr_NewMethod(type, method);
     if (descriptor == NULL) {
-        return -1;
-    }
-    PyObject *type_dict = PyType_GetDict(type);
-    if (type_dict == NULL) {
-        Py_DECREF(descriptor);
         return -1;
     }
     int result = PyDict_SetItemString(type_dict, name, descriptor);
@@ -564,6 +619,7 @@ aleff_adapter_install(void)
     BACKUP_MODULE(pre_operator, "countOf");
     BACKUP_MODULE(pre_functools, "cmp_to_key");
     BACKUP_MODULE(pre_functools, "lru_cache");
+    BACKUP_MODULE(pre_functools, "_lru_cache_wrapper");
     BACKUP_MODULE(pre_functools, "reduce");
     PyObject *pre_chain = PyObject_GetAttrString(pre_itertools, "chain");
     if (pre_chain == NULL || !PyType_Check(pre_chain)) {
@@ -581,14 +637,43 @@ aleff_adapter_install(void)
         "matmul", "mod", "mul", "ne", "neg", "not_", "or_", "pos", "pow",
         "rshift", "setitem", "sub", "truediv", "truth", "xor", "length_hint",
         "contains", "attrgetter", "itemgetter", "methodcaller",
+        "__abs__", "__add__", "__and__", "__call__", "__concat__",
+        "__contains__", "__delitem__", "__eq__", "__floordiv__", "__ge__",
+        "__getitem__", "__gt__", "__iadd__", "__iand__", "__iconcat__",
+        "__ifloordiv__", "__ilshift__", "__imatmul__", "__imod__", "__imul__",
+        "__index__", "__inv__", "__invert__", "__ior__", "__ipow__",
+        "__irshift__", "__isub__", "__itruediv__", "__ixor__", "__le__",
+        "__lshift__", "__lt__", "__matmul__", "__mod__", "__mul__",
+        "__ne__", "__neg__", "__not__", "__or__", "__pos__", "__pow__",
+        "__rshift__", "__setitem__", "__sub__", "__truediv__", "__xor__",
     };
     for (Py_ssize_t index = 0; index < (Py_ssize_t)(sizeof(operator_names) / sizeof(*operator_names)); index++) {
         if (backup_module_attribute(&backup, pre_operator, operator_names[index]) < 0) goto rollback;
+    }
+    static const char *operator_accessor_names[] = {
+        "attrgetter", "itemgetter", "methodcaller",
+    };
+    for (Py_ssize_t index = 0; index < 3; index++) {
+        PyObject *object = PyObject_GetAttrString(
+            pre_operator,
+            operator_accessor_names[index]
+        );
+        if (object == NULL || !PyType_Check(object)) {
+            Py_XDECREF(object);
+            PyErr_SetString(PyExc_RuntimeError, "cannot access operator accessor type");
+            goto rollback;
+        }
+        PyTypeObject *type = (PyTypeObject *)object;
+        slots.operator_accessor_types[index] = type;
+        slots.operator_accessor_calls[index] = type->tp_call;
+        slots.operator_accessor_flags[index] = type->tp_flags;
+        Py_DECREF(object);
     }
     PyObject *slot_object = PyDict_GetItemString(builtins, "map");
     if (slot_object != NULL && PyType_Check(slot_object)) {
         PyTypeObject *type = (PyTypeObject *)slot_object;
         slots.map_new = type->tp_new;
+        slots.map_vectorcall = type->tp_vectorcall;
         slots.map_next = type->tp_iternext;
     }
     slot_object = PyDict_GetItemString(builtins, "zip");
@@ -613,7 +698,10 @@ aleff_adapter_install(void)
     }
     slot_object = PyDict_GetItemString(builtins, "filter");
     if (slot_object != NULL && PyType_Check(slot_object)) {
-        slots.filter_next = ((PyTypeObject *)slot_object)->tp_iternext;
+        PyTypeObject *type = (PyTypeObject *)slot_object;
+        slots.filter_new = type->tp_new;
+        slots.filter_vectorcall = type->tp_vectorcall;
+        slots.filter_next = type->tp_iternext;
     }
     slots.list_init = PyList_Type.tp_init;
     slots.list_vectorcall = PyList_Type.tp_vectorcall;
@@ -628,6 +716,8 @@ aleff_adapter_install(void)
     slots.bytes_new = PyBytes_Type.tp_new;
     slots.bytearray_init = PyByteArray_Type.tp_init;
     slots.slice_hash = PySlice_Type.tp_hash;
+    slots.list_repr = PyList_Type.tp_repr;
+    slots.tuple_hash = PyTuple_Type.tp_hash;
     slots.list_richcompare = PyList_Type.tp_richcompare;
     slots.tuple_richcompare = PyTuple_Type.tp_richcompare;
     slots.dict_richcompare = PyDict_Type.tp_richcompare;
@@ -717,6 +807,10 @@ aleff_adapter_install(void)
     PyTypeObject *map_type = (PyTypeObject *)map_type_object;
     original_map_new = map_type->tp_new;
     map_type->tp_new = adapter_map_new;
+    original_map_vectorcall = map_type->tp_vectorcall;
+    if (original_map_vectorcall != NULL) {
+        map_type->tp_vectorcall = adapter_map_vectorcall;
+    }
     original_map_next = map_type->tp_iternext;
     map_type->tp_iternext = adapter_map_next;
     PyType_Modified(map_type);
@@ -792,6 +886,12 @@ aleff_adapter_install(void)
         goto rollback;
     }
     PyTypeObject *filter_type = (PyTypeObject *)filter_type_object;
+    original_filter_new = filter_type->tp_new;
+    filter_type->tp_new = adapter_filter_new;
+    original_filter_vectorcall = filter_type->tp_vectorcall;
+    if (original_filter_vectorcall != NULL) {
+        filter_type->tp_vectorcall = adapter_filter_vectorcall;
+    }
     filter_type->tp_iternext = adapter_filter_next;
     PyType_Modified(filter_type);
 
@@ -878,6 +978,13 @@ aleff_adapter_install(void)
         goto rollback;
     }
     PySlice_Type.tp_hash = adapter_slice_hash;
+    original_tuple_hash = PyTuple_Type.tp_hash;
+    if (original_tuple_hash == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "tuple is not hashable on this CPython");
+        goto rollback;
+    }
+    PyList_Type.tp_repr = adapter_list_repr;
+    PyTuple_Type.tp_hash = adapter_tuple_hash;
     original_list_richcompare = PyList_Type.tp_richcompare;
     original_tuple_richcompare = PyTuple_Type.tp_richcompare;
     PyList_Type.tp_richcompare = adapter_sequence_richcompare;
@@ -953,7 +1060,16 @@ aleff_adapter_install(void)
     if (functools == NULL) {
         goto rollback;
     }
-    PyObject *functools_name = PyUnicode_FromString("functools");
+    PyObject *original_reduce = PyObject_GetAttrString(functools, "reduce");
+    if (original_reduce == NULL || !PyCFunction_Check(original_reduce)) {
+        Py_XDECREF(original_reduce);
+        Py_DECREF(functools);
+        goto rollback;
+    }
+    reduce_method.ml_doc =
+        ((PyCFunctionObject *)original_reduce)->m_ml->ml_doc;
+    Py_DECREF(original_reduce);
+    PyObject *functools_name = PyUnicode_FromString("_functools");
     if (functools_name == NULL) {
         Py_DECREF(functools);
         goto rollback;
@@ -1027,6 +1143,7 @@ rollback:
             if (slot_object != NULL && PyType_Check(slot_object)) {
             PyTypeObject *type = (PyTypeObject *)slot_object;
             type->tp_new = slots.map_new;
+            type->tp_vectorcall = slots.map_vectorcall;
             type->tp_iternext = slots.map_next;
             PyType_Modified(type);
             }
@@ -1055,8 +1172,11 @@ rollback:
             }
             slot_object = PyDict_GetItemString(builtins, "filter");
             if (slot_object != NULL && PyType_Check(slot_object)) {
-            ((PyTypeObject *)slot_object)->tp_iternext = slots.filter_next;
-            PyType_Modified((PyTypeObject *)slot_object);
+            PyTypeObject *type = (PyTypeObject *)slot_object;
+            type->tp_new = slots.filter_new;
+            type->tp_vectorcall = slots.filter_vectorcall;
+            type->tp_iternext = slots.filter_next;
+            PyType_Modified(type);
             }
             PyList_Type.tp_init = slots.list_init;
         PyList_Type.tp_vectorcall = slots.list_vectorcall;
@@ -1071,6 +1191,8 @@ rollback:
         PyBytes_Type.tp_new = slots.bytes_new;
         PyByteArray_Type.tp_init = slots.bytearray_init;
         PySlice_Type.tp_hash = slots.slice_hash;
+        PyList_Type.tp_repr = slots.list_repr;
+        PyTuple_Type.tp_hash = slots.tuple_hash;
         PyList_Type.tp_richcompare = slots.list_richcompare;
         PyTuple_Type.tp_richcompare = slots.tuple_richcompare;
         PyDict_Type.tp_richcompare = slots.dict_richcompare;
@@ -1083,6 +1205,14 @@ rollback:
         PyFloat_Type.tp_vectorcall = slots.float_vectorcall;
         PyComplex_Type.tp_vectorcall = slots.complex_vectorcall;
         PyUnicode_Type.tp_vectorcall = slots.str_vectorcall;
+        for (Py_ssize_t index = 0; index < 3; index++) {
+            PyTypeObject *type = slots.operator_accessor_types[index];
+            if (type != NULL) {
+                type->tp_call = slots.operator_accessor_calls[index];
+                type->tp_flags = slots.operator_accessor_flags[index];
+                PyType_Modified(type);
+            }
+        }
         if (slots.list_sequence != NULL) {
             slots.list_sequence->sq_contains = slots.list_contains;
         }
@@ -1105,6 +1235,7 @@ rollback:
         PyType_Modified(&PyUnicode_Type);
         }
         adapter_itertools_rollback();
+        adapter_functools_rollback();
         restore_install_backup(&backup);
 
         Py_CLEAR(original_input);
@@ -1119,8 +1250,7 @@ rollback:
         Py_CLEAR(import_get_module_lock);
         Py_CLEAR(import_global_lock_held);
         Py_CLEAR(import_global_lock_acquire);
-        Py_CLEAR(functools_original_lru_cache);
-        Py_CLEAR(functools_update_wrapper);
+        Py_CLEAR(original_slice_indices);
         adapters_installed = 0;
         Py_XDECREF(pre_itertools);
         Py_XDECREF(pre_operator);

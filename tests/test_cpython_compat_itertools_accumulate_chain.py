@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+import inspect
 import itertools
 from pathlib import Path
+import struct
 import subprocess
 import sys
 from typing import Any, cast
@@ -184,6 +186,43 @@ def test_itertools_matches_cpython(source: str) -> None:
     """Compare deterministic output before and after importing aleff."""
 
     assert_cpython_compatible(source)
+
+
+def test_batched_native_layout_matches_the_running_cpython_version() -> None:
+    pointer_size = struct.calcsize("P")
+    expected_size = object.__basicsize__ + 2 * pointer_size
+    if sys.version_info >= (3, 13):
+        expected_size = (expected_size + struct.calcsize("?") + pointer_size - 1) // pointer_size * pointer_size
+
+    parameters = inspect.signature(itertools.batched).parameters
+    assert itertools.batched.__basicsize__ == expected_size
+    assert ("strict" in parameters) is (sys.version_info >= (3, 13))
+
+
+@pytest.mark.skipif(
+    sys.version_info[:2] != (3, 12),
+    reason="Python 3.12 batched objects do not have a strict field",
+)
+def test_batched_partial_batch_is_stable_across_fresh_processes() -> None:
+    source = "import itertools\nimport aleff\nassert list(itertools.batched(range(5), 2)) == [(0, 1), (2, 3), (4,)]\n"
+    failures: list[tuple[int, str, str]] = []
+    for attempt in range(32):
+        result = subprocess.run(
+            [sys.executable, "-X", "faulthandler", "-c", source],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            failures.append((attempt, result.stdout, result.stderr))
+
+    if failures:
+        attempt, stdout, stderr = failures[0]
+        pytest.fail(
+            f"{len(failures)} of 32 fresh processes failed; "
+            f"first failure was attempt {attempt}:\n"
+            f"stdout:\n{stdout}\nstderr:\n{stderr}"
+        )
 
 
 Choose = Callable[[], Any]

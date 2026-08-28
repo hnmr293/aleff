@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from typing import Any, Callable, cast
 
 import pytest
@@ -206,6 +209,40 @@ else:
     )
 
 
+def test_set_operations_reuse_operand_hashes() -> None:
+    assert_cpython_compatible(
+        r"""
+class Key:
+    calls = 0
+
+    def __hash__(self):
+        type(self).calls += 1
+        return 7
+
+    def __eq__(self, other):
+        return self is other
+
+def measure(operation, frozen=False):
+    Key.calls = 0
+    key = Key()
+    target = frozenset() if frozen else set()
+    result = getattr(target, operation)([key])
+    return type(result).__name__, len(result), Key.calls
+
+for operation in ("union", "intersection", "difference", "symmetric_difference"):
+    print("set", operation, measure(operation))
+    print("frozenset", operation, measure(operation, True))
+
+for operation in ("intersection_update", "difference_update", "symmetric_difference_update"):
+    Key.calls = 0
+    key = Key()
+    target = set()
+    result = getattr(target, operation)([key])
+    print("mutating", operation, result, len(target), Key.calls)
+"""
+    )
+
+
 def _resume_outcomes(run: Callable[[Any], Any]) -> list[Any]:
     choose = effect("set-operation-choice")
     handler = create_handler(choose)
@@ -251,3 +288,138 @@ def test_nonmutating_set_operation_resume_preserves_operation_state(
     result_type = "set" if container_type is set else "frozenset"
     expected = [(result_type, expected_size), (result_type, expected_size)]
     assert _resume_outcomes(run) == expected
+
+
+@pytest.mark.parametrize("container_name", ["set", "frozenset"])
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        ("union", [2, 1]),
+        ("intersection", [0, 1]),
+        ("difference", [1, 0]),
+        ("symmetric_difference", [2, 0]),
+    ],
+)
+def test_set_operation_resume_preserves_collision_equality_state(
+    container_name: str, operation: str, expected: list[int]
+) -> None:
+    source = f"""
+from aleff import create_handler, effect
+
+choose = effect("set-collision-equality")
+handler = create_handler(choose)
+
+class Stored:
+    def __hash__(self):
+        return 1
+
+    def __eq__(self, other):
+        return choose()
+
+class Incoming:
+    def __hash__(self):
+        return 1
+
+@handler.on(choose)
+def resume(k):
+    return [k(False), k(True)]
+
+def run():
+    target = {container_name}((Stored(),))
+    return len(getattr(target, {operation!r})((Incoming(),)))
+
+print(handler(run))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", source],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == repr(expected)
+
+
+@pytest.mark.parametrize("container_name", ["set", "frozenset"])
+def test_set_constructor_resume_preserves_collision_equality_state(
+    container_name: str,
+) -> None:
+    source = f"""
+from aleff import create_handler, effect
+
+choose = effect("set-constructor-collision")
+handler = create_handler(choose)
+
+class Stored:
+    def __hash__(self):
+        return 1
+
+    def __eq__(self, other):
+        return choose()
+
+class Incoming:
+    def __hash__(self):
+        return 1
+
+@handler.on(choose)
+def resume(k):
+    return [k(False), k(True)]
+
+print(handler(lambda: len({container_name}((Stored(), Incoming())))))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", source],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == repr([2, 1])
+
+
+@pytest.mark.parametrize("container_type", [set, frozenset])
+def test_set_constructor_resize_preserves_every_inserted_key(
+    container_type: type[set[Any]] | type[frozenset[Any]],
+) -> None:
+    class CollidingKey:
+        def __init__(self, value: int) -> None:
+            self.value = value
+
+        def __hash__(self) -> int:
+            return 1
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, CollidingKey) and self.value == other.value
+
+    keys = [CollidingKey(value) for value in range(128)]
+    result = container_type(keys)
+
+    assert len(result) == len(keys)
+    assert all(key in result for key in keys)
+
+
+def test_set_adapter_install_is_stable_across_hash_seeds() -> None:
+    source = """
+import asyncio
+import importlib
+from aleff import create_handler, effect
+
+keys = [f"key-{index}" for index in range(512)]
+result = set(keys)
+assert len(result) == len(keys)
+assert all(key in result for key in keys)
+assert importlib.import_module("asyncio.threads") is asyncio.threads
+"""
+    for seed in range(1, 17):
+        environment = os.environ.copy()
+        environment["PYTHONHASHSEED"] = str(seed)
+        result = subprocess.run(
+            [sys.executable, "-c", source],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+        assert result.returncode == 0, (
+            f"PYTHONHASHSEED={seed}\n{result.stdout}{result.stderr}"
+        )

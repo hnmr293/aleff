@@ -204,6 +204,189 @@ print(comparisons)
     )
 
 
+def test_sorted_timsort_run_detection_comparison_order_matches_cpython() -> None:
+    assert_cpython_compatible(
+        """
+import sys
+
+def trace(values):
+    comparisons = []
+
+    class Key:
+        def __init__(self, value, index):
+            self.value = value
+            self.index = index
+
+        def __lt__(self, other):
+            comparisons.append((self.value, self.index, other.value, other.index))
+            return self.value < other.value
+
+    result = sorted(
+        enumerate(values),
+        key=lambda item: Key(item[1], item[0]),
+    )
+    return [value for _, value in result], comparisons
+
+rise_and_drop = trace([1, 3, 2])
+expected = (
+    [(3, 1, 1, 0), (2, 2, 3, 1), (2, 2, 3, 1), (2, 2, 1, 0)]
+    if sys.version_info < (3, 13)
+    else [
+        (3, 1, 1, 0),
+        (2, 2, 3, 1),
+        (1, 0, 3, 1),
+        (2, 2, 3, 1),
+        (2, 2, 1, 0),
+    ]
+)
+assert rise_and_drop == ([1, 2, 3], expected), rise_and_drop
+print("rise_and_drop", rise_and_drop)
+
+for label, values in (
+    ("equal_descending_run", [3, 2, 2, 1]),
+    ("descending_then_ascending_suffix", [3, 2, 1, 3, 4, 0]),
+):
+    print(label, trace(values))
+        """
+    )
+
+
+def test_sorted_timsort_reverse_stability_and_boundaries_match_cpython() -> None:
+    assert_cpython_compatible(
+        """
+import hashlib
+
+def trace(values, *, reverse=False):
+    comparisons = []
+
+    class Key:
+        def __init__(self, value, index):
+            self.value = value
+            self.index = index
+
+        def __lt__(self, other):
+            comparisons.append((self.value, self.index, other.value, other.index))
+            return self.value < other.value
+
+    result = sorted(
+        enumerate(values),
+        key=lambda item: Key(item[1], item[0]),
+        reverse=reverse,
+    )
+    digest = hashlib.sha256(repr(comparisons).encode()).hexdigest()
+    return result, len(comparisons), digest
+
+for label, values, reverse in (
+    ("empty", [], False),
+    ("single", [1], False),
+    ("all_equal", [2] * 8, False),
+    ("stable_forward", [2, 1, 2, 1], False),
+    ("stable_reverse", [2, 1, 2, 1], True),
+    ("minrun_63", [index % 7 for index in range(63, 0, -1)], False),
+    ("minrun_64", [index % 7 for index in range(64, 0, -1)], False),
+    ("minrun_65", [index % 7 for index in range(65, 0, -1)], False),
+    ("multiple_runs_merge", list(range(40)) + list(range(-40, 0)), False),
+):
+    print(label, trace(values, reverse=reverse))
+        """,
+        timeout=30,
+    )
+
+
+def test_sorted_timsort_callback_failures_and_mutation_match_cpython() -> None:
+    assert_cpython_compatible(
+        """
+def exercise(mode):
+    values = [1, 3, 2]
+    comparisons = []
+
+    class TruthFailure:
+        def __bool__(self):
+            raise LookupError("truth failed")
+
+    class Key:
+        def __init__(self, value):
+            self.value = value
+
+        def __lt__(self, other):
+            pair = (self.value, other.value)
+            comparisons.append(pair)
+            if pair == (1, 3):
+                if mode == "comparison_error":
+                    raise RuntimeError("comparison failed")
+                if mode == "truth_error":
+                    return TruthFailure()
+                if mode == "mutation":
+                    values.append(99)
+            return self.value < other.value
+
+    try:
+        result = sorted(values, key=Key)
+    except Exception as exc:
+        outcome = ("raise", type(exc).__name__, str(exc))
+    else:
+        outcome = ("return", result)
+    print(mode, outcome, values, comparisons)
+
+for mode in ("comparison_error", "truth_error", "mutation"):
+    exercise(mode)
+        """
+    )
+
+
+def test_sorted_and_list_sort_timsort_traces_are_identical() -> None:
+    assert_cpython_compatible(
+        """
+import hashlib
+
+def trace(operation, values, *, reverse=False):
+    comparisons = []
+
+    class Key:
+        def __init__(self, value, index):
+            self.value = value
+            self.index = index
+
+        def __lt__(self, other):
+            comparisons.append((self.value, self.index, other.value, other.index))
+            return self.value < other.value
+
+    indexed = list(enumerate(values))
+    if operation == "sorted":
+        result = sorted(
+            indexed,
+            key=lambda item: Key(item[1], item[0]),
+            reverse=reverse,
+        )
+    else:
+        result = indexed
+        result.sort(
+            key=lambda item: Key(item[1], item[0]),
+            reverse=reverse,
+        )
+    return result, comparisons
+
+for label, values, reverse in (
+    ("rise_and_drop", [1, 3, 2], False),
+    ("equal_descending_run", [3, 2, 2, 1], False),
+    ("descending_suffix", [3, 2, 1, 3, 4, 0], False),
+    ("stable_reverse", [2, 1, 2, 1], True),
+    ("minrun_63", [index % 7 for index in range(63, 0, -1)], False),
+    ("minrun_64", [index % 7 for index in range(64, 0, -1)], False),
+    ("minrun_65", [index % 7 for index in range(65, 0, -1)], False),
+    ("multiple_runs_merge", list(range(40)) + list(range(-40, 0)), False),
+):
+    sorted_trace = trace("sorted", values, reverse=reverse)
+    list_trace = trace("list.sort", values, reverse=reverse)
+    assert sorted_trace == list_trace, (label, sorted_trace, list_trace)
+    result, comparisons = sorted_trace
+    digest = hashlib.sha256(repr(comparisons).encode()).hexdigest()
+    print(label, result, len(comparisons), digest)
+        """,
+        timeout=30,
+    )
+
+
 def _effect_case_source(operation: str) -> str:
     if operation in {"all", "any"}:
         return (

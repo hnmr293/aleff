@@ -99,6 +99,38 @@ def test_list_and_tuple_search_normal_corner_and_errors() -> None:
     )
 
 
+def test_list_index_missing_target_repr_behavior_matches_cpython() -> None:
+    assert_cpython_compatible(
+        dedent(
+            """
+        def report(label, target):
+            try:
+                [].index(target)
+            except Exception as exc:
+                print(label, type(exc).__name__, str(exc))
+            else:
+                print(label, "unexpected success")
+
+        class NormalRepr:
+            def __repr__(self):
+                return "<missing>"
+
+        class RaisingRepr:
+            def __repr__(self):
+                raise RuntimeError("repr failed")
+
+        class InvalidRepr:
+            def __repr__(self):
+                return 1
+
+        report("normal", NormalRepr())
+        report("raising", RaisingRepr())
+        report("invalid", InvalidRepr())
+            """
+        )
+    )
+
+
 def test_search_operators_normalize_results_and_short_circuit_identity() -> None:
     assert_cpython_compatible(
         dedent(
@@ -214,6 +246,97 @@ def test_list_sort_detects_callback_mutation() -> None:
             print("error", type(exc).__name__, str(exc), values)
         else:
             print("success", result, values)
+            """
+        )
+    )
+
+
+def test_list_sort_timsort_run_detection_comparison_order_matches_cpython() -> None:
+    assert_cpython_compatible(
+        dedent(
+            """
+        import sys
+
+        def trace(values):
+            comparisons = []
+
+            class Key:
+                def __init__(self, value, index):
+                    self.value = value
+                    self.index = index
+
+                def __lt__(self, other):
+                    comparisons.append((self.value, self.index, other.value, other.index))
+                    return self.value < other.value
+
+            result = list(enumerate(values))
+            method_result = result.sort(key=lambda item: Key(item[1], item[0]))
+            assert method_result is None
+            return [value for _, value in result], comparisons
+
+        rise_and_drop = trace([1, 3, 2])
+        expected = (
+            [(3, 1, 1, 0), (2, 2, 3, 1), (2, 2, 3, 1), (2, 2, 1, 0)]
+            if sys.version_info < (3, 13)
+            else [
+                (3, 1, 1, 0),
+                (2, 2, 3, 1),
+                (1, 0, 3, 1),
+                (2, 2, 3, 1),
+                (2, 2, 1, 0),
+            ]
+        )
+        assert rise_and_drop == ([1, 2, 3], expected), rise_and_drop
+        print("rise_and_drop", rise_and_drop)
+
+        for label, values in (
+            ("equal_descending_run", [3, 2, 2, 1]),
+            ("descending_then_ascending_suffix", [3, 2, 1, 3, 4, 0]),
+        ):
+            print(label, trace(values))
+            """
+        )
+    )
+
+
+def test_list_sort_timsort_callback_failures_and_mutation_match_cpython() -> None:
+    assert_cpython_compatible(
+        dedent(
+            """
+        def exercise(mode):
+            values = [1, 3, 2]
+            comparisons = []
+
+            class TruthFailure:
+                def __bool__(self):
+                    raise LookupError("truth failed")
+
+            class Key:
+                def __init__(self, value):
+                    self.value = value
+
+                def __lt__(self, other):
+                    pair = (self.value, other.value)
+                    comparisons.append(pair)
+                    if pair == (1, 3):
+                        if mode == "comparison_error":
+                            raise RuntimeError("comparison failed")
+                        if mode == "truth_error":
+                            return TruthFailure()
+                        if mode == "mutation":
+                            values.append(99)
+                    return self.value < other.value
+
+            try:
+                result = values.sort(key=Key)
+            except Exception as exc:
+                outcome = ("raise", type(exc).__name__, str(exc))
+            else:
+                outcome = ("return", result)
+            print(mode, outcome, values, comparisons)
+
+        for mode in ("comparison_error", "truth_error", "mutation"):
+            exercise(mode)
             """
         )
     )

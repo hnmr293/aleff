@@ -260,6 +260,57 @@ def test_truth_context_resumes_through_while() -> None:
     assert _resume_outcomes(run, (True, False)) == _returns("body", "empty")
 
 
+def test_truth_context_not_rejects_non_bool_resumed_bool() -> None:
+    def run(choose: Choose) -> bool:
+        class Target:
+            def __bool__(self) -> Any:
+                return choose()
+
+        return not Target()
+
+    assert _resume_outcomes(run, (1, True)) == [
+        ("raise", "TypeError"),
+        ("return", False),
+    ]
+
+
+def test_truth_context_if_rejects_non_bool_resumed_bool() -> None:
+    def run(choose: Choose) -> str:
+        class Target:
+            def __bool__(self) -> Any:
+                return choose()
+
+        if Target():
+            return "true"
+        return "false"
+
+    assert _resume_outcomes(run, (1, True)) == [
+        ("raise", "TypeError"),
+        ("return", "true"),
+    ]
+
+
+def test_truth_context_while_rejects_non_bool_resumed_bool() -> None:
+    def run(choose: Choose) -> str:
+        class Target:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def __bool__(self) -> Any:
+                self.calls += 1
+                return choose() if self.calls == 1 else False
+
+        target = Target()
+        while target:
+            return "body"
+        return "empty"
+
+    assert _resume_outcomes(run, (1, False)) == [
+        ("raise", "TypeError"),
+        ("return", "empty"),
+    ]
+
+
 def test_operator_truth_and_not_reject_invalid_resumed_bool() -> None:
     def truth_run(choose: Choose) -> bool:
         class Target:

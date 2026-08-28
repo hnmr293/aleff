@@ -393,6 +393,125 @@ print(repr(records))
     )
 
 
+_BUILD_CLASS_MULTISHOT_PREAMBLE = r"""
+import sys
+
+
+def resumed(body, values=(7, 11)):
+    def shot(value):
+        try:
+            return ("return", body(lambda: value))
+        except BaseException as exc:
+            return ("raise", type(exc).__name__, str(exc))
+
+    if "aleff" not in sys.modules:
+        return [shot(value) for value in values]
+
+    from aleff import create_handler, effect
+
+    choose = effect("build-class-isolated-choice")
+    handler = create_handler(choose)
+
+    @handler.on(choose)
+    def handle(k):
+        results = []
+        for value in values:
+            try:
+                results.append(("return", k(value)))
+            except BaseException as exc:
+                results.append(("raise", type(exc).__name__, str(exc)))
+        return results
+
+    return handler(lambda: body(choose))
+"""
+
+
+def test_build_class_set_name_runs_exactly_once_per_shot() -> None:
+    assert_cpython_compatible(
+        _BUILD_CLASS_MULTISHOT_PREAMBLE
+        + r"""
+class SuspendingDescriptor:
+    def __set_name__(self, owner, name):
+        choose_for_set_name()
+
+
+class ObservedDescriptor:
+    def __set_name__(self, owner, name):
+        owner.events.append(("set_name", name))
+
+
+def body(choose):
+    global choose_for_set_name
+    choose_for_set_name = choose
+
+    class Target:
+        events = []
+        suspending = SuspendingDescriptor()
+        observed = ObservedDescriptor()
+
+    return tuple(Target.events)
+
+
+print(repr(resumed(body)))
+"""
+    )
+
+
+def test_build_class_init_subclass_runs_exactly_once_per_shot() -> None:
+    assert_cpython_compatible(
+        _BUILD_CLASS_MULTISHOT_PREAMBLE
+        + r"""
+class Base:
+    def __init_subclass__(cls, **kwargs):
+        cls.events.append("init_subclass")
+        super().__init_subclass__(**kwargs)
+
+
+class SuspendingDescriptor:
+    def __set_name__(self, owner, name):
+        choose_for_set_name()
+
+
+def body(choose):
+    global choose_for_set_name
+    choose_for_set_name = choose
+
+    class Target(Base):
+        events = []
+        suspending = SuspendingDescriptor()
+
+    return tuple(Target.events)
+
+
+print(repr(resumed(body)))
+"""
+    )
+
+
+def test_build_class_classcell_postcondition_is_checked_per_shot() -> None:
+    assert_cpython_compatible(
+        _BUILD_CLASS_MULTISHOT_PREAMBLE
+        + r"""
+class ReplacementMeta(type):
+    def __new__(mcls, name, bases, namespace, **kwargs):
+        return type.__new__(mcls, "Replacement", (), {})
+
+
+def body(choose):
+    class Target(metaclass=ReplacementMeta):
+        def method(self):
+            return __class__
+
+        marker = choose()
+
+    return Target.__name__
+
+
+print(repr(resumed(body)))
+"""
+    )
+
+
 def test_import_continuation_preserves_package_state() -> None:
     assert_cpython_compatible(
         r"""

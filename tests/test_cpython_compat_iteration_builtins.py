@@ -290,6 +290,77 @@ def test_anext_awaitable_protocol_shape_and_resume_methods() -> None:
     )
 
 
+def test_anext_without_default_preserves_native_shape_across_multishot_resume() -> None:
+    assert_cpython_compatible(
+        textwrap.dedent(
+            """
+        import inspect
+        import sys
+
+        def resumed(body, values=(1, 10)):
+            def shot(value):
+                try:
+                    return ("return", body(lambda: value))
+                except BaseException as exc:
+                    return ("raise", type(exc).__name__, str(exc))
+
+            if "aleff" not in sys.modules:
+                return [shot(value) for value in values]
+
+            from aleff import create_handler, effect
+
+            choose = effect("anext-native-shape-choice")
+            handler = create_handler(choose)
+
+            @handler.on(choose)
+            def handle(k):
+                results = []
+                for value in values:
+                    try:
+                        results.append(("return", k(value)))
+                    except BaseException as exc:
+                        results.append(("raise", type(exc).__name__, str(exc)))
+                return results
+
+            return handler(lambda: body(choose))
+
+        def body(choose):
+            class AsyncIterator:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    return choose() + 100
+
+            async def consume():
+                awaitable = anext(AsyncIterator())
+                iterator = awaitable.__await__()
+                visible_shape = (
+                    type(awaitable).__module__,
+                    type(awaitable).__name__,
+                    inspect.iscoroutine(awaitable),
+                    inspect.isawaitable(awaitable),
+                    type(iterator).__module__,
+                    type(iterator).__name__,
+                    tuple(hasattr(iterator, name) for name in ("send", "throw", "close")),
+                )
+                return visible_shape, await awaitable
+
+            coroutine = consume()
+            try:
+                coroutine.send(None)
+            except StopIteration as completed:
+                return completed.value
+            finally:
+                coroutine.close()
+            raise AssertionError("consumer coroutine unexpectedly suspended")
+
+        print(repr(resumed(body)))
+            """
+        )
+    )
+
+
 def test_anext_awaitable_throw_and_close_are_preserved() -> None:
     assert_cpython_compatible(
         textwrap.dedent(

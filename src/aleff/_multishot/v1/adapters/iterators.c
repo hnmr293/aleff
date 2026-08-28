@@ -1,6 +1,7 @@
 #include <math.h>
 
 typedef enum {
+    SUM_WAIT_ITER,
     SUM_WAIT_NEXT,
     SUM_WAIT_ADD,
 } SumPhase;
@@ -49,7 +50,9 @@ aleff_cs_to_double(AleffCompensatedSum total)
 }
 
 typedef struct {
+    PyObject *iterable;
     PyObject *iterator;
+    PyObject *start;
     PyObject *result;
     PyObject *item;
     SumPhase phase;
@@ -58,6 +61,7 @@ typedef struct {
     Py_ssize_t int_result;
     AleffCompensatedSum real_result;
     AleffCompensatedSum imag_result;
+    int start_checked;
 } SumState;
 
 static void *
@@ -69,7 +73,9 @@ sum_copy_state(const void *raw_state)
         PyErr_NoMemory();
         return NULL;
     }
-    copy->iterator = Py_NewRef(state->iterator);
+    copy->iterable = Py_NewRef(state->iterable);
+    copy->iterator = Py_XNewRef(state->iterator);
+    copy->start = Py_NewRef(state->start);
     copy->result = Py_XNewRef(state->result);
     copy->item = Py_XNewRef(state->item);
     copy->phase = state->phase;
@@ -78,6 +84,7 @@ sum_copy_state(const void *raw_state)
     copy->int_result = state->int_result;
     copy->real_result = state->real_result;
     copy->imag_result = state->imag_result;
+    copy->start_checked = state->start_checked;
     return copy;
 }
 
@@ -88,7 +95,9 @@ sum_free_state(void *raw_state)
     if (state == NULL) {
         return;
     }
-    Py_DECREF(state->iterator);
+    Py_DECREF(state->iterable);
+    Py_XDECREF(state->iterator);
+    Py_DECREF(state->start);
     Py_XDECREF(state->result);
     Py_XDECREF(state->item);
     PyMem_Free(state);
@@ -177,7 +186,18 @@ static PyObject *
 sum_continue(SumState *state, PyObject *resumed_value, int is_resumed)
 {
     if (is_resumed) {
-        if (state->phase == SUM_WAIT_NEXT) {
+        if (state->phase == SUM_WAIT_ITER) {
+            if (!PyIter_Check(resumed_value)) {
+                PyErr_Format(
+                    PyExc_TypeError,
+                    "iter() returned non-iterator of type '%.200s'",
+                    Py_TYPE(resumed_value)->tp_name
+                );
+                return NULL;
+            }
+            state->iterator = Py_NewRef(resumed_value);
+        }
+        else if (state->phase == SUM_WAIT_NEXT) {
             PyObject *item = sum_copy_resumed_value(resumed_value);
             if (item == NULL) {
                 return NULL;
@@ -192,6 +212,29 @@ sum_continue(SumState *state, PyObject *resumed_value, int is_resumed)
             Py_XSETREF(state->result, result);
             Py_CLEAR(state->item);
             sum_promote_after_fallback(state);
+        }
+    }
+
+    if (state->iterator == NULL) {
+        state->phase = SUM_WAIT_ITER;
+        state->iterator = PyObject_GetIter(state->iterable);
+        if (state->iterator == NULL) {
+            return NULL;
+        }
+    }
+    if (!state->start_checked) {
+        state->start_checked = 1;
+        if (PyUnicode_Check(state->start)) {
+            PyErr_SetString(PyExc_TypeError, "sum() can't sum strings [use ''.join(seq) instead]");
+            return NULL;
+        }
+        if (PyBytes_Check(state->start)) {
+            PyErr_SetString(PyExc_TypeError, "sum() can't sum bytes [use b''.join(seq) instead]");
+            return NULL;
+        }
+        if (PyByteArray_Check(state->start)) {
+            PyErr_SetString(PyExc_TypeError, "sum() can't sum bytearray [use b''.join(seq) instead]");
+            return NULL;
         }
     }
 
@@ -340,7 +383,7 @@ sum_resume(const void *raw_state, PyObject *value)
 static PyObject *
 adapter_sum(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
 {
-    static char *keywords[] = {"iterable", "start", NULL};
+    static char *keywords[] = {"", "start", NULL};
     PyObject *iterable;
     PyObject *start = NULL;
     PyObject *owned_start = NULL;
@@ -354,38 +397,20 @@ adapter_sum(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
         }
         start = owned_start;
     }
-    if (PyUnicode_Check(start)) {
-        PyErr_SetString(PyExc_TypeError, "sum() can't sum strings [use ''.join(seq) instead]");
-        Py_XDECREF(owned_start);
-        return NULL;
-    }
-    if (PyBytes_Check(start)) {
-        PyErr_SetString(PyExc_TypeError, "sum() can't sum bytes [use b''.join(seq) instead]");
-        Py_XDECREF(owned_start);
-        return NULL;
-    }
-    if (PyByteArray_Check(start)) {
-        PyErr_SetString(PyExc_TypeError, "sum() can't sum bytearray [use b''.join(seq) instead]");
-        Py_XDECREF(owned_start);
-        return NULL;
-    }
-
     SumState state = {
-        .iterator = PyObject_GetIter(iterable),
+        .iterable = iterable,
+        .iterator = NULL,
+        .start = Py_NewRef(start),
         .result = Py_NewRef(start),
         .item = NULL,
-        .phase = SUM_WAIT_NEXT,
+        .phase = SUM_WAIT_ITER,
         .mode = SUM_GENERIC,
         .fallback_mode = SUM_GENERIC,
         .int_result = 0,
         .real_result = {0.0, 0.0},
         .imag_result = {0.0, 0.0},
+        .start_checked = 0,
     };
-    if (state.iterator == NULL) {
-        Py_DECREF(state.result);
-        Py_XDECREF(owned_start);
-        return NULL;
-    }
     if (PyLong_CheckExact(start)) {
         Py_ssize_t value = PyLong_AsSsize_t(start);
         if (!(value == -1 && PyErr_Occurred())) {
@@ -416,11 +441,14 @@ adapter_sum(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
 
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &sum_vtable, &state) < 0) {
+        Py_DECREF(state.start);
+        Py_XDECREF(state.result);
         return NULL;
     }
     PyObject *result = sum_continue(&state, NULL, 0);
     adapter_leave(&frame);
-    Py_DECREF(state.iterator);
+    Py_XDECREF(state.iterator);
+    Py_DECREF(state.start);
     Py_XDECREF(state.result);
     return result;
 }
@@ -575,16 +603,44 @@ reduce_resume(const void *raw_state, PyObject *value)
 }
 
 static PyObject *
+#if PY_VERSION_HEX >= 0x030e0000
+adapter_reduce(
+    PyObject *Py_UNUSED(self),
+    PyObject *args,
+    PyObject *kwargs
+)
+#else
 adapter_reduce(PyObject *Py_UNUSED(self), PyObject *args)
+#endif
 {
     PyObject *function;
     PyObject *iterable;
     PyObject *initial = NULL;
+#if PY_VERSION_HEX >= 0x030e0000
+    static char *keywords[] = {"", "", "initial", NULL};
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "OO|O:reduce",
+            keywords,
+            &function,
+            &iterable,
+            &initial)) {
+        return NULL;
+    }
+#else
     if (!PyArg_ParseTuple(args, "OO|O:reduce", &function, &iterable, &initial)) {
         return NULL;
     }
+#endif
     PyObject *iterator = PyObject_GetIter(iterable);
     if (iterator == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+            PyErr_SetString(
+                PyExc_TypeError,
+                "reduce() arg 2 must support iteration"
+            );
+        }
         return NULL;
     }
     ReduceState state = {
@@ -635,6 +691,27 @@ static const AleffAdapterVTable map_vtable = {
 
 static iternextfunc original_map_next = NULL;
 static newfunc original_map_new = NULL;
+static vectorcallfunc original_map_vectorcall = NULL;
+static newfunc original_filter_new = NULL;
+static vectorcallfunc original_filter_vectorcall = NULL;
+
+static PyObject *adapter_map_vectorcall(
+    PyObject *callable,
+    PyObject *const *args,
+    size_t nargsf,
+    PyObject *kwnames
+);
+static PyObject *adapter_filter_new(
+    PyTypeObject *type,
+    PyObject *args,
+    PyObject *kwargs
+);
+static PyObject *adapter_filter_vectorcall(
+    PyObject *callable,
+    PyObject *const *args,
+    size_t nargsf,
+    PyObject *kwnames
+);
 
 static PyObject *
 adapter_map_next(PyObject *map)
@@ -654,6 +731,7 @@ typedef struct {
     PyObject *kwargs;
     PyObject *converted_args;
     Py_ssize_t index;
+    newfunc original_new;
 } MapConstructorState;
 
 static void *
@@ -681,6 +759,7 @@ map_constructor_copy_state(const void *raw_state)
         return NULL;
     }
     copy->index = state->index;
+    copy->original_new = state->original_new;
     return copy;
 }
 
@@ -746,7 +825,7 @@ map_constructor_continue(
     if (converted_tuple == NULL) {
         return NULL;
     }
-    PyObject *result = original_map_new(
+    PyObject *result = state->original_new(
         state->type,
         converted_tuple,
         state->kwargs
@@ -776,10 +855,15 @@ map_constructor_resume(const void *raw_state, PyObject *value)
 }
 
 static PyObject *
-adapter_map_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+adapter_iterator_constructor(
+    PyTypeObject *type,
+    PyObject *args,
+    PyObject *kwargs,
+    newfunc original_new
+)
 {
     if (PyTuple_GET_SIZE(args) < 2) {
-        return original_map_new(type, args, kwargs);
+        return original_new(type, args, kwargs);
     }
     PyObject *converted_args = PyList_New(1);
     if (converted_args == NULL) {
@@ -796,6 +880,7 @@ adapter_map_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         .kwargs = kwargs,
         .converted_args = converted_args,
         .index = 1,
+        .original_new = original_new,
     };
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &map_constructor_vtable, &state) < 0) {
@@ -805,6 +890,93 @@ adapter_map_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     adapter_leave(&frame);
     Py_DECREF(converted_args);
     return result;
+}
+
+static PyObject *
+adapter_map_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    return adapter_iterator_constructor(
+        type, args, kwargs, original_map_new
+    );
+}
+
+static PyObject *
+adapter_filter_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    return adapter_iterator_constructor(
+        type, args, kwargs, original_filter_new
+    );
+}
+
+static PyObject *
+adapter_constructor_vectorcall(
+    PyObject *callable,
+    PyObject *const *args,
+    size_t nargsf,
+    PyObject *kwnames,
+    newfunc adapter_new
+)
+{
+    Py_ssize_t positional_count = PyVectorcall_NARGS(nargsf);
+    PyObject *positional = PyTuple_New(positional_count);
+    if (positional == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < positional_count; index++) {
+        PyTuple_SET_ITEM(positional, index, Py_NewRef(args[index]));
+    }
+    PyObject *kwargs = NULL;
+    if (kwnames != NULL && PyTuple_GET_SIZE(kwnames) != 0) {
+        kwargs = PyDict_New();
+        if (kwargs == NULL) {
+            Py_DECREF(positional);
+            return NULL;
+        }
+        Py_ssize_t keyword_count = PyTuple_GET_SIZE(kwnames);
+        for (Py_ssize_t index = 0; index < keyword_count; index++) {
+            if (PyDict_SetItem(
+                    kwargs,
+                    PyTuple_GET_ITEM(kwnames, index),
+                    args[positional_count + index]
+                ) < 0) {
+                Py_DECREF(kwargs);
+                Py_DECREF(positional);
+                return NULL;
+            }
+        }
+    }
+    PyObject *result = adapter_new(
+        (PyTypeObject *)callable, positional, kwargs
+    );
+    Py_XDECREF(kwargs);
+    Py_DECREF(positional);
+    return result;
+}
+
+static PyObject *
+adapter_map_vectorcall(
+    PyObject *callable,
+    PyObject *const *args,
+    size_t nargsf,
+    PyObject *kwnames
+)
+{
+    return adapter_constructor_vectorcall(
+        callable, args, nargsf, kwnames, adapter_map_new
+    );
+}
+
+static PyObject *
+adapter_filter_vectorcall(
+    PyObject *callable,
+    PyObject *const *args,
+    size_t nargsf,
+    PyObject *kwnames
+)
+{
+    return adapter_constructor_vectorcall(
+        callable, args, nargsf, kwnames, adapter_filter_new
+    );
 }
 
 typedef struct {
@@ -817,36 +989,120 @@ typedef struct {
 
 static newfunc original_zip_new = NULL;
 
+typedef enum {
+    ZIP_CONSTRUCTOR_WAIT_STRICT,
+    ZIP_CONSTRUCTOR_WAIT_ITERATOR,
+} ZipConstructorPhase;
+
+typedef struct {
+    PyTypeObject *type;
+    PyObject *args;
+    PyObject *strict_object;
+    PyObject *converted_args;
+    Py_ssize_t index;
+    int strict;
+    int strict_evaluated;
+    ZipConstructorPhase phase;
+} ZipConstructorState;
+
+static void *
+zip_constructor_copy_state(const void *raw_state)
+{
+    const ZipConstructorState *state = raw_state;
+    ZipConstructorState *copy = PyMem_Malloc(sizeof(*copy));
+    if (copy == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    copy->type = (PyTypeObject *)Py_NewRef((PyObject *)state->type);
+    copy->args = Py_NewRef(state->args);
+    copy->strict_object = Py_XNewRef(state->strict_object);
+    copy->converted_args = PyList_GetSlice(
+        state->converted_args,
+        0,
+        PyList_GET_SIZE(state->converted_args)
+    );
+    if (copy->converted_args == NULL) {
+        Py_DECREF(copy->type);
+        Py_DECREF(copy->args);
+        Py_XDECREF(copy->strict_object);
+        PyMem_Free(copy);
+        return NULL;
+    }
+    copy->index = state->index;
+    copy->strict = state->strict;
+    copy->strict_evaluated = state->strict_evaluated;
+    copy->phase = state->phase;
+    return copy;
+}
+
+static void
+zip_constructor_free_state(void *raw_state)
+{
+    ZipConstructorState *state = raw_state;
+    if (state == NULL) {
+        return;
+    }
+    Py_DECREF(state->type);
+    Py_DECREF(state->args);
+    Py_XDECREF(state->strict_object);
+    Py_DECREF(state->converted_args);
+    PyMem_Free(state);
+}
+
 static PyObject *zip_constructor_resume(const void *raw_state, PyObject *value);
 
 static const AleffAdapterVTable zip_constructor_vtable = {
-    .copy_state = map_constructor_copy_state,
-    .free_state = map_constructor_free_state,
+    .copy_state = zip_constructor_copy_state,
+    .free_state = zip_constructor_free_state,
     .resume = zip_constructor_resume,
 };
 
 static PyObject *
 zip_constructor_continue(
-    MapConstructorState *state,
+    ZipConstructorState *state,
     PyObject *resumed_value,
     int is_resumed
 )
 {
     if (is_resumed) {
-        if (!PyIter_Check(resumed_value)) {
-            PyErr_Format(
-                PyExc_TypeError,
-                "iter() returned non-iterator of type '%.200s'",
-                Py_TYPE(resumed_value)->tp_name
-            );
+        if (resumed_value == NULL) {
             return NULL;
         }
-        if (PyList_Append(state->converted_args, resumed_value) < 0) {
+        if (state->phase == ZIP_CONSTRUCTOR_WAIT_STRICT) {
+            int strict = PyObject_IsTrue(resumed_value);
+            if (strict < 0) {
+                return NULL;
+            }
+            state->strict = strict;
+            state->strict_evaluated = 1;
+        }
+        else {
+            if (!PyIter_Check(resumed_value)) {
+                PyErr_Format(
+                    PyExc_TypeError,
+                    "iter() returned non-iterator of type '%.200s'",
+                    Py_TYPE(resumed_value)->tp_name
+                );
+                return NULL;
+            }
+            if (PyList_Append(state->converted_args, resumed_value) < 0) {
+                return NULL;
+            }
+            state->index++;
+        }
+    }
+    if (!state->strict_evaluated) {
+        state->phase = ZIP_CONSTRUCTOR_WAIT_STRICT;
+        int strict = PyObject_IsTrue(state->strict_object);
+        if (strict < 0) {
             return NULL;
         }
-        state->index++;
+        state->strict = strict;
+        state->strict_evaluated = 1;
     }
     while (state->index < PyTuple_GET_SIZE(state->args)) {
+        state->phase = ZIP_CONSTRUCTOR_WAIT_ITERATOR;
         PyObject *iterator = PyObject_GetIter(PyTuple_GET_ITEM(state->args, state->index));
         if (iterator == NULL) {
             return NULL;
@@ -862,7 +1118,29 @@ zip_constructor_continue(
     if (converted == NULL) {
         return NULL;
     }
-    PyObject *result = original_zip_new(state->type, converted, state->kwargs);
+    PyObject *normalized_kwargs = NULL;
+    if (state->strict_object != NULL) {
+        normalized_kwargs = PyDict_New();
+        if (normalized_kwargs == NULL) {
+            Py_DECREF(converted);
+            return NULL;
+        }
+        if (PyDict_SetItemString(
+                normalized_kwargs,
+                "strict",
+                state->strict ? Py_True : Py_False
+            ) < 0) {
+            Py_DECREF(normalized_kwargs);
+            Py_DECREF(converted);
+            return NULL;
+        }
+    }
+    PyObject *result = original_zip_new(
+        state->type,
+        converted,
+        normalized_kwargs
+    );
+    Py_XDECREF(normalized_kwargs);
     Py_DECREF(converted);
     return result;
 }
@@ -870,39 +1148,80 @@ zip_constructor_continue(
 static PyObject *
 zip_constructor_resume(const void *raw_state, PyObject *value)
 {
-    if (value == NULL) {
-        return NULL;
-    }
-    MapConstructorState *state = map_constructor_copy_state(raw_state);
+    ZipConstructorState *state = zip_constructor_copy_state(raw_state);
     if (state == NULL) {
         return NULL;
     }
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &zip_constructor_vtable, state) < 0) {
+        zip_constructor_free_state(state);
         return NULL;
     }
     PyObject *result = zip_constructor_continue(state, value, 1);
     adapter_leave(&frame);
-    map_constructor_free_state(state);
+    zip_constructor_free_state(state);
     return result;
 }
 
 static PyObject *
 adapter_zip_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
+    if (kwargs != NULL) {
+        Py_ssize_t keyword_count = PyDict_GET_SIZE(kwargs);
+        if (keyword_count > 1) {
+            PyErr_Format(
+                PyExc_TypeError,
+                "zip() takes at most 1 keyword argument (%zd given)",
+                keyword_count
+            );
+            return NULL;
+        }
+        if (keyword_count == 1 && PyDict_GetItemString(kwargs, "strict") == NULL) {
+            PyObject *key;
+            PyObject *value;
+            Py_ssize_t position = 0;
+            if (!PyDict_Next(kwargs, &position, &key, &value)) {
+                PyErr_SetString(PyExc_RuntimeError, "zip keyword disappeared");
+                return NULL;
+            }
+#if PY_VERSION_HEX < 0x030d0000
+            PyErr_Format(
+                PyExc_TypeError,
+                "'%U' is an invalid keyword argument for zip()",
+                key
+            );
+#else
+            PyErr_Format(
+                PyExc_TypeError,
+                "zip() got an unexpected keyword argument '%U'",
+                key
+            );
+#endif
+            return NULL;
+        }
+    }
+    PyObject *strict_object = kwargs == NULL
+        ? NULL
+        : PyDict_GetItemString(kwargs, "strict");
     PyObject *converted = PyList_New(0);
     if (converted == NULL) {
         return NULL;
     }
-    MapConstructorState state = {
+    ZipConstructorState state = {
         .type = type,
         .args = args,
-        .kwargs = kwargs,
+        .strict_object = strict_object,
         .converted_args = converted,
         .index = 0,
+        .strict = 0,
+        .strict_evaluated = strict_object == NULL,
+        .phase = strict_object == NULL
+            ? ZIP_CONSTRUCTOR_WAIT_ITERATOR
+            : ZIP_CONSTRUCTOR_WAIT_STRICT,
     };
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &zip_constructor_vtable, &state) < 0) {
+        Py_DECREF(converted);
         return NULL;
     }
     PyObject *result = zip_constructor_continue(&state, NULL, 0);
@@ -1024,12 +1343,22 @@ static const AleffAdapterVTable zip_vtable = {
 static PyObject *
 zip_strict_error(Py_ssize_t argument, int longer)
 {
-    PyErr_Format(
-        PyExc_ValueError,
-        "zip() argument %zd is %s than argument 1",
-        argument + 1,
-        longer ? "longer" : "shorter"
-    );
+    if (argument == 1) {
+        PyErr_Format(
+            PyExc_ValueError,
+            "zip() argument 2 is %s than argument 1",
+            longer ? "longer" : "shorter"
+        );
+    }
+    else {
+        PyErr_Format(
+            PyExc_ValueError,
+            "zip() argument %zd is %s than arguments 1-%zd",
+            argument + 1,
+            longer ? "longer" : "shorter",
+            argument
+        );
+    }
     return NULL;
 }
 
@@ -1233,15 +1562,34 @@ static const AleffAdapterVTable enumerate_constructor_vtable = {
 static PyObject *
 enumerate_constructor_finish(EnumerateConstructorState *state)
 {
-    PyObject *args = state->start == NULL
-        ? PyTuple_Pack(1, state->iterator)
-        : PyTuple_Pack(2, state->iterator, state->start);
-    if (args == NULL) {
+    AleffEnumerateObject *result = (AleffEnumerateObject *)state->type->tp_alloc(
+        state->type, 0
+    );
+    if (result == NULL) {
         return NULL;
     }
-    PyObject *result = original_enumerate_new(state->type, args, NULL);
-    Py_DECREF(args);
-    return result;
+    result->iterator = Py_NewRef(state->iterator);
+    result->result = PyTuple_Pack(2, Py_None, Py_None);
+    result->one = PyLong_FromLong(1);
+    result->long_index = NULL;
+    result->index = 0;
+    if (result->result == NULL || result->one == NULL) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    if (state->start != NULL) {
+        result->index = PyLong_AsSsize_t(state->start);
+        if (result->index == -1 && PyErr_Occurred()) {
+            if (!PyErr_ExceptionMatches(PyExc_OverflowError)) {
+                Py_DECREF(result);
+                return NULL;
+            }
+            PyErr_Clear();
+            result->index = PY_SSIZE_T_MAX;
+            result->long_index = Py_NewRef(state->start);
+        }
+    }
+    return (PyObject *)result;
 }
 
 static PyObject *

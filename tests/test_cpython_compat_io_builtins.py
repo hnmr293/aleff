@@ -436,6 +436,37 @@ print(seen)
     )
 
 
+def test_print_converts_flush_before_validating_separator_and_end() -> None:
+    assert_cpython_compatible(
+        """
+events = []
+
+class Flush:
+    def __bool__(self):
+        events.append("flush-bool")
+        return False
+
+class Output:
+    def write(self, value):
+        events.append(("write", value))
+        return len(value)
+
+def observe(label, **kwargs):
+    events.clear()
+    try:
+        print("value", file=Output(), flush=Flush(), **kwargs)
+    except BaseException as exc:
+        result = ("raise", type(exc).__name__, str(exc))
+    else:
+        result = ("return",)
+    print(label, result, events)
+
+observe("invalid-sep", sep=object())
+observe("invalid-end", end=object())
+        """
+    )
+
+
 def test_print_returns_none_and_skips_argument_validation_without_stdout() -> None:
     assert_cpython_compatible(
         """

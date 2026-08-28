@@ -293,7 +293,7 @@ def _dict_update_invalid_item_isolated() -> None:
     def run(choose: Choose) -> dict[str, int]:
         result: dict[str, int] = {}
         result.update(_EffectfulIterable(choose, (_CHOSEN,)))
-        return result
+        return dict(result)
 
     assert _outcomes(run, (("key", 1), 10)) == [{"key": 1}, "TypeError"]
 
@@ -613,6 +613,114 @@ def _bytes_join_empty_single_buffer() -> None:
     ]
 
 
+def _effectful_buffer_join(
+    choose: Choose,
+    make_bytearray: bool,
+) -> bytes | bytearray:
+    class Item:
+        def __buffer__(self, _flags: int) -> memoryview:
+            value = choose()
+            if isinstance(value, BaseException):
+                raise value
+            return cast(memoryview, value)
+
+    if make_bytearray:
+        return bytearray(b"|").join([Item()])
+    return b"|".join([Item()])
+
+
+@_case("bytes_join_effectful_buffer_two_shot")
+def _bytes_join_effectful_buffer_two_shot() -> None:
+    def run(choose: Choose) -> bytes:
+        return cast(bytes, _effectful_buffer_join(choose, False))
+
+    assert _outcomes(run, (memoryview(b"A"), memoryview(b"B"))) == [
+        b"A",
+        b"B",
+    ]
+
+
+@_case("bytearray_join_effectful_buffer_two_shot")
+def _bytearray_join_effectful_buffer_two_shot() -> None:
+    def run(choose: Choose) -> bytearray:
+        return cast(bytearray, _effectful_buffer_join(choose, True))
+
+    assert _outcomes(run, (memoryview(b"A"), memoryview(b"B"))) == [
+        bytearray(b"A"),
+        bytearray(b"B"),
+    ]
+
+
+@_case("bytes_join_invalid_effectful_buffer_isolated")
+def _bytes_join_invalid_effectful_buffer_isolated() -> None:
+    def run(choose: Choose) -> bytes:
+        return cast(bytes, _effectful_buffer_join(choose, False))
+
+    assert _outcomes(run, (1, memoryview(b"ok"))) == ["TypeError", b"ok"]
+
+
+@_case("bytearray_join_invalid_effectful_buffer_isolated")
+def _bytearray_join_invalid_effectful_buffer_isolated() -> None:
+    def run(choose: Choose) -> bytearray:
+        return cast(bytearray, _effectful_buffer_join(choose, True))
+
+    assert _outcomes(run, (1, memoryview(b"ok"))) == [
+        "TypeError",
+        bytearray(b"ok"),
+    ]
+
+
+@_case("bytes_join_effectful_buffer_exception_isolated")
+def _bytes_join_effectful_buffer_exception_isolated() -> None:
+    def run(choose: Choose) -> bytes:
+        return cast(bytes, _effectful_buffer_join(choose, False))
+
+    assert _outcomes(run, (RuntimeError("buffer"), memoryview(b"ok"))) == [
+        "RuntimeError",
+        b"ok",
+    ]
+
+
+@_case("bytearray_join_effectful_buffer_exception_isolated")
+def _bytearray_join_effectful_buffer_exception_isolated() -> None:
+    def run(choose: Choose) -> bytearray:
+        return cast(bytearray, _effectful_buffer_join(choose, True))
+
+    assert _outcomes(run, (RuntimeError("buffer"), memoryview(b"ok"))) == [
+        "RuntimeError",
+        bytearray(b"ok"),
+    ]
+
+
+if sys.version_info < (3, 14):
+
+    @_case("list_index_missing_effectful_repr_isolated")
+    def _list_index_missing_effectful_repr_isolated() -> None:
+        def run(choose: Choose) -> tuple[str, str]:
+            class Missing:
+                def __repr__(self) -> str:
+                    value = choose()
+                    if isinstance(value, BaseException):
+                        raise value
+                    return cast(str, value)
+
+            values: list[object] = []
+            try:
+                values.index(Missing())
+            except Exception as exc:
+                return type(exc).__name__, str(exc)
+            raise AssertionError("list.index unexpectedly found the target")
+
+        assert _outcomes(
+            run,
+            ("<first>", RuntimeError("repr failed"), 1),
+        ) == [
+            ("ValueError", "<first> is not in list"),
+            ("RuntimeError", "repr failed"),
+            ("TypeError", "__repr__ returned non-string (type int)"),
+        ]
+
+
 @_case("str_format_methods_preserve_cpython_semantics")
 def _str_format_methods_preserve_cpython_semantics() -> None:
     class Value:
@@ -646,19 +754,19 @@ def _str_format_methods_preserve_cpython_semantics() -> None:
 
 @_case("range_count")
 def _range_count() -> None:
-    def run(choose: Choose) -> tuple[int, int]:
-        value = _EffectfulIndex(choose)
-        return (range(0, 20, 2).count(value),)
+    def run(choose: Choose) -> int:
+        value = _EffectfulEquality(choose)
+        return range(1).count(value)
 
-    assert _outcomes(run) == [(0,), (1,)]
+    assert _outcomes(run, (False, True)) == [0, 1]
 
 
 @_case("range_index")
 def _range_index() -> None:
     def run(choose: Choose) -> int:
-        return range(0, 20, 2).index(_EffectfulIndex(choose))
+        return range(1).index(_EffectfulEquality(choose))
 
-    assert _outcomes(run) == ["ValueError", 5]
+    assert _outcomes(run, (False, True)) == ["ValueError", 0]
 
 
 @_case("slice_indices")

@@ -109,10 +109,7 @@ print("subclass", outcome(subclass_result))
 def test_tee_matches_cpython() -> None:
     assert_cpython_compatible(
         """
-import copy
-import gc
 import itertools
-import weakref
 
 def outcome(call):
     try:
@@ -128,13 +125,72 @@ print("negative", outcome(lambda: itertools.tee((1,), -1)))
 print("noniterable", outcome(lambda: itertools.tee(42, 1)))
 print("keyword_iterable", outcome(lambda: len(itertools.tee(iterable=(1,)))))
 print("keyword_n", outcome(lambda: len(itertools.tee((1,), n=1))))
+"""
+    )
 
-iterator = itertools.tee((1,))[0]
-print("exact_type", type(iterator) is itertools._tee)
-print("self_iterator", iter(iterator) is iterator)
-print("weakref", outcome(lambda: weakref.ref(iterator))[0])
-print("copy", outcome(lambda: copy.copy(iterator))[0])
-print("gc_tracked", gc.is_tracked(iterator))
+
+def test_tee_preserves_native_function_type_and_lifecycle_contracts() -> None:
+    assert_cpython_compatible(
+        r"""
+import copy
+import gc
+import inspect
+import itertools
+import pickle
+import warnings
+import weakref
+
+warnings.simplefilter("ignore", DeprecationWarning)
+
+def shape(value):
+    return (
+        type(value).__module__,
+        type(value).__name__,
+        repr(value).split(" object at ", 1)[0],
+    )
+
+def outcome(operation):
+    try:
+        value = operation()
+    except BaseException as exc:
+        return ("raise", type(exc).__name__, str(exc))
+    return ("return", shape(value))
+
+def status(operation):
+    try:
+        operation()
+    except BaseException as exc:
+        return ("raise", type(exc).__name__, str(exc))
+    return ("return",)
+
+def signature():
+    try:
+        return ("return", str(inspect.signature(itertools.tee)))
+    except BaseException as exc:
+        return ("raise", type(exc).__name__, str(exc))
+
+print(
+    "tee_function",
+    type(itertools.tee).__module__,
+    type(itertools.tee).__name__,
+    itertools.tee.__module__,
+    itertools.tee.__name__,
+    itertools.tee.__doc__.splitlines()[0],
+    repr(getattr(itertools.tee, "__text_signature__", None)),
+)
+print("signature", signature())
+
+tee_iterator = itertools.tee(iter((1, 2)), 1)[0]
+print("native", type(tee_iterator) is itertools._tee, shape(tee_iterator))
+print("self_iterator", iter(tee_iterator) is tee_iterator)
+print("gc_tracked", gc.is_tracked(tee_iterator))
+print("weakref", status(lambda: weakref.ref(tee_iterator)))
+print("copy", outcome(lambda: copy.copy(tee_iterator)))
+print("deepcopy", outcome(lambda: copy.deepcopy(tee_iterator)))
+print(
+    "pickle",
+    outcome(lambda: pickle.loads(pickle.dumps(tee_iterator, protocol=4))),
+)
 
 holder = []
 class ReenteringSource:
@@ -147,6 +203,20 @@ class ReenteringSource:
 
 holder.append(itertools.tee(ReenteringSource(), 1)[0])
 print("reentry", outcome(lambda: next(holder[0])))
+
+class CyclicSource:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        raise StopIteration
+
+source = CyclicSource()
+source.iterator = itertools.tee(source, 1)[0]
+source_reference = weakref.ref(source)
+del source
+gc.collect()
+print("cycle_collected", source_reference() is None)
 """
     )
 

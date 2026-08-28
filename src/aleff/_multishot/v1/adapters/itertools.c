@@ -1,3 +1,5 @@
+#include <stdbool.h>
+
 typedef struct {
     PyObject_HEAD
     PyObject *source;
@@ -286,6 +288,8 @@ typedef struct {
     void *module_state;
 } AleffAccumulateObject;
 
+static newfunc original_accumulate_new;
+
 typedef enum {
     ACCUMULATE_WAIT_NEXT,
     ACCUMULATE_WAIT_BINOP,
@@ -461,9 +465,102 @@ typedef struct {
     PyTypeObject *type;
     PyObject *args;
     PyObject *kwargs;
+} AccumulateConstructorState;
+
+static void *
+accumulate_constructor_copy_state(const void *raw_state)
+{
+    const AccumulateConstructorState *state = raw_state;
+    AccumulateConstructorState *copy = PyMem_Malloc(sizeof(*copy));
+    if (copy == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    copy->type = (PyTypeObject *)Py_NewRef((PyObject *)state->type);
+    copy->args = Py_NewRef(state->args);
+    copy->kwargs = Py_XNewRef(state->kwargs);
+    return copy;
+}
+
+static void
+accumulate_constructor_free_state(void *raw_state)
+{
+    AccumulateConstructorState *state = raw_state;
+    if (state == NULL) {
+        return;
+    }
+    Py_DECREF(state->type);
+    Py_DECREF(state->args);
+    Py_XDECREF(state->kwargs);
+    PyMem_Free(state);
+}
+
+static PyObject *accumulate_constructor_resume(const void *raw_state, PyObject *value);
+
+static const AleffAdapterVTable accumulate_constructor_vtable = {
+    .copy_state = accumulate_constructor_copy_state,
+    .free_state = accumulate_constructor_free_state,
+    .resume = accumulate_constructor_resume,
+};
+
+static PyObject *
+accumulate_constructor_resume(const void *raw_state, PyObject *value)
+{
+    const AccumulateConstructorState *state = raw_state;
+    if (value == NULL) {
+        return NULL;
+    }
+    Py_ssize_t argument_count = PyTuple_GET_SIZE(state->args);
+    if (argument_count < 1) {
+        PyErr_SetString(PyExc_RuntimeError, "accumulate constructor lost its iterable");
+        return NULL;
+    }
+    PyObject *replacement_args = PyTuple_New(argument_count);
+    if (replacement_args == NULL) {
+        return NULL;
+    }
+    PyTuple_SET_ITEM(replacement_args, 0, Py_NewRef(value));
+    for (Py_ssize_t index = 1; index < argument_count; index++) {
+        PyTuple_SET_ITEM(
+            replacement_args,
+            index,
+            Py_NewRef(PyTuple_GET_ITEM(state->args, index))
+        );
+    }
+    PyObject *result = original_accumulate_new(
+        state->type,
+        replacement_args,
+        state->kwargs
+    );
+    Py_DECREF(replacement_args);
+    return result;
+}
+
+static PyObject *
+adapter_accumulate_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    AccumulateConstructorState state = {
+        .type = type,
+        .args = args,
+        .kwargs = kwargs,
+    };
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &accumulate_constructor_vtable, &state) < 0) {
+        return NULL;
+    }
+    PyObject *result = original_accumulate_new(type, args, kwargs);
+    adapter_leave(&frame);
+    return result;
+}
+
+typedef struct {
+    PyTypeObject *type;
+    PyObject *args;
+    PyObject *kwargs;
 } BatchedConstructorState;
 
 static newfunc original_batched_new;
+static iternextfunc original_batched_next;
 static PyTypeObject *original_batched_type = NULL;
 static iternextfunc original_accumulate_next = NULL;
 static PyTypeObject *original_accumulate_type = NULL;
@@ -552,6 +649,163 @@ adapter_batched_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     return result;
 }
 
+typedef struct {
+    PyObject_HEAD
+    PyObject *iterator;
+    Py_ssize_t batch_size;
+#if PY_VERSION_HEX >= 0x030d0000
+    bool strict;
+#endif
+} AleffBatchedObject;
+
+typedef enum {
+    BATCHED_WAIT_INPUT,
+} BatchedPhase;
+
+typedef struct {
+    PyObject *owner;
+    PyObject *iterator;
+    PyObject *items;
+    Py_ssize_t batch_size;
+    int strict;
+    BatchedPhase phase;
+} BatchedState;
+
+static void *
+batched_copy_state(const void *raw_state)
+{
+    const BatchedState *state = raw_state;
+    BatchedState *copy = PyMem_Malloc(sizeof(*copy));
+    if (copy == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    copy->owner = Py_NewRef(state->owner);
+    copy->iterator = Py_NewRef(state->iterator);
+    copy->items = PyList_GetSlice(
+        state->items,
+        0,
+        PyList_GET_SIZE(state->items)
+    );
+    if (copy->items == NULL) {
+        Py_DECREF(copy->owner);
+        Py_DECREF(copy->iterator);
+        PyMem_Free(copy);
+        return NULL;
+    }
+    copy->batch_size = state->batch_size;
+    copy->strict = state->strict;
+    copy->phase = state->phase;
+    return copy;
+}
+
+static void
+batched_free_state(void *raw_state)
+{
+    BatchedState *state = raw_state;
+    if (state == NULL) {
+        return;
+    }
+    Py_DECREF(state->owner);
+    Py_DECREF(state->iterator);
+    Py_DECREF(state->items);
+    PyMem_Free(state);
+}
+
+static PyObject *batched_resume(const void *raw_state, PyObject *value);
+
+static const AleffAdapterVTable batched_vtable = {
+    .copy_state = batched_copy_state,
+    .free_state = batched_free_state,
+    .resume = batched_resume,
+};
+
+static PyObject *
+batched_continue(BatchedState *state, PyObject *resumed_value, int is_resumed)
+{
+    if (is_resumed) {
+        if (state->phase != BATCHED_WAIT_INPUT || resumed_value == NULL) {
+            return NULL;
+        }
+        if (PyList_Append(state->items, resumed_value) < 0) {
+            return NULL;
+        }
+    }
+    while (PyList_GET_SIZE(state->items) < state->batch_size) {
+        state->phase = BATCHED_WAIT_INPUT;
+        PyObject *item = Py_TYPE(state->iterator)->tp_iternext(state->iterator);
+        if (item == NULL) {
+            if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration)) {
+                return NULL;
+            }
+            PyErr_Clear();
+            Py_ssize_t item_count = PyList_GET_SIZE(state->items);
+            if (item_count == 0) {
+                return NULL;
+            }
+            if (state->strict && item_count != state->batch_size) {
+                PyErr_SetString(PyExc_ValueError, "batched(): incomplete batch");
+                return NULL;
+            }
+            return PyList_AsTuple(state->items);
+        }
+        if (PyList_Append(state->items, item) < 0) {
+            Py_DECREF(item);
+            return NULL;
+        }
+        Py_DECREF(item);
+    }
+    return PyList_AsTuple(state->items);
+}
+
+static PyObject *
+batched_resume(const void *raw_state, PyObject *value)
+{
+    BatchedState *state = batched_copy_state(raw_state);
+    if (state == NULL) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &batched_vtable, state) < 0) {
+        batched_free_state(state);
+        return NULL;
+    }
+    PyObject *result = batched_continue(state, value, 1);
+    adapter_leave(&frame);
+    batched_free_state(state);
+    return result;
+}
+
+static PyObject *
+adapter_batched_next(PyObject *object)
+{
+    AleffBatchedObject *batched = (AleffBatchedObject *)object;
+    BatchedState state = {
+        .owner = object,
+        .iterator = batched->iterator,
+        .items = PyList_New(0),
+        .batch_size = batched->batch_size,
+#if PY_VERSION_HEX >= 0x030d0000
+        .strict = batched->strict,
+#else
+        .strict = 0,
+#endif
+        .phase = BATCHED_WAIT_INPUT,
+    };
+    if (state.items == NULL) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &batched_vtable, &state) < 0) {
+        Py_DECREF(state.items);
+        return NULL;
+    }
+    PyObject *result = batched_continue(&state, NULL, 0);
+    adapter_leave(&frame);
+    Py_DECREF(state.items);
+    return result;
+}
+
 /*
  * The remaining itertools implementations are stateful C iterators.  Their
  * callbacks are nevertheless ordinary Python calls, so the C boundary only
@@ -562,23 +816,22 @@ adapter_batched_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
  */
 static iternextfunc original_itertools_next[17] = {NULL};
 static PyTypeObject *itertools_next_types[17] = {NULL};
-static destructor original_itertools_dealloc[17] = {NULL};
 
-typedef struct ItRuntimeState ItRuntimeState;
-
-static int adapter_itertools_runtime_next(PyObject *object, PyObject **result);
+static int adapter_native_itertools_next(PyObject *object, PyObject **result);
 
 static PyObject *
 adapter_itertools_next(PyObject *object)
 {
-    PyObject *runtime_result = NULL;
-    int runtime_handled = adapter_itertools_runtime_next(object, &runtime_result);
-    if (runtime_handled) {
-        return runtime_result;
+    PyObject *native_result = NULL;
+    int native_handled = adapter_native_itertools_next(object, &native_result);
+    if (native_handled != 0) {
+        return native_handled < 0 ? NULL : native_result;
     }
     PyTypeObject *type = Py_TYPE(object);
     for (int index = 0; index < 17; index++) {
-        if (itertools_next_types[index] == type && original_itertools_next[index] != NULL) {
+        if (itertools_next_types[index] != NULL &&
+            PyType_IsSubtype(type, itertools_next_types[index]) &&
+            original_itertools_next[index] != NULL) {
             AleffAdapterFrame frame;
             if (adapter_enter(&frame, &map_vtable, NULL) < 0) {
                 return NULL;
@@ -627,13 +880,210 @@ typedef struct {
 static newfunc original_itertools_new[20] = {NULL};
 static PyTypeObject *itertools_new_types[20] = {NULL};
 
-static int it_runtime_register_from_constructor(
-    PyObject *object,
-    ItIteratorKind kind,
-    PyObject *converted,
-    PyObject *kwargs,
-    PyObject *args
-);
+typedef struct {
+    PyObject_HEAD
+    PyObject *iterator;
+} ItIteratorHolder;
+
+static int it_runtime_is_builtin_position_iterator(PyObject *iterator);
+static PyObject *it_runtime_clone_position_iterator(PyObject *iterator);
+
+typedef enum {
+    IT_POOL_WAIT_ITERATOR,
+    IT_POOL_WAIT_ITEM,
+} ItPoolPhase;
+
+typedef struct {
+    PyObject *iterable;
+    PyObject *iterator;
+    PyObject *items;
+    ItPoolPhase phase;
+} ItPoolState;
+
+static void *
+it_pool_copy_state(const void *raw_state)
+{
+    const ItPoolState *state = raw_state;
+    ItPoolState *copy = PyMem_Malloc(sizeof(*copy));
+    if (copy == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    copy->iterable = Py_NewRef(state->iterable);
+    copy->iterator = state->iterator == NULL
+        ? NULL
+        : it_runtime_is_builtin_position_iterator(state->iterator)
+            ? it_runtime_clone_position_iterator(state->iterator)
+            : Py_NewRef(state->iterator);
+    copy->items = PyList_GetSlice(
+        state->items, 0, PyList_GET_SIZE(state->items)
+    );
+    copy->phase = state->phase;
+    if ((state->iterator != NULL && copy->iterator == NULL) ||
+        copy->items == NULL) {
+        Py_DECREF(copy->iterable);
+        Py_XDECREF(copy->iterator);
+        Py_XDECREF(copy->items);
+        PyMem_Free(copy);
+        return NULL;
+    }
+    return copy;
+}
+
+static void
+it_pool_free_state(void *raw_state)
+{
+    ItPoolState *state = raw_state;
+    if (state == NULL) {
+        return;
+    }
+    Py_DECREF(state->iterable);
+    Py_XDECREF(state->iterator);
+    Py_DECREF(state->items);
+    PyMem_Free(state);
+}
+
+static PyObject *it_pool_resume(const void *raw_state, PyObject *value);
+
+static const AleffAdapterVTable it_pool_vtable = {
+    .copy_state = it_pool_copy_state,
+    .free_state = it_pool_free_state,
+    .resume = it_pool_resume,
+};
+
+static PyObject *
+it_pool_continue(ItPoolState *state, PyObject *value, int is_resumed)
+{
+    PyObject *item = NULL;
+    if (is_resumed && state->phase == IT_POOL_WAIT_ITERATOR) {
+        if (value == NULL || !PyIter_Check(value)) {
+            if (value != NULL) {
+                PyErr_Format(
+                    PyExc_TypeError,
+                    "iter() returned non-iterator of type '%.200s'",
+                    Py_TYPE(value)->tp_name
+                );
+            }
+            return NULL;
+        }
+        Py_XSETREF(state->iterator, Py_NewRef(value));
+    }
+    else if (is_resumed && state->phase == IT_POOL_WAIT_ITEM) {
+        if (value == NULL) {
+            if (PyErr_Occurred() &&
+                !PyErr_ExceptionMatches(PyExc_StopIteration)) {
+                return NULL;
+            }
+            PyErr_Clear();
+            return PyList_AsTuple(state->items);
+        }
+        item = Py_NewRef(value);
+    }
+    if (state->iterator == NULL) {
+        state->phase = IT_POOL_WAIT_ITERATOR;
+        state->iterator = PyObject_GetIter(state->iterable);
+        if (state->iterator == NULL) {
+            return NULL;
+        }
+    }
+    for (;;) {
+        if (item == NULL) {
+            state->phase = IT_POOL_WAIT_ITEM;
+            item = Py_TYPE(state->iterator)->tp_iternext(state->iterator);
+            if (item == NULL) {
+                if (PyErr_Occurred() &&
+                    !PyErr_ExceptionMatches(PyExc_StopIteration)) {
+                    return NULL;
+                }
+                PyErr_Clear();
+                return PyList_AsTuple(state->items);
+            }
+        }
+        if (PyList_Append(state->items, item) < 0) {
+            Py_DECREF(item);
+            return NULL;
+        }
+        Py_DECREF(item);
+        item = NULL;
+    }
+}
+
+static PyObject *
+it_pool_resume(const void *raw_state, PyObject *value)
+{
+    ItPoolState *state = it_pool_copy_state(raw_state);
+    if (state == NULL) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &it_pool_vtable, state) < 0) {
+        it_pool_free_state(state);
+        return NULL;
+    }
+    PyObject *result = it_pool_continue(state, value, 1);
+    adapter_leave(&frame);
+    it_pool_free_state(state);
+    return result;
+}
+
+static PyObject *
+it_pool_collect(PyObject *iterable)
+{
+    ItPoolState state = {
+        .iterable = iterable,
+        .iterator = NULL,
+        .items = PyList_New(0),
+        .phase = IT_POOL_WAIT_ITERATOR,
+    };
+    if (state.items == NULL) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &it_pool_vtable, &state) < 0) {
+        Py_DECREF(state.items);
+        return NULL;
+    }
+    PyObject *result = it_pool_continue(&state, NULL, 0);
+    adapter_leave(&frame);
+    Py_XDECREF(state.iterator);
+    Py_DECREF(state.items);
+    return result;
+}
+
+static PyObject *
+it_iterator_holder_iter(PyObject *object)
+{
+    return Py_NewRef(((ItIteratorHolder *)object)->iterator);
+}
+
+static void
+it_iterator_holder_dealloc(PyObject *object)
+{
+    Py_DECREF(((ItIteratorHolder *)object)->iterator);
+    Py_TYPE(object)->tp_free(object);
+}
+
+static PyTypeObject ItIteratorHolderType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "aleff._itertools_iterator_holder",
+    .tp_basicsize = sizeof(ItIteratorHolder),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_iter = it_iterator_holder_iter,
+    .tp_dealloc = it_iterator_holder_dealloc,
+};
+
+static PyObject *
+it_iterator_holder_new(PyObject *iterator)
+{
+    ItIteratorHolder *holder = PyObject_New(
+        ItIteratorHolder, &ItIteratorHolderType
+    );
+    if (holder == NULL) {
+        return NULL;
+    }
+    holder->iterator = Py_NewRef(iterator);
+    return (PyObject *)holder;
+}
 
 static void *
 it_constructor_copy_state(const void *raw_state)
@@ -705,15 +1155,28 @@ it_constructor_is_iterable_arg(ItIteratorKind kind, Py_ssize_t index, Py_ssize_t
     }
 }
 
+static int
+it_constructor_uses_eager_pool(ItIteratorKind kind)
+{
+    return kind == ITERTOOLS_COMBINATIONS ||
+        kind == ITERTOOLS_COMBINATIONS_REPLACEMENT ||
+        kind == ITERTOOLS_PERMUTATIONS ||
+        kind == ITERTOOLS_PRODUCT;
+}
+
 static PyObject *
 it_constructor_continue(ItConstructorState *state, PyObject *resumed_value, int is_resumed)
 {
     Py_ssize_t count = PyTuple_GET_SIZE(state->args);
     if (is_resumed) {
-        if (!PyIter_Check(resumed_value)) {
+        int eager_pool = it_constructor_uses_eager_pool(state->kind);
+        if ((!eager_pool && !PyIter_Check(resumed_value)) ||
+            (eager_pool && !PyTuple_CheckExact(resumed_value))) {
             PyErr_Format(
                 PyExc_TypeError,
-                "iter() returned non-iterator of type '%.200s'",
+                eager_pool
+                    ? "iterator pool conversion returned %.200s instead of tuple"
+                    : "iter() returned non-iterator of type '%.200s'",
                 Py_TYPE(resumed_value)->tp_name
             );
             return NULL;
@@ -725,11 +1188,22 @@ it_constructor_continue(ItConstructorState *state, PyObject *resumed_value, int 
     }
     while (state->index < count) {
         PyObject *argument = PyTuple_GET_ITEM(state->args, state->index);
-        PyObject *value = it_constructor_is_iterable_arg(
-            state->kind,
-            state->index,
-            count
-        ) ? PyObject_GetIter(argument) : Py_NewRef(argument);
+        int iterable = it_constructor_is_iterable_arg(
+            state->kind, state->index, count
+        );
+        PyObject *value;
+        if (!iterable) {
+            value = Py_NewRef(argument);
+        }
+        else if (!it_constructor_uses_eager_pool(state->kind)) {
+            value = PyObject_GetIter(argument);
+        }
+        else if (PyTuple_CheckExact(argument)) {
+            value = Py_NewRef(argument);
+        }
+        else {
+            value = it_pool_collect(argument);
+        }
         if (value == NULL) {
             return NULL;
         }
@@ -744,17 +1218,37 @@ it_constructor_continue(ItConstructorState *state, PyObject *resumed_value, int 
     if (converted == NULL) {
         return NULL;
     }
-    PyObject *result = original_itertools_new[state->kind](state->type, converted, state->kwargs);
-    if (result != NULL && it_runtime_register_from_constructor(
-            result,
-            state->kind,
-            converted,
-            state->kwargs,
-            state->args
-        ) < 0) {
-        Py_DECREF(result);
-        result = NULL;
+    PyObject *native_args = Py_NewRef(converted);
+    if (state->kind == ITERTOOLS_GROUPBY) {
+        PyObject *holder = it_iterator_holder_new(
+            PyTuple_GET_ITEM(converted, 0)
+        );
+        if (holder == NULL) {
+            Py_DECREF(native_args);
+            Py_DECREF(converted);
+            return NULL;
+        }
+        Py_DECREF(native_args);
+        Py_ssize_t count = PyTuple_GET_SIZE(converted);
+        native_args = PyTuple_New(count);
+        if (native_args == NULL) {
+            Py_DECREF(holder);
+            Py_DECREF(converted);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(native_args, 0, holder);
+        for (Py_ssize_t index = 1; index < count; index++) {
+            PyTuple_SET_ITEM(
+                native_args,
+                index,
+                Py_NewRef(PyTuple_GET_ITEM(converted, index))
+            );
+        }
     }
+    PyObject *result = original_itertools_new[state->kind](
+        state->type, native_args, state->kwargs
+    );
+    Py_DECREF(native_args);
     Py_DECREF(converted);
     return result;
 }
@@ -963,19 +1457,261 @@ adapter_repeat_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     return result;
 }
 
+typedef struct {
+    PyTypeObject *type;
+} PairwiseConstructorState;
+
+static void *
+pairwise_constructor_copy(const void *raw_state)
+{
+    const PairwiseConstructorState *state = raw_state;
+    PairwiseConstructorState *copy = PyMem_Malloc(sizeof(*copy));
+    if (copy == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    copy->type = (PyTypeObject *)Py_NewRef((PyObject *)state->type);
+    return copy;
+}
+
+static void
+pairwise_constructor_free(void *raw_state)
+{
+    PairwiseConstructorState *state = raw_state;
+    if (state != NULL) {
+        Py_DECREF(state->type);
+        PyMem_Free(state);
+    }
+}
+
+static PyObject *
+pairwise_constructor_resume(const void *raw_state, PyObject *value)
+{
+    if (value == NULL) {
+        return NULL;
+    }
+    const PairwiseConstructorState *state = raw_state;
+    PyObject *args = PyTuple_Pack(1, value);
+    if (args == NULL) {
+        return NULL;
+    }
+    PyObject *result = original_itertools_new[ITERTOOLS_PAIRWISE](
+        state->type, args, NULL
+    );
+    Py_DECREF(args);
+    return result;
+}
+
+static const AleffAdapterVTable pairwise_constructor_vtable = {
+    .copy_state = pairwise_constructor_copy,
+    .free_state = pairwise_constructor_free,
+    .resume = pairwise_constructor_resume,
+};
+
+static PyObject *
+adapter_groupby_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *iterable;
+    PyObject *key = NULL;
+    static char *keywords[] = {"iterable", "key", NULL};
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "O|O:groupby", keywords, &iterable, &key)) {
+        return NULL;
+    }
+    PyObject *normalized = key == NULL
+        ? PyTuple_Pack(1, iterable)
+        : PyTuple_Pack(2, iterable, key);
+    if (normalized == NULL) {
+        return NULL;
+    }
+    PyObject *converted = PyList_New(0);
+    if (converted == NULL) {
+        Py_DECREF(normalized);
+        return NULL;
+    }
+    ItConstructorState state = {
+        .type = type,
+        .args = normalized,
+        .kwargs = NULL,
+        .converted = converted,
+        .index = 0,
+        .kind = ITERTOOLS_GROUPBY,
+    };
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &it_constructor_vtable, &state) < 0) {
+        Py_DECREF(converted);
+        Py_DECREF(normalized);
+        return NULL;
+    }
+    PyObject *result = it_constructor_continue(&state, NULL, 0);
+    adapter_leave(&frame);
+    Py_DECREF(converted);
+    Py_DECREF(normalized);
+    return result;
+}
+
+static int
+it_constructor_has_unknown_product_keyword(PyObject *kwargs)
+{
+    if (kwargs == NULL) {
+        return 0;
+    }
+    PyObject *key;
+    PyObject *value;
+    Py_ssize_t position = 0;
+    while (PyDict_Next(kwargs, &position, &key, &value)) {
+        int equal = PyUnicode_Check(key) &&
+            PyUnicode_CompareWithASCIIString(key, "repeat") == 0;
+        if (!equal) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int
+it_constructor_shape_is_invalid(
+    ItIteratorKind kind,
+    PyObject *args,
+    PyObject *kwargs
+)
+{
+    Py_ssize_t count = PyTuple_GET_SIZE(args);
+    if (kind == ITERTOOLS_PRODUCT) {
+        return it_constructor_has_unknown_product_keyword(kwargs);
+    }
+    PyObject *iterable = kwargs == NULL
+        ? NULL
+        : PyDict_GetItemString(kwargs, "iterable");
+    PyObject *r = kwargs == NULL ? NULL : PyDict_GetItemString(kwargs, "r");
+    if (kind == ITERTOOLS_PERMUTATIONS) {
+        return count > 2 || (count == 0 && iterable == NULL) ||
+            (count >= 1 && iterable != NULL) || (count >= 2 && r != NULL);
+    }
+    return count > 2 || (count == 0 && iterable == NULL) ||
+        (count < 2 && r == NULL) || (count >= 1 && iterable != NULL) ||
+        (count >= 2 && r != NULL);
+}
+
+static int
+it_constructor_validate_shape(
+    PyTypeObject *type,
+    ItIteratorKind kind,
+    PyObject *args,
+    PyObject *kwargs
+)
+{
+    if (!it_constructor_shape_is_invalid(kind, args, kwargs)) {
+        return 0;
+    }
+    Py_ssize_t count = PyTuple_GET_SIZE(args);
+    PyObject *empty = PyTuple_New(0);
+    PyObject *safe_args = PyTuple_New(count);
+    PyObject *safe_kwargs = kwargs == NULL ? NULL : PyDict_Copy(kwargs);
+    if (empty == NULL || safe_args == NULL ||
+        (kwargs != NULL && safe_kwargs == NULL)) {
+        Py_XDECREF(empty);
+        Py_XDECREF(safe_args);
+        Py_XDECREF(safe_kwargs);
+        return -1;
+    }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *argument = it_constructor_is_iterable_arg(kind, index, count)
+            ? empty
+            : PyTuple_GET_ITEM(args, index);
+        PyTuple_SET_ITEM(safe_args, index, Py_NewRef(argument));
+    }
+    if (safe_kwargs != NULL &&
+        PyDict_GetItemString(safe_kwargs, "iterable") != NULL &&
+        PyDict_SetItemString(safe_kwargs, "iterable", empty) < 0) {
+        Py_DECREF(empty);
+        Py_DECREF(safe_args);
+        Py_DECREF(safe_kwargs);
+        return -1;
+    }
+    PyObject *result = original_itertools_new[kind](
+        type, safe_args, safe_kwargs
+    );
+    Py_DECREF(empty);
+    Py_DECREF(safe_args);
+    Py_XDECREF(safe_kwargs);
+    if (result == NULL) {
+        return -1;
+    }
+    Py_DECREF(result);
+    PyErr_SetString(PyExc_RuntimeError, "itertools argument validation mismatch");
+    return -1;
+}
+
 static PyObject *
 adapter_itertools_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
-    ItIteratorKind kind = -1;
+    int kind = -1;
+    int is_exact_type = 0;
     for (int index = 0; index < 20; index++) {
         if (itertools_new_types[index] == type) {
-            kind = (ItIteratorKind)index;
+            kind = index;
+            is_exact_type = 1;
             break;
+        }
+    }
+    if (kind < 0) {
+        for (int index = 0; index < 20; index++) {
+            if (itertools_new_types[index] != NULL &&
+                (type->tp_base == itertools_new_types[index] ||
+                 PyType_IsSubtype(type, itertools_new_types[index]))) {
+                kind = index;
+                break;
+            }
         }
     }
     if (kind < 0 || kind >= 20 || original_itertools_new[kind] == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "unknown itertools constructor type");
         return NULL;
+    }
+    if (!is_exact_type) {
+        return original_itertools_new[kind](type, args, kwargs);
+    }
+    if (kind == ITERTOOLS_GROUPBY) {
+        return adapter_groupby_new(type, args, kwargs);
+    }
+    if (kind == ITERTOOLS_ISLICE) {
+        return original_itertools_new[kind](type, args, kwargs);
+    }
+    if (kind == ITERTOOLS_STARMAP) {
+        return original_itertools_new[kind](type, args, kwargs);
+    }
+    if (kind == ITERTOOLS_PAIRWISE) {
+        PairwiseConstructorState state = {.type = type};
+        AleffAdapterFrame frame;
+        if (adapter_enter(
+                &frame, &pairwise_constructor_vtable, &state) < 0) {
+            return NULL;
+        }
+        PyObject *result = original_itertools_new[kind](type, args, kwargs);
+        adapter_leave(&frame);
+        return result;
+    }
+    if (it_constructor_uses_eager_pool((ItIteratorKind)kind) &&
+        it_constructor_validate_shape(
+            type, (ItIteratorKind)kind, args, kwargs
+        ) < 0) {
+        return NULL;
+    }
+    if (kind == ITERTOOLS_PRODUCT && kwargs != NULL) {
+        PyObject *repeat = PyDict_GetItemString(kwargs, "repeat");
+        if (
+            repeat != NULL &&
+            (PyLong_CheckExact(repeat) || PyBool_Check(repeat))
+        ) {
+            int is_zero = PyObject_RichCompareBool(repeat, Py_False, Py_EQ);
+            if (is_zero < 0) {
+                return NULL;
+            }
+            if (is_zero) {
+                return original_itertools_new[kind](type, args, kwargs);
+            }
+        }
     }
     PyObject *converted = PyList_New(0);
     if (converted == NULL) {
@@ -1010,9 +1746,13 @@ adapter_itertools_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 typedef enum {
     IT_RUNTIME_SOURCE,
     IT_RUNTIME_CALLBACK,
+    IT_RUNTIME_COMPARE,
+    IT_RUNTIME_TRUTH,
     IT_RUNTIME_ZIP_ITEM,
     IT_RUNTIME_COUNT_ADD,
 } ItRuntimePhase;
+
+typedef struct ItRuntimeState ItRuntimeState;
 
 struct ItRuntimeState {
     PyObject *owner;
@@ -1020,8 +1760,6 @@ struct ItRuntimeState {
     PyObject *source;
     PyObject *function;
     PyObject *sources;
-    PyObject *source_templates;
-    PyObject *source_positions;
     PyObject *fillvalue;
     PyObject *item;
     PyObject *items;
@@ -1033,22 +1771,25 @@ struct ItRuntimeState {
     PyObject *count_current;
     PyObject *count_step;
     PyObject *count_pending;
+    PyObject *grouper;
     Py_ssize_t index;
     Py_ssize_t source_count;
     Py_ssize_t limit;
+    Py_ssize_t step;
     Py_ssize_t position;
     Py_ssize_t source_position;
     int started;
     int exhausted;
     int group_active;
     int count_fast;
+    int unbounded;
     Py_ssize_t count_value;
     ItRuntimePhase phase;
 };
 
-static PyObject *itertools_runtime_registry = NULL;
-
 static int it_runtime_is_predicate(ItIteratorKind kind);
+static const AleffAdapterVTable it_runtime_vtable;
+static PyObject *it_runtime_clone_sources(PyObject *sources);
 
 static void
 it_runtime_free(ItRuntimeState *state)
@@ -1056,11 +1797,10 @@ it_runtime_free(ItRuntimeState *state)
     if (state == NULL) {
         return;
     }
+    Py_XDECREF(state->owner);
     Py_XDECREF(state->source);
     Py_XDECREF(state->function);
     Py_XDECREF(state->sources);
-    Py_XDECREF(state->source_templates);
-    Py_XDECREF(state->source_positions);
     Py_XDECREF(state->fillvalue);
     Py_XDECREF(state->item);
     Py_XDECREF(state->items);
@@ -1072,104 +1812,8 @@ it_runtime_free(ItRuntimeState *state)
     Py_XDECREF(state->count_current);
     Py_XDECREF(state->count_step);
     Py_XDECREF(state->count_pending);
+    Py_XDECREF(state->grouper);
     PyMem_Free(state);
-}
-
-static void
-it_runtime_capsule_destructor(PyObject *capsule)
-{
-    it_runtime_free(PyCapsule_GetPointer(capsule, "aleff.itertools.state"));
-}
-
-static int
-it_runtime_replayable_template(PyObject *object)
-{
-    return PyTuple_CheckExact(object) ||
-        PyList_CheckExact(object) ||
-        PyRange_Check(object);
-}
-
-static PyObject *
-it_runtime_clone_sources(const ItRuntimeState *state)
-{
-    if (state->sources == NULL || state->source_templates == NULL ||
-        state->source_positions == NULL) {
-        return Py_XNewRef(state->sources);
-    }
-    Py_ssize_t count = PyTuple_GET_SIZE(state->sources);
-    PyObject *sources = PyTuple_New(count);
-    if (sources == NULL) {
-        return NULL;
-    }
-    for (Py_ssize_t index = 0; index < count; index++) {
-        PyObject *template = PyTuple_GET_ITEM(state->source_templates, index);
-        PyObject *iterator = NULL;
-        if (template != Py_None) {
-            iterator = PyObject_GetIter(template);
-            if (iterator == NULL) {
-                Py_DECREF(sources);
-                return NULL;
-            }
-            Py_ssize_t position = PyLong_AsSsize_t(
-                PyList_GET_ITEM(state->source_positions, index)
-            );
-            if (position == -1 && PyErr_Occurred()) {
-                Py_DECREF(iterator);
-                Py_DECREF(sources);
-                return NULL;
-            }
-            for (Py_ssize_t skipped = 0; skipped < position; skipped++) {
-                PyObject *item = PyIter_Next(iterator);
-                if (item == NULL) {
-                    if (PyErr_Occurred()) {
-                        Py_DECREF(iterator);
-                        Py_DECREF(sources);
-                        return NULL;
-                    }
-                    break;
-                }
-                Py_DECREF(item);
-            }
-        }
-        else {
-            iterator = Py_NewRef(PyTuple_GET_ITEM(state->sources, index));
-        }
-        PyTuple_SET_ITEM(sources, index, iterator);
-    }
-    return sources;
-}
-
-static PyObject *
-it_runtime_clone_source(const ItRuntimeState *state)
-{
-    if (state->source == NULL || state->source_templates == NULL ||
-        state->source_positions == NULL ||
-        PyTuple_GET_ITEM(state->source_templates, 0) == Py_None) {
-        return Py_XNewRef(state->source);
-    }
-    PyObject *iterator = PyObject_GetIter(PyTuple_GET_ITEM(state->source_templates, 0));
-    if (iterator == NULL) {
-        return NULL;
-    }
-    Py_ssize_t position = PyLong_AsSsize_t(
-        PyList_GET_ITEM(state->source_positions, 0)
-    );
-    if (position == -1 && PyErr_Occurred()) {
-        Py_DECREF(iterator);
-        return NULL;
-    }
-    for (Py_ssize_t skipped = 0; skipped < position; skipped++) {
-        PyObject *item = PyIter_Next(iterator);
-        if (item == NULL) {
-            if (PyErr_Occurred()) {
-                Py_DECREF(iterator);
-                return NULL;
-            }
-            break;
-        }
-        Py_DECREF(item);
-    }
-    return iterator;
 }
 
 static ItRuntimeState *
@@ -1180,15 +1824,13 @@ it_runtime_copy(const ItRuntimeState *source)
         PyErr_NoMemory();
         return NULL;
     }
-    copy->owner = source->owner;
+    copy->owner = Py_XNewRef(source->owner);
     copy->kind = source->kind;
-    copy->source = it_runtime_clone_source(source);
+    copy->source = Py_XNewRef(source->source);
     copy->function = Py_XNewRef(source->function);
-    copy->sources = it_runtime_clone_sources(source);
-    copy->source_templates = Py_XNewRef(source->source_templates);
-    copy->source_positions = source->source_positions == NULL
+    copy->sources = source->sources == NULL
         ? NULL
-        : PyList_GetSlice(source->source_positions, 0, PyList_GET_SIZE(source->source_positions));
+        : it_runtime_clone_sources(source->sources);
     copy->fillvalue = Py_XNewRef(source->fillvalue);
     copy->item = Py_XNewRef(source->item);
     copy->items = source->items == NULL
@@ -1202,349 +1844,426 @@ it_runtime_copy(const ItRuntimeState *source)
     copy->pending_item = Py_XNewRef(source->pending_item);
     copy->done_sources = source->done_sources == NULL
         ? NULL
-        : PyList_GetSlice(source->done_sources, 0, PyList_GET_SIZE(source->done_sources));
+        : PyList_GetSlice(
+            source->done_sources,
+            0,
+            PyList_GET_SIZE(source->done_sources)
+        );
     copy->count_current = Py_XNewRef(source->count_current);
     copy->count_step = Py_XNewRef(source->count_step);
     copy->count_pending = Py_XNewRef(source->count_pending);
+    copy->grouper = Py_XNewRef(source->grouper);
     copy->index = source->index;
     copy->source_count = source->source_count;
+    copy->limit = source->limit;
+    copy->step = source->step;
+    copy->position = source->position;
+    copy->source_position = source->source_position;
     copy->started = source->started;
     copy->exhausted = source->exhausted;
     copy->group_active = source->group_active;
     copy->count_fast = source->count_fast;
+    copy->unbounded = source->unbounded;
     copy->count_value = source->count_value;
     copy->phase = source->phase;
-    copy->limit = source->limit;
-    copy->position = source->position;
-    copy->source_position = source->source_position;
-    if ((source->source != NULL && copy->source == NULL) ||
+    if ((source->owner != NULL && copy->owner == NULL) ||
+        (source->source != NULL && copy->source == NULL) ||
+        (source->sources != NULL && copy->sources == NULL) ||
         (source->items != NULL && copy->items == NULL) ||
         (source->cache != NULL && copy->cache == NULL) ||
-        (source->sources != NULL && copy->sources == NULL) ||
-        (source->done_sources != NULL && copy->done_sources == NULL) ||
-        (source->count_current != NULL && copy->count_current == NULL) ||
-        (source->count_step != NULL && copy->count_step == NULL) ||
-        (source->count_pending != NULL && copy->count_pending == NULL)) {
-        it_runtime_free(copy);
-        return NULL;
-    }
-    if (source->source_positions != NULL && copy->source_positions == NULL) {
+        (source->done_sources != NULL && copy->done_sources == NULL)) {
         it_runtime_free(copy);
         return NULL;
     }
     return copy;
 }
 
-static int
-it_runtime_assign(ItRuntimeState *target, const ItRuntimeState *source)
+typedef struct {
+    PyObject_HEAD
+    PyObject *iterator;
+    Py_ssize_t next;
+    Py_ssize_t stop;
+    Py_ssize_t step;
+    Py_ssize_t count;
+} AleffNativeIsliceObject;
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *function;
+    PyObject *iterator;
+} AleffNativeStarmapObject;
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *iterator;
+    PyObject *old;
+#if PY_VERSION_HEX >= 0x030d0000
+    PyObject *result;
+#endif
+} AleffNativePairwiseObject;
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *iterator;
+    PyObject *saved;
+    Py_ssize_t index;
+    int firstpass;
+} AleffNativeCycleObject;
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *function;
+    PyObject *iterator;
+    long flag;
+} AleffNativePredicateObject;
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *iterator;
+    PyObject *keyfunc;
+    PyObject *target_key;
+    PyObject *current_key;
+    PyObject *current_value;
+    const void *current_grouper;
+    void *module_state;
+} AleffNativeGroupbyObject;
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *parent;
+    PyObject *target_key;
+} AleffNativeGrouperObject;
+
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t count;
+    PyObject *long_count;
+    PyObject *long_step;
+} AleffNativeCountObject;
+
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t tuple_size;
+    Py_ssize_t active_count;
+    PyObject *iterators;
+    PyObject *result;
+    PyObject *fillvalue;
+} AleffNativeZipLongestObject;
+
+static PyObject *
+it_runtime_clone_nullable_tuple(PyObject *tuple)
 {
-    PyObject *items = source->items == NULL
-        ? NULL
-        : PyList_GetSlice(source->items, 0, PyList_GET_SIZE(source->items));
-    PyObject *cache = source->cache == NULL
-        ? NULL
-        : PyList_GetSlice(source->cache, 0, PyList_GET_SIZE(source->cache));
-    PyObject *done_sources = source->done_sources == NULL
-        ? NULL
-        : PyList_GetSlice(source->done_sources, 0, PyList_GET_SIZE(source->done_sources));
-    PyObject *source_positions = source->source_positions == NULL
-        ? NULL
-        : PyList_GetSlice(source->source_positions, 0, PyList_GET_SIZE(source->source_positions));
-    if ((source->items != NULL && items == NULL) ||
-        (source->cache != NULL && cache == NULL) ||
-        (source->done_sources != NULL && done_sources == NULL) ||
-        (source->source_positions != NULL && source_positions == NULL)) {
-        Py_XDECREF(items);
-        Py_XDECREF(cache);
-        Py_XDECREF(done_sources);
-        Py_XDECREF(source_positions);
-        return -1;
+    Py_ssize_t size = PyTuple_GET_SIZE(tuple);
+    PyObject *copy = PyTuple_New(size);
+    if (copy == NULL) {
+        return NULL;
     }
-    target->owner = source->owner;
-    target->kind = source->kind;
-    Py_XSETREF(target->source, Py_XNewRef(source->source));
-    Py_XSETREF(target->function, Py_XNewRef(source->function));
-    Py_XSETREF(target->sources, Py_XNewRef(source->sources));
-    Py_XSETREF(target->source_templates, Py_XNewRef(source->source_templates));
-    Py_XSETREF(target->source_positions, source_positions);
-    Py_XSETREF(target->fillvalue, Py_XNewRef(source->fillvalue));
-    Py_XSETREF(target->item, Py_XNewRef(source->item));
-    Py_XSETREF(target->items, items);
-    Py_XSETREF(target->cache, cache);
-    Py_XSETREF(target->key, Py_XNewRef(source->key));
-    Py_XSETREF(target->pending_key, Py_XNewRef(source->pending_key));
-    Py_XSETREF(target->pending_item, Py_XNewRef(source->pending_item));
-    Py_XSETREF(target->done_sources, done_sources);
-    Py_XSETREF(target->count_current, Py_XNewRef(source->count_current));
-    Py_XSETREF(target->count_step, Py_XNewRef(source->count_step));
-    Py_XSETREF(target->count_pending, Py_XNewRef(source->count_pending));
-    target->index = source->index;
-    target->source_count = source->source_count;
-    target->started = source->started;
-    target->exhausted = source->exhausted;
-    target->group_active = source->group_active;
-    target->count_fast = source->count_fast;
-    target->count_value = source->count_value;
-    target->phase = source->phase;
-    target->limit = source->limit;
-    target->position = source->position;
-    target->source_position = source->source_position;
-    return 0;
+    for (Py_ssize_t index = 0; index < size; index++) {
+        PyObject *item = PyTuple_GET_ITEM(tuple, index);
+        if (item != NULL) {
+            PyTuple_SET_ITEM(copy, index, Py_NewRef(item));
+        }
+    }
+    return copy;
 }
 
 static int
-it_runtime_register(PyObject *object, ItRuntimeState *state)
+it_runtime_is_builtin_position_iterator(PyObject *iterator)
 {
-    if (itertools_runtime_registry == NULL) {
-        itertools_runtime_registry = PyDict_New();
-        if (itertools_runtime_registry == NULL) {
-            return -1;
-        }
-    }
-    PyObject *key = PyLong_FromVoidPtr(object);
-    if (key == NULL) {
-        return -1;
-    }
-    PyObject *capsule = PyCapsule_New(state, "aleff.itertools.state", it_runtime_capsule_destructor);
-    if (capsule == NULL) {
-        Py_DECREF(key);
-        return -1;
-    }
-    if (PyDict_SetItem(itertools_runtime_registry, key, capsule) < 0) {
-        Py_DECREF(key);
-        Py_DECREF(capsule);
-        return -1;
-    }
-    Py_DECREF(key);
-    Py_DECREF(capsule);
-    return 0;
+    const char *name = Py_TYPE(iterator)->tp_name;
+    return strcmp(name, "tuple_iterator") == 0 ||
+        strcmp(name, "list_iterator") == 0 ||
+        strcmp(name, "range_iterator") == 0 ||
+        strcmp(name, "longrange_iterator") == 0;
 }
 
-static int
-it_runtime_register_from_constructor(
-    PyObject *object,
-    ItIteratorKind kind,
-    PyObject *converted,
-    PyObject *kwargs,
-    PyObject *args
-)
+static PyObject *
+it_runtime_clone_position_iterator(PyObject *iterator)
 {
-    if (kind != ITERTOOLS_CYCLE &&
-        kind != ITERTOOLS_ISLICE &&
-        !it_runtime_is_predicate(kind) &&
-        kind != ITERTOOLS_GROUPBY &&
-        kind != ITERTOOLS_ZIP_LONGEST &&
-        kind != ITERTOOLS_COUNT) {
-        return 0;
+    PyObject *reduced = PyObject_CallMethod(iterator, "__reduce__", NULL);
+    if (reduced == NULL) {
+        return NULL;
     }
-    ItRuntimeState *state = PyMem_Calloc(1, sizeof(*state));
-    if (state == NULL) {
-        PyErr_NoMemory();
-        return -1;
+    if (!PyTuple_Check(reduced) || PyTuple_GET_SIZE(reduced) < 2) {
+        Py_DECREF(reduced);
+        return Py_NewRef(iterator);
     }
-    state->owner = object;
-    state->kind = kind;
-    state->phase = IT_RUNTIME_SOURCE;
-    state->started = kind == ITERTOOLS_FILTERFALSE;
-    if (kind == ITERTOOLS_COUNT) {
-        PyObject *start = PyTuple_GET_SIZE(args) > 0
-            ? PyTuple_GET_ITEM(args, 0)
-            : (kwargs == NULL ? NULL : PyDict_GetItemString(kwargs, "start"));
-        PyObject *step = PyTuple_GET_SIZE(args) > 1
-            ? PyTuple_GET_ITEM(args, 1)
-            : (kwargs == NULL ? NULL : PyDict_GetItemString(kwargs, "step"));
-        if (start == NULL) {
-            start = PyLong_FromLong(0);
+    PyObject *constructor = PyTuple_GET_ITEM(reduced, 0);
+    PyObject *args = PyTuple_GET_ITEM(reduced, 1);
+    PyObject *copy = PyObject_Call(constructor, args, NULL);
+    if (copy != NULL && PyTuple_GET_SIZE(reduced) >= 3) {
+        PyObject *result = PyObject_CallMethod(
+            copy, "__setstate__", "O", PyTuple_GET_ITEM(reduced, 2)
+        );
+        if (result == NULL) {
+            Py_CLEAR(copy);
         }
         else {
-            Py_INCREF(start);
-        }
-        if (step == NULL) {
-            step = PyLong_FromLong(1);
-        }
-        else {
-            Py_INCREF(step);
-        }
-        if (start == NULL || step == NULL) {
-            Py_XDECREF(start);
-            Py_XDECREF(step);
-            it_runtime_free(state);
-            return -1;
-        }
-        state->count_step = step;
-        state->count_fast = PyLong_Check(start) && PyLong_Check(step);
-        if (state->count_fast) {
-            state->count_value = PyLong_AsSsize_t(start);
-            if (state->count_value == -1 && PyErr_Occurred()) {
-                if (!PyErr_ExceptionMatches(PyExc_OverflowError)) {
-                    Py_DECREF(start);
-                    it_runtime_free(state);
-                    return -1;
-                }
-                PyErr_Clear();
-                state->count_fast = 0;
-            }
-        }
-        if (state->count_fast) {
-            long step_value = PyLong_AsLong(step);
-            if (step_value == -1 && PyErr_Occurred()) {
-                PyErr_Clear();
-                state->count_fast = 0;
-            }
-            else if (step_value != 1) {
-                state->count_fast = 0;
-            }
-        }
-        if (state->count_fast) {
-            Py_DECREF(start);
-        }
-        else {
-            state->count_current = start;
+            Py_DECREF(result);
         }
     }
-    else if (kind == ITERTOOLS_ISLICE) {
-        state->source = Py_NewRef(PyTuple_GET_ITEM(converted, 0));
-        state->limit = PyLong_AsSsize_t(PyTuple_GET_ITEM(converted, 1));
-        if (state->limit == -1 && PyErr_Occurred()) {
-            it_runtime_free(state);
-            return -1;
-        }
+    Py_DECREF(reduced);
+    return copy;
+}
+
+static PyObject *
+it_runtime_clone_sources(PyObject *sources)
+{
+    Py_ssize_t count = PyTuple_GET_SIZE(sources);
+    PyObject *copy = PyTuple_New(count);
+    if (copy == NULL) {
+        return NULL;
     }
-    else if (kind == ITERTOOLS_ZIP_LONGEST) {
-        state->sources = Py_NewRef(converted);
-        state->source_count = PyTuple_GET_SIZE(converted);
-        state->source_templates = PyTuple_New(state->source_count);
-        state->source_positions = PyList_New(state->source_count);
-        state->items = PyList_New(0);
-        state->done_sources = PyList_New(state->source_count);
-        if (state->source_templates != NULL && state->source_positions != NULL) {
-            for (Py_ssize_t index = 0; index < state->source_count; index++) {
-                PyObject *argument = PyTuple_GET_ITEM(args, index);
-                PyObject *template = it_runtime_replayable_template(argument)
-                    ? Py_NewRef(argument)
-                    : Py_NewRef(Py_None);
-                if (template == NULL) {
-                    it_runtime_free(state);
-                    return -1;
-                }
-                PyTuple_SET_ITEM(state->source_templates, index, template);
-                PyObject *zero = PyLong_FromLong(0);
-                if (zero == NULL) {
-                    it_runtime_free(state);
-                    return -1;
-                }
-                PyList_SET_ITEM(state->source_positions, index, zero);
-            }
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *iterator = PyTuple_GET_ITEM(sources, index);
+        if (iterator == NULL) {
+            continue;
         }
-        if (state->done_sources != NULL) {
-            for (Py_ssize_t index = 0; index < state->source_count; index++) {
-                Py_INCREF(Py_False);
-                PyList_SET_ITEM(state->done_sources, index, Py_False);
-            }
+        PyObject *item = it_runtime_is_builtin_position_iterator(iterator)
+            ? it_runtime_clone_position_iterator(iterator)
+            : Py_NewRef(iterator);
+        if (item == NULL) {
+            Py_DECREF(copy);
+            return NULL;
         }
-        PyObject *fillvalue = kwargs == NULL
-            ? NULL
-            : PyDict_GetItemString(kwargs, "fillvalue");
-        state->fillvalue = Py_XNewRef(fillvalue == NULL ? Py_None : fillvalue);
+        PyTuple_SET_ITEM(copy, index, item);
     }
-    else {
-        if (kind == ITERTOOLS_CYCLE) {
-            state->source = Py_NewRef(PyTuple_GET_ITEM(converted, 0));
-            state->cache = PyList_New(0);
-        }
-        else if (kind == ITERTOOLS_GROUPBY) {
-            state->source = Py_NewRef(PyTuple_GET_ITEM(converted, 0));
-            state->source_templates = PyTuple_New(1);
-            state->source_positions = PyList_New(1);
-            if (state->source_templates == NULL || state->source_positions == NULL) {
-                it_runtime_free(state);
-                return -1;
-            }
-            PyObject *argument = PyTuple_GET_ITEM(args, 0);
-            PyTuple_SET_ITEM(
-                state->source_templates,
-                0,
-                it_runtime_replayable_template(argument)
-                    ? Py_NewRef(argument)
-                    : Py_NewRef(Py_None)
-            );
-            PyObject *zero = PyLong_FromLong(0);
-            if (zero == NULL) {
-                it_runtime_free(state);
-                return -1;
-            }
-            PyList_SET_ITEM(state->source_positions, 0, zero);
-            PyObject *key = PyTuple_GET_SIZE(converted) > 1
-                ? PyTuple_GET_ITEM(converted, 1)
-                : (kwargs == NULL ? NULL : PyDict_GetItemString(kwargs, "key"));
-            state->function = Py_NewRef(key == NULL ? Py_None : key);
-        }
-        else {
-            state->function = Py_NewRef(PyTuple_GET_ITEM(converted, 0));
-            state->source = Py_NewRef(PyTuple_GET_ITEM(converted, 1));
-        }
-    }
-    if ((kind == ITERTOOLS_ZIP_LONGEST &&
-            (state->items == NULL || state->done_sources == NULL ||
-             state->source_templates == NULL || state->source_positions == NULL)) ||
-        (kind == ITERTOOLS_CYCLE && state->cache == NULL)) {
-        it_runtime_free(state);
-        return -1;
-    }
-    if (it_runtime_register(object, state) < 0) {
-        it_runtime_free(state);
-        return -1;
-    }
-    return 0;
+    return copy;
 }
 
 static ItRuntimeState *
-it_runtime_lookup(PyObject *object)
+it_runtime_from_native(PyObject *object, ItIteratorKind kind)
 {
-    if (itertools_runtime_registry == NULL) {
+    ItRuntimeState *state = PyMem_Calloc(1, sizeof(*state));
+    if (state == NULL) {
+        PyErr_NoMemory();
         return NULL;
     }
-    PyObject *key = PyLong_FromVoidPtr(object);
-    if (key == NULL) {
-        PyErr_Clear();
+    state->owner = Py_NewRef(object);
+    state->kind = kind;
+    state->phase = IT_RUNTIME_SOURCE;
+    switch (kind) {
+        case ITERTOOLS_COUNT: {
+            AleffNativeCountObject *native = (AleffNativeCountObject *)object;
+#ifdef Py_GIL_DISABLED
+            state->count_value = _Py_atomic_load_ssize_relaxed(&native->count);
+#else
+            state->count_value = native->count;
+#endif
+            state->count_fast = state->count_value != PY_SSIZE_T_MAX;
+            state->count_current = Py_XNewRef(native->long_count);
+            state->count_step = Py_NewRef(native->long_step);
+            break;
+        }
+        case ITERTOOLS_CYCLE: {
+            AleffNativeCycleObject *native = (AleffNativeCycleObject *)object;
+            state->source = Py_XNewRef(native->iterator);
+            state->cache = PyList_GetSlice(
+                native->saved, 0, PyList_GET_SIZE(native->saved)
+            );
+            state->index = native->index;
+            state->started = native->firstpass;
+            state->exhausted = native->iterator == NULL;
+            break;
+        }
+        case ITERTOOLS_DROPWHILE:
+        case ITERTOOLS_FILTERFALSE:
+        case ITERTOOLS_TAKEWHILE: {
+            AleffNativePredicateObject *native =
+                (AleffNativePredicateObject *)object;
+            state->function = Py_NewRef(native->function);
+            state->source = Py_NewRef(native->iterator);
+            state->started = kind == ITERTOOLS_FILTERFALSE
+                ? 1
+                : native->flag != 0;
+            state->exhausted =
+                kind == ITERTOOLS_TAKEWHILE && native->flag != 0;
+            state->items = PyList_New(0);
+            break;
+        }
+        case ITERTOOLS_GROUPBY: {
+            AleffNativeGroupbyObject *native =
+                (AleffNativeGroupbyObject *)object;
+            state->source = Py_NewRef(native->iterator);
+            state->function = Py_NewRef(native->keyfunc);
+            state->key = Py_XNewRef(native->target_key);
+            state->pending_key = Py_XNewRef(native->current_key);
+            state->item = Py_XNewRef(native->current_value);
+            state->started = native->current_key != NULL;
+            break;
+        }
+        case ITERTOOLS_ISLICE: {
+            AleffNativeIsliceObject *native =
+                (AleffNativeIsliceObject *)object;
+            state->source = Py_XNewRef(native->iterator);
+            state->index = native->next;
+            state->limit = native->stop;
+            state->unbounded = native->stop < 0;
+            state->step = native->step;
+            state->position = native->count;
+            state->exhausted = native->iterator == NULL;
+            break;
+        }
+        case ITERTOOLS_PAIRWISE: {
+            AleffNativePairwiseObject *native =
+                (AleffNativePairwiseObject *)object;
+            state->source = Py_XNewRef(native->iterator);
+            state->item = Py_XNewRef(native->old);
+            state->exhausted = native->iterator == NULL;
+            break;
+        }
+        case ITERTOOLS_STARMAP: {
+            AleffNativeStarmapObject *native =
+                (AleffNativeStarmapObject *)object;
+            state->function = Py_NewRef(native->function);
+            state->source = Py_NewRef(native->iterator);
+            break;
+        }
+        case ITERTOOLS_ZIP_LONGEST: {
+            AleffNativeZipLongestObject *native =
+                (AleffNativeZipLongestObject *)object;
+            state->sources = it_runtime_clone_nullable_tuple(native->iterators);
+            state->source_count = native->tuple_size;
+            state->fillvalue = Py_NewRef(native->fillvalue);
+            state->items = PyList_New(0);
+            state->done_sources = PyList_New(native->tuple_size);
+            state->exhausted = native->active_count == 0;
+            if (state->sources != NULL && state->done_sources != NULL) {
+                for (Py_ssize_t index = 0; index < native->tuple_size; index++) {
+                    PyObject *iterator = PyTuple_GET_ITEM(
+                        native->iterators, index
+                    );
+                    PyObject *done = iterator == NULL ? Py_True : Py_False;
+                    PyList_SET_ITEM(
+                        state->done_sources, index, Py_NewRef(done)
+                    );
+                }
+            }
+            break;
+        }
+        default:
+            PyErr_SetString(
+                PyExc_RuntimeError,
+                "unsupported native itertools state"
+            );
+            it_runtime_free(state);
+            return NULL;
+    }
+    if ((kind == ITERTOOLS_CYCLE && state->cache == NULL) ||
+        (it_runtime_is_predicate(kind) && state->items == NULL) ||
+        (kind == ITERTOOLS_ZIP_LONGEST &&
+            (state->sources == NULL || state->items == NULL ||
+             state->done_sources == NULL))) {
+        it_runtime_free(state);
         return NULL;
     }
-    PyObject *capsule = PyDict_GetItemWithError(itertools_runtime_registry, key);
-    Py_DECREF(key);
-    if (capsule == NULL) {
-        return NULL;
-    }
-    return PyCapsule_GetPointer(capsule, "aleff.itertools.state");
+    return state;
 }
 
-static void
-it_runtime_unregister(PyObject *object)
+static int
+it_runtime_commit_native(const ItRuntimeState *state)
 {
-    if (itertools_runtime_registry != NULL) {
-        PyObject *key = PyLong_FromVoidPtr(object);
-        if (key == NULL) {
-            PyErr_Clear();
-            return;
+    switch (state->kind) {
+        case ITERTOOLS_COUNT: {
+            AleffNativeCountObject *native =
+                (AleffNativeCountObject *)state->owner;
+#ifdef Py_GIL_DISABLED
+            Py_BEGIN_CRITICAL_SECTION(native);
+#endif
+            Py_ssize_t count = state->count_fast
+                ? state->count_value
+                : PY_SSIZE_T_MAX;
+#ifdef Py_GIL_DISABLED
+            _Py_atomic_store_ssize_relaxed(&native->count, count);
+#else
+            native->count = count;
+#endif
+            Py_XSETREF(native->long_count, Py_XNewRef(state->count_current));
+#ifdef Py_GIL_DISABLED
+            Py_END_CRITICAL_SECTION();
+#endif
+            return 0;
         }
-        if (PyDict_DelItem(itertools_runtime_registry, key) < 0) {
-            PyErr_Clear();
+        case ITERTOOLS_CYCLE: {
+            AleffNativeCycleObject *native =
+                (AleffNativeCycleObject *)state->owner;
+            Py_XSETREF(native->iterator, Py_XNewRef(state->source));
+            Py_SETREF(native->saved, Py_NewRef(state->cache));
+            native->index = state->index;
+            native->firstpass = state->started;
+            return 0;
         }
-        Py_DECREF(key);
+        case ITERTOOLS_DROPWHILE:
+        case ITERTOOLS_FILTERFALSE:
+        case ITERTOOLS_TAKEWHILE: {
+            AleffNativePredicateObject *native =
+                (AleffNativePredicateObject *)state->owner;
+            Py_SETREF(native->iterator, Py_NewRef(state->source));
+            if (state->kind != ITERTOOLS_FILTERFALSE) {
+                native->flag = state->kind == ITERTOOLS_TAKEWHILE
+                    ? state->exhausted
+                    : state->started;
+            }
+            return 0;
+        }
+        case ITERTOOLS_GROUPBY: {
+            AleffNativeGroupbyObject *native =
+                (AleffNativeGroupbyObject *)state->owner;
+            Py_XSETREF(native->target_key, Py_XNewRef(state->key));
+            Py_XSETREF(native->current_key, Py_XNewRef(state->pending_key));
+            Py_XSETREF(native->current_value, Py_XNewRef(state->item));
+            return 0;
+        }
+        case ITERTOOLS_ISLICE: {
+            AleffNativeIsliceObject *native =
+                (AleffNativeIsliceObject *)state->owner;
+            Py_XSETREF(native->iterator, Py_XNewRef(state->source));
+            native->next = state->index;
+            native->stop = state->limit;
+            native->step = state->step;
+            native->count = state->position;
+            return 0;
+        }
+        case ITERTOOLS_PAIRWISE: {
+            AleffNativePairwiseObject *native =
+                (AleffNativePairwiseObject *)state->owner;
+            Py_XSETREF(native->iterator, Py_XNewRef(state->source));
+            Py_XSETREF(native->old, Py_XNewRef(state->item));
+            return 0;
+        }
+        case ITERTOOLS_STARMAP:
+            return 0;
+        case ITERTOOLS_ZIP_LONGEST: {
+            AleffNativeZipLongestObject *native =
+                (AleffNativeZipLongestObject *)state->owner;
+            PyObject *iterators = PyTuple_New(state->source_count);
+            if (iterators == NULL) {
+                return -1;
+            }
+            Py_ssize_t active = 0;
+            for (Py_ssize_t index = 0; index < state->source_count; index++) {
+                int done = PyObject_IsTrue(
+                    PyList_GET_ITEM(state->done_sources, index)
+                );
+                if (done < 0) {
+                    Py_DECREF(iterators);
+                    return -1;
+                }
+                if (!done) {
+                    PyObject *iterator = PyTuple_GET_ITEM(
+                        state->sources, index
+                    );
+                    PyTuple_SET_ITEM(iterators, index, Py_NewRef(iterator));
+                    active++;
+                }
+            }
+            Py_SETREF(native->iterators, iterators);
+            native->active_count = state->exhausted ? 0 : active;
+            return 0;
+        }
+        default:
+            return 0;
     }
-}
-
-static void
-adapter_itertools_dealloc(PyObject *object)
-{
-    PyTypeObject *type = Py_TYPE(object);
-    it_runtime_unregister(object);
-    for (int index = 0; index < 17; index++) {
-        if (itertools_next_types[index] == type && original_itertools_dealloc[index] != NULL) {
-            original_itertools_dealloc[index](object);
-            return;
-        }
-    }
-    type->tp_free(object);
 }
 
 static int
@@ -1555,548 +2274,230 @@ it_runtime_is_predicate(ItIteratorKind kind)
         kind == ITERTOOLS_TAKEWHILE;
 }
 
-typedef struct {
-    PyObject_HEAD
-    PyObject *owner;
-    PyObject *key;
-    int done;
-} AleffGroupbyGrouper;
+static PyTypeObject *native_grouper_type = NULL;
+static iternextfunc original_grouper_next = NULL;
 
-static PyTypeObject AleffGroupbyGrouper_Type;
+static int
+it_runtime_groupby_store_step(ItRuntimeState *state, PyObject *new_key)
+{
+    Py_XSETREF(state->item, state->pending_item);
+    state->pending_item = NULL;
+    Py_XSETREF(state->pending_key, Py_NewRef(new_key));
+    state->started = 1;
+    return 0;
+}
+
+static int
+it_runtime_groupby_step(
+    ItRuntimeState *state,
+    PyObject *resumed_value,
+    int is_resumed
+)
+{
+    PyObject *item = NULL;
+    if (is_resumed && state->phase == IT_RUNTIME_SOURCE) {
+        if (resumed_value == NULL) {
+            return -1;
+        }
+        item = Py_NewRef(resumed_value);
+    }
+    else {
+        state->phase = IT_RUNTIME_SOURCE;
+        item = Py_TYPE(state->source)->tp_iternext(state->source);
+        if (item == NULL) {
+            return -1;
+        }
+    }
+    Py_XSETREF(state->pending_item, item);
+    if (state->function == Py_None) {
+        return it_runtime_groupby_store_step(state, item);
+    }
+    state->phase = IT_RUNTIME_CALLBACK;
+    PyObject *key = PyObject_CallOneArg(state->function, item);
+    if (key == NULL) {
+        return -1;
+    }
+    int result = it_runtime_groupby_store_step(state, key);
+    Py_DECREF(key);
+    return result;
+}
 
 static PyObject *
-it_runtime_make_grouper(ItRuntimeState *state, PyObject *key)
+it_runtime_make_native_grouper(ItRuntimeState *state)
 {
-    AleffGroupbyGrouper *grouper = PyObject_New(
-        AleffGroupbyGrouper,
-        &AleffGroupbyGrouper_Type
+    if (native_grouper_type == NULL || state->pending_key == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "native itertools._grouper unavailable");
+        return NULL;
+    }
+    Py_XSETREF(state->key, Py_NewRef(state->pending_key));
+    PyObject *grouper = PyObject_CallFunctionObjArgs(
+        (PyObject *)native_grouper_type,
+        state->owner,
+        state->key,
+        NULL
     );
     if (grouper == NULL) {
         return NULL;
     }
-    grouper->owner = Py_NewRef(state->owner);
-    grouper->key = Py_NewRef(key);
-    grouper->done = 0;
-    Py_XSETREF(state->key, Py_NewRef(key));
-    state->started = 1;
-    state->group_active = 0;
-    return (PyObject *)grouper;
-}
-
-static PyObject *
-it_runtime_groupby_next(ItRuntimeState *state, PyObject *resumed_value, int is_resumed)
-{
-    if (is_resumed && state->phase == IT_RUNTIME_CALLBACK) {
-        if (state->group_active) {
-            int same = PyObject_RichCompareBool(resumed_value, state->key, Py_EQ);
-            if (same < 0) {
-                return NULL;
-            }
-            if (same) {
-                PyObject *item = state->item;
-                state->item = NULL;
-                return item;
-            }
-            state->pending_item = state->item;
-            state->pending_key = Py_NewRef(resumed_value);
-            state->item = NULL;
-            return NULL;
-        }
-        PyObject *key = Py_NewRef(resumed_value);
-        PyObject *grouper = it_runtime_make_grouper(state, key);
-        Py_DECREF(key);
-        return grouper == NULL ? NULL : PyTuple_Pack(2, state->key, grouper);
-    }
-    if (state->pending_item != NULL) {
-        PyObject *item = state->pending_item;
-        PyObject *key = state->pending_key;
-        state->pending_item = NULL;
-        state->pending_key = NULL;
-        PyObject *grouper = it_runtime_make_grouper(state, key);
-        if (grouper == NULL) {
-            Py_DECREF(item);
-            Py_XDECREF(key);
-            return NULL;
-        }
-        state->item = item;
-        Py_DECREF(key);
-        return PyTuple_Pack(2, state->key, grouper);
-    }
-    state->phase = IT_RUNTIME_SOURCE;
-    state->item = Py_TYPE(state->source)->tp_iternext(state->source);
-    state->source_position++;
-    if (state->item == NULL) {
-        state->exhausted = 1;
-        return NULL;
-    }
-    state->phase = IT_RUNTIME_CALLBACK;
-    PyObject *key = state->function == Py_None
-        ? Py_NewRef(state->item)
-        : PyObject_CallOneArg(state->function, state->item);
-    if (key == NULL) {
-        return NULL;
-    }
-    PyObject *grouper = it_runtime_make_grouper(state, key);
-    Py_DECREF(key);
-    if (grouper == NULL) {
-        return NULL;
-    }
-    PyObject *result = PyTuple_Pack(2, state->key, grouper);
+    PyObject *result = PyTuple_Pack(2, state->pending_key, grouper);
     Py_DECREF(grouper);
     return result;
 }
 
 static PyObject *
-adapter_groupby_grouper_next(PyObject *object)
+it_runtime_groupby_next(
+    ItRuntimeState *state,
+    PyObject *resumed_value,
+    int is_resumed
+)
 {
-    AleffGroupbyGrouper *grouper = (AleffGroupbyGrouper *)object;
-    if (grouper->done) {
-        return NULL;
-    }
-    ItRuntimeState *state = it_runtime_lookup(grouper->owner);
-    if (state == NULL) {
-        grouper->done = 1;
-        return NULL;
-    }
-    if (state->item != NULL) {
-        PyObject *item = state->item;
-        state->item = NULL;
-        return item;
-    }
+    int resumed = is_resumed;
+    PyObject *value = resumed_value;
     for (;;) {
-        state->phase = IT_RUNTIME_SOURCE;
-        PyObject *item = Py_TYPE(state->source)->tp_iternext(state->source);
-        state->source_position++;
-        if (item == NULL) {
-            grouper->done = 1;
-            return NULL;
+        if (resumed && state->phase == IT_RUNTIME_CALLBACK) {
+            if (value == NULL || it_runtime_groupby_store_step(state, value) < 0) {
+                return NULL;
+            }
+            resumed = 0;
         }
-        state->item = item;
-        state->group_active = 1;
-        state->phase = IT_RUNTIME_CALLBACK;
-        PyObject *key = state->function == Py_None
-            ? Py_NewRef(item)
-            : PyObject_CallOneArg(state->function, item);
-        if (key == NULL) {
-            return NULL;
+        else if (resumed && state->phase == IT_RUNTIME_SOURCE) {
+            if (it_runtime_groupby_step(state, value, 1) < 0) {
+                return NULL;
+            }
+            resumed = 0;
         }
-        int same = PyObject_RichCompareBool(key, grouper->key, Py_EQ);
+        else if (resumed && state->phase == IT_RUNTIME_COMPARE) {
+            int same = PyObject_IsTrue(value);
+            if (same < 0) {
+                return NULL;
+            }
+            resumed = 0;
+            if (!same) {
+                return it_runtime_make_native_grouper(state);
+            }
+            if (it_runtime_groupby_step(state, NULL, 0) < 0) {
+                return NULL;
+            }
+        }
+
+        if (state->pending_key == NULL) {
+            if (it_runtime_groupby_step(state, NULL, 0) < 0) {
+                return NULL;
+            }
+            continue;
+        }
+        if (state->key == NULL) {
+            return it_runtime_make_native_grouper(state);
+        }
+        state->phase = IT_RUNTIME_COMPARE;
+        int same = PyObject_RichCompareBool(
+            state->key, state->pending_key, Py_EQ
+        );
         if (same < 0) {
-            Py_DECREF(key);
             return NULL;
         }
-        if (same) {
-            Py_DECREF(key);
-            state->item = NULL;
-            return item;
+        if (!same) {
+            return it_runtime_make_native_grouper(state);
         }
-        state->pending_item = item;
-        state->pending_key = key;
-        state->item = NULL;
-        grouper->done = 1;
-        return NULL;
+        if (it_runtime_groupby_step(state, NULL, 0) < 0) {
+            return NULL;
+        }
     }
-}
-
-static void
-adapter_groupby_grouper_dealloc(PyObject *object)
-{
-    AleffGroupbyGrouper *grouper = (AleffGroupbyGrouper *)object;
-    Py_XDECREF(grouper->owner);
-    Py_XDECREF(grouper->key);
-    Py_TYPE(object)->tp_free(object);
-}
-
-static PyTypeObject AleffGroupbyGrouper_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "aleff._itertools_grouper",
-    .tp_basicsize = sizeof(AleffGroupbyGrouper),
-    .tp_dealloc = adapter_groupby_grouper_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_iter = PyObject_SelfIter,
-    .tp_iternext = adapter_groupby_grouper_next,
-    .tp_free = PyObject_Del,
-};
-
-typedef struct {
-    PyObject_HEAD
-    PyObject *source;
-    PyObject *values;
-    PyObject *indexes;
-    int done;
-} AleffTeeData;
-
-typedef struct {
-    PyObject_HEAD
-    AleffTeeData *data;
-    Py_ssize_t index;
-    Py_ssize_t slot;
-} AleffTeeIterator;
-
-static PyTypeObject AleffTeeData_Type;
-static PyTypeObject AleffTeeIterator_Type;
-
-static void
-adapter_tee_data_dealloc(PyObject *object)
-{
-    AleffTeeData *data = (AleffTeeData *)object;
-    Py_XDECREF(data->source);
-    Py_XDECREF(data->values);
-    Py_XDECREF(data->indexes);
-    Py_TYPE(object)->tp_free(object);
-}
-
-static void
-adapter_tee_iterator_dealloc(PyObject *object)
-{
-    AleffTeeIterator *iterator = (AleffTeeIterator *)object;
-    Py_XDECREF(iterator->data);
-    Py_TYPE(object)->tp_free(object);
-}
-
-static PyObject *tee_next_resume(const void *raw_state, PyObject *value);
-
-typedef struct {
-    AleffTeeIterator *owner;
-    AleffTeeData *data;
-    PyObject *values;
-    PyObject *source;
-    PyObject *indexes;
-    Py_ssize_t index;
-    Py_ssize_t slot;
-    int done;
-    int phase;
-} TeeNextState;
-
-static void *
-tee_next_copy(const void *raw_state)
-{
-    const TeeNextState *source = raw_state;
-    TeeNextState *copy = PyMem_Calloc(1, sizeof(*copy));
-    if (copy == NULL) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    copy->owner = (AleffTeeIterator *)Py_NewRef((PyObject *)source->owner);
-    copy->data = (AleffTeeData *)Py_NewRef((PyObject *)source->data);
-    copy->values = PyList_GetSlice(source->values, 0, PyList_GET_SIZE(source->values));
-    copy->source = Py_NewRef(source->source);
-    copy->indexes = PyList_GetSlice(source->indexes, 0, PyList_GET_SIZE(source->indexes));
-    copy->index = source->index;
-    copy->slot = source->slot;
-    copy->done = source->done;
-    copy->phase = source->phase;
-    if (copy->values == NULL || copy->indexes == NULL) {
-        Py_DECREF(copy->owner);
-        Py_DECREF(copy->data);
-        Py_DECREF(copy->source);
-        Py_XDECREF(copy->values);
-        Py_XDECREF(copy->indexes);
-        PyMem_Free(copy);
-        return NULL;
-    }
-    return copy;
-}
-
-static void
-tee_next_free(void *raw_state)
-{
-    TeeNextState *state = raw_state;
-    if (state == NULL) {
-        return;
-    }
-    Py_DECREF(state->owner);
-    Py_DECREF(state->data);
-    Py_DECREF(state->values);
-    Py_DECREF(state->source);
-    Py_DECREF(state->indexes);
-    PyMem_Free(state);
-}
-
-static int
-tee_set_index(TeeNextState *state)
-{
-    PyObject *value = PyLong_FromSsize_t(state->index);
-    if (value == NULL) {
-        return -1;
-    }
-    if (PyList_SetItem(state->indexes, state->slot, value) < 0) {
-        Py_DECREF(value);
-        return -1;
-    }
-    return 0;
 }
 
 static PyObject *
-tee_next_continue(TeeNextState *state, PyObject *resumed_value, int is_resumed)
+it_runtime_grouper_next(
+    ItRuntimeState *state,
+    PyObject *resumed_value,
+    int is_resumed
+)
 {
-    if (is_resumed && state->phase == IT_RUNTIME_SOURCE) {
-        if (resumed_value == NULL) {
-            if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration)) {
-                return NULL;
-            }
-            PyErr_Clear();
-            state->done = 1;
-            return NULL;
-        }
-        if (PyList_Append(state->values, resumed_value) < 0) {
-            return NULL;
-        }
-        state->index++;
-        if (tee_set_index(state) < 0) {
-            return NULL;
-        }
-        return Py_NewRef(resumed_value);
-    }
-    if (state->index < PyList_GET_SIZE(state->values)) {
-        PyObject *item = Py_NewRef(PyList_GET_ITEM(state->values, state->index++));
-        if (tee_set_index(state) < 0) {
-            Py_DECREF(item);
-            return NULL;
-        }
-        return item;
-    }
-    if (state->done) {
+    AleffNativeGroupbyObject *parent =
+        (AleffNativeGroupbyObject *)state->owner;
+    if (parent->current_grouper != state->grouper) {
         return NULL;
     }
-    state->phase = IT_RUNTIME_SOURCE;
-    PyObject *item = Py_TYPE(state->source)->tp_iternext(state->source);
-    if (item == NULL) {
-        if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration)) {
+    int resumed = is_resumed;
+    if (resumed && state->phase == IT_RUNTIME_CALLBACK) {
+        if (resumed_value == NULL ||
+            it_runtime_groupby_store_step(state, resumed_value) < 0) {
             return NULL;
         }
-        PyErr_Clear();
-        state->done = 1;
+        resumed = 0;
+    }
+    else if (resumed && state->phase == IT_RUNTIME_SOURCE) {
+        if (it_runtime_groupby_step(state, resumed_value, 1) < 0) {
+            return NULL;
+        }
+        resumed = 0;
+    }
+    if (state->item == NULL) {
+        if (it_runtime_groupby_step(state, NULL, 0) < 0) {
+            return NULL;
+        }
+    }
+    int same;
+    if (resumed && state->phase == IT_RUNTIME_COMPARE) {
+        same = PyObject_IsTrue(resumed_value);
+    }
+    else {
+        state->phase = IT_RUNTIME_COMPARE;
+        same = PyObject_RichCompareBool(
+            state->key, state->pending_key, Py_EQ
+        );
+    }
+    if (same <= 0) {
         return NULL;
     }
-    if (PyList_Append(state->values, item) < 0) {
-        Py_DECREF(item);
+    PyObject *item = state->item;
+    state->item = NULL;
+    Py_CLEAR(state->pending_key);
+    return item;
+}
+
+static PyObject *
+adapter_groupby_grouper_next(PyObject *object)
+{
+    AleffNativeGrouperObject *grouper =
+        (AleffNativeGrouperObject *)object;
+    ItRuntimeState *state = it_runtime_from_native(
+        grouper->parent, ITERTOOLS_GROUPBY
+    );
+    if (state == NULL) {
         return NULL;
     }
-    state->index++;
-    if (tee_set_index(state) < 0) {
+    state->group_active = 1;
+    state->grouper = Py_NewRef(object);
+    Py_XSETREF(state->key, Py_NewRef(grouper->target_key));
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &it_runtime_vtable, state) < 0) {
+        it_runtime_free(state);
+        return NULL;
+    }
+    PyObject *result = it_runtime_grouper_next(state, NULL, 0);
+    if (it_runtime_commit_native(state) < 0) {
+        Py_XDECREF(result);
+        result = NULL;
+    }
+    adapter_leave(&frame);
+    it_runtime_free(state);
+    return result;
+}
+
+static PyObject *
+it_runtime_pop_callback_item(ItRuntimeState *state)
+{
+    Py_ssize_t count = PyList_GET_SIZE(state->items);
+    if (count == 0) {
+        PyErr_SetString(PyExc_RuntimeError, "missing itertools callback item");
+        return NULL;
+    }
+    PyObject *item = Py_NewRef(PyList_GET_ITEM(state->items, count - 1));
+    if (PySequence_DelItem(state->items, count - 1) < 0) {
         Py_DECREF(item);
         return NULL;
     }
     return item;
-}
-
-static const AleffAdapterVTable tee_next_vtable = {
-    .copy_state = tee_next_copy,
-    .free_state = tee_next_free,
-    .resume = tee_next_resume,
-};
-
-static PyObject *
-tee_next_resume(const void *raw_state, PyObject *value)
-{
-    TeeNextState *state = tee_next_copy(raw_state);
-    if (state == NULL) {
-        return NULL;
-    }
-    AleffAdapterFrame frame;
-    if (adapter_enter(&frame, &tee_next_vtable, state) < 0) {
-        return NULL;
-    }
-    PyObject *result = tee_next_continue(state, value, 1);
-    Py_XSETREF(state->data->values, Py_NewRef(state->values));
-    Py_XSETREF(state->data->indexes, Py_NewRef(state->indexes));
-    state->data->done = state->done;
-    state->owner->index = state->index;
-    adapter_leave(&frame);
-    tee_next_free(state);
-    return result;
-}
-
-static PyObject *
-adapter_tee_iterator_next(PyObject *object)
-{
-    AleffTeeIterator *owner = (AleffTeeIterator *)object;
-    TeeNextState state = {
-        .owner = owner,
-        .data = owner->data,
-        .values = Py_NewRef(owner->data->values),
-        .source = Py_NewRef(owner->data->source),
-        .indexes = Py_NewRef(owner->data->indexes),
-        .index = owner->index,
-        .slot = owner->slot,
-        .done = owner->data->done,
-        .phase = IT_RUNTIME_SOURCE,
-    };
-    PyObject *index = PyList_GET_ITEM(state.indexes, state.slot);
-    state.index = PyLong_AsSsize_t(index);
-    if (state.index == -1 && PyErr_Occurred()) {
-        Py_DECREF(state.values);
-        Py_DECREF(state.source);
-        Py_DECREF(state.indexes);
-        return NULL;
-    }
-    AleffAdapterFrame frame;
-    if (adapter_enter(&frame, &tee_next_vtable, &state) < 0) {
-        return NULL;
-    }
-    PyObject *result = tee_next_continue(&state, NULL, 0);
-    Py_XSETREF(owner->data->values, Py_NewRef(state.values));
-    Py_XSETREF(owner->data->indexes, Py_NewRef(state.indexes));
-    owner->data->done = state.done;
-    owner->index = state.index;
-    adapter_leave(&frame);
-    Py_DECREF(state.values);
-    Py_DECREF(state.source);
-    Py_DECREF(state.indexes);
-    return result;
-}
-
-static PyTypeObject AleffTeeData_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "aleff._tee_data",
-    .tp_basicsize = sizeof(AleffTeeData),
-    .tp_dealloc = adapter_tee_data_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_free = PyObject_Del,
-};
-
-static PyTypeObject AleffTeeIterator_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "aleff._tee",
-    .tp_basicsize = sizeof(AleffTeeIterator),
-    .tp_dealloc = adapter_tee_iterator_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_iter = PyObject_SelfIter,
-    .tp_iternext = adapter_tee_iterator_next,
-    .tp_free = PyObject_Del,
-};
-
-typedef struct {
-    PyObject *iterable;
-    Py_ssize_t n;
-} TeeConstructorState;
-
-static void *
-tee_constructor_copy(const void *raw_state)
-{
-    const TeeConstructorState *source = raw_state;
-    TeeConstructorState *copy = PyMem_Malloc(sizeof(*copy));
-    if (copy == NULL) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    copy->iterable = Py_NewRef(source->iterable);
-    copy->n = source->n;
-    return copy;
-}
-
-static void
-tee_constructor_free(void *raw_state)
-{
-    TeeConstructorState *state = raw_state;
-    if (state != NULL) {
-        Py_DECREF(state->iterable);
-        PyMem_Free(state);
-    }
-}
-
-static PyObject *tee_constructor_resume(const void *raw_state, PyObject *value);
-
-static const AleffAdapterVTable tee_constructor_vtable = {
-    .copy_state = tee_constructor_copy,
-    .free_state = tee_constructor_free,
-    .resume = tee_constructor_resume,
-};
-
-static PyObject *
-it_runtime_make_tee_pair(PyObject *iterator, Py_ssize_t n)
-{
-    AleffTeeData *data = PyObject_New(AleffTeeData, &AleffTeeData_Type);
-    if (data == NULL) {
-        return NULL;
-    }
-    data->source = Py_NewRef(iterator);
-    data->values = PyList_New(0);
-    data->indexes = PyList_New(n);
-    data->done = 0;
-    if (data->values == NULL || data->indexes == NULL) {
-        Py_DECREF(data);
-        return NULL;
-    }
-    for (Py_ssize_t index = 0; index < n; index++) {
-        PyObject *zero = PyLong_FromLong(0);
-        if (zero == NULL) {
-            Py_DECREF(data);
-            return NULL;
-        }
-        PyList_SET_ITEM(data->indexes, index, zero);
-    }
-    PyObject *result = PyTuple_New(n);
-    if (result == NULL) {
-        Py_DECREF(data);
-        return NULL;
-    }
-    for (Py_ssize_t index = 0; index < n; index++) {
-        AleffTeeIterator *tee = PyObject_New(
-            AleffTeeIterator,
-            &AleffTeeIterator_Type
-        );
-        if (tee == NULL) {
-            Py_DECREF(data);
-            Py_DECREF(result);
-            return NULL;
-        }
-        tee->data = (AleffTeeData *)Py_NewRef((PyObject *)data);
-        tee->index = 0;
-        tee->slot = index;
-        PyTuple_SET_ITEM(result, index, (PyObject *)tee);
-    }
-    Py_DECREF(data);
-    return result;
-}
-
-static PyObject *
-tee_constructor_resume(const void *raw_state, PyObject *value)
-{
-    if (value == NULL || !PyIter_Check(value)) {
-        if (value != NULL) {
-            PyErr_Format(
-                PyExc_TypeError,
-                "iter() returned non-iterator of type '%.200s'",
-                Py_TYPE(value)->tp_name
-            );
-        }
-        return NULL;
-    }
-    return it_runtime_make_tee_pair(value, ((const TeeConstructorState *)raw_state)->n);
-}
-
-static PyObject *
-adapter_itertools_tee(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
-{
-    static char *keywords[] = {"iterable", "n", NULL};
-    PyObject *iterable;
-    PyObject *n_object = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|O:tee", keywords, &iterable, &n_object)) {
-        return NULL;
-    }
-    Py_ssize_t n = 2;
-    if (n_object != NULL) {
-        n = PyNumber_AsSsize_t(n_object, PyExc_OverflowError);
-        if (n == -1 && PyErr_Occurred()) {
-            return NULL;
-        }
-        if (n < 0) {
-            PyErr_SetString(PyExc_ValueError, "n must be >= 0");
-            return NULL;
-        }
-    }
-    TeeConstructorState state = {.iterable = iterable, .n = n};
-    AleffAdapterFrame frame;
-    if (adapter_enter(&frame, &tee_constructor_vtable, &state) < 0) {
-        return NULL;
-    }
-    PyObject *iterator = PyObject_GetIter(iterable);
-    PyObject *result = iterator == NULL ? NULL : it_runtime_make_tee_pair(iterator, n);
-    Py_XDECREF(iterator);
-    adapter_leave(&frame);
-    return result;
 }
 
 static PyObject *
@@ -2144,33 +2545,141 @@ it_runtime_continue(ItRuntimeState *state, PyObject *resumed_value, int is_resum
         }
         if (is_resumed && state->phase == IT_RUNTIME_SOURCE) {
             if (resumed_value == NULL) {
+                if (PyErr_Occurred() &&
+                    !PyErr_ExceptionMatches(PyExc_StopIteration)) {
+                    return NULL;
+                }
+                PyErr_Clear();
                 state->exhausted = 1;
                 return NULL;
             }
             state->position++;
-            return Py_NewRef(resumed_value);
+            if (state->position > state->index) {
+                if (state->index > PY_SSIZE_T_MAX - state->step) {
+                    state->index = state->unbounded
+                        ? PY_SSIZE_T_MAX
+                        : state->limit;
+                }
+                else {
+                    state->index += state->step;
+                    if (!state->unbounded && state->index > state->limit) {
+                        state->index = state->limit;
+                    }
+                }
+                return Py_NewRef(resumed_value);
+            }
         }
-        if (state->position >= state->limit) {
-            state->exhausted = 1;
-            return NULL;
-        }
-        state->phase = IT_RUNTIME_SOURCE;
-        PyObject *item = Py_TYPE(state->source)->tp_iternext(state->source);
-        if (item == NULL) {
-            if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration)) {
+        for (;;) {
+            if (!state->unbounded && state->position >= state->limit) {
+                state->exhausted = 1;
                 return NULL;
             }
-            PyErr_Clear();
-            state->exhausted = 1;
-            return NULL;
+            int yielding = state->position >= state->index;
+            state->phase = IT_RUNTIME_SOURCE;
+            PyObject *item = Py_TYPE(state->source)->tp_iternext(state->source);
+            if (item == NULL) {
+                if (PyErr_Occurred() &&
+                    !PyErr_ExceptionMatches(PyExc_StopIteration)) {
+                    return NULL;
+                }
+                PyErr_Clear();
+                state->exhausted = 1;
+                return NULL;
+            }
+            state->position++;
+            if (!yielding) {
+                Py_DECREF(item);
+                continue;
+            }
+            if (state->index > PY_SSIZE_T_MAX - state->step) {
+                state->index = state->unbounded
+                    ? PY_SSIZE_T_MAX
+                    : state->limit;
+            }
+            else {
+                state->index += state->step;
+                if (!state->unbounded && state->index > state->limit) {
+                    state->index = state->limit;
+                }
+            }
+            return item;
         }
-        state->position++;
-        return item;
     }
     if (state->kind == ITERTOOLS_GROUPBY) {
         return it_runtime_groupby_next(state, resumed_value, is_resumed);
     }
+    if (state->kind == ITERTOOLS_PAIRWISE) {
+        PyObject *next_item = NULL;
+        if (is_resumed) {
+            if (resumed_value == NULL) {
+                if (PyErr_Occurred() &&
+                    !PyErr_ExceptionMatches(PyExc_StopIteration)) {
+                    return NULL;
+                }
+                PyErr_Clear();
+                return NULL;
+            }
+            next_item = Py_NewRef(resumed_value);
+        }
+        for (;;) {
+            if (next_item == NULL) {
+                state->phase = IT_RUNTIME_SOURCE;
+                next_item = Py_TYPE(state->source)->tp_iternext(state->source);
+                if (next_item == NULL) {
+                    return NULL;
+                }
+            }
+            if (state->item == NULL) {
+                state->item = next_item;
+                next_item = NULL;
+                continue;
+            }
+            PyObject *result = PyTuple_Pack(2, state->item, next_item);
+            if (result == NULL) {
+                Py_DECREF(next_item);
+                return NULL;
+            }
+            Py_SETREF(state->item, next_item);
+            return result;
+        }
+    }
+    if (state->kind == ITERTOOLS_STARMAP) {
+        if (is_resumed && state->phase == IT_RUNTIME_CALLBACK) {
+            return resumed_value == NULL ? NULL : Py_NewRef(resumed_value);
+        }
+        PyObject *item;
+        if (is_resumed) {
+            if (resumed_value == NULL) {
+                if (PyErr_Occurred() &&
+                    !PyErr_ExceptionMatches(PyExc_StopIteration)) {
+                    return NULL;
+                }
+                PyErr_Clear();
+                return NULL;
+            }
+            item = Py_NewRef(resumed_value);
+        }
+        else {
+            state->phase = IT_RUNTIME_SOURCE;
+            item = Py_TYPE(state->source)->tp_iternext(state->source);
+            if (item == NULL) {
+                return NULL;
+            }
+        }
+        PyObject *arguments = PySequence_Tuple(item);
+        Py_DECREF(item);
+        if (arguments == NULL) {
+            return NULL;
+        }
+        state->phase = IT_RUNTIME_CALLBACK;
+        PyObject *result = PyObject_Call(state->function, arguments, NULL);
+        Py_DECREF(arguments);
+        return result;
+    }
     if (it_runtime_is_predicate(state->kind)) {
+        if (state->exhausted) {
+            return NULL;
+        }
         if (is_resumed) {
             if (state->phase == IT_RUNTIME_SOURCE) {
                 if (resumed_value == NULL) {
@@ -2184,30 +2693,33 @@ it_runtime_continue(ItRuntimeState *state, PyObject *resumed_value, int is_resum
                 state->phase = IT_RUNTIME_CALLBACK;
             }
             else {
+                PyObject *item = it_runtime_pop_callback_item(state);
+                if (item == NULL) {
+                    return NULL;
+                }
                 int truth = PyObject_IsTrue(resumed_value);
                 if (truth < 0) {
+                    Py_DECREF(item);
                     return NULL;
                 }
                 if (state->kind == ITERTOOLS_TAKEWHILE && !truth) {
+                    state->exhausted = 1;
+                    Py_DECREF(item);
                     return NULL;
                 }
                 if (state->kind == ITERTOOLS_TAKEWHILE && truth) {
-                    PyObject *item = state->item;
-                    state->item = NULL;
                     return item;
                 }
                 if (state->kind == ITERTOOLS_DROPWHILE && truth && !state->started) {
-                    Py_CLEAR(state->item);
+                    Py_DECREF(item);
                     state->phase = IT_RUNTIME_SOURCE;
                 }
                 else if (state->kind == ITERTOOLS_FILTERFALSE ? !truth : !state->started || !truth) {
-                    PyObject *item = state->item;
-                    state->item = NULL;
                     state->started = 1;
                     return item;
                 }
                 else {
-                    Py_CLEAR(state->item);
+                    Py_DECREF(item);
                     state->phase = IT_RUNTIME_SOURCE;
                 }
             }
@@ -2227,34 +2739,49 @@ it_runtime_continue(ItRuntimeState *state, PyObject *resumed_value, int is_resum
                 state->item = NULL;
                 return item;
             }
-            PyObject *predicate = PyObject_CallOneArg(state->function, state->item);
+            PyObject *item = state->item;
+            state->item = NULL;
+            if (PyList_Append(state->items, item) < 0) {
+                Py_DECREF(item);
+                return NULL;
+            }
+            PyObject *predicate =
+                state->kind == ITERTOOLS_FILTERFALSE && state->function == Py_None
+                ? Py_NewRef(item)
+                : PyObject_CallOneArg(state->function, item);
+            Py_DECREF(item);
             if (predicate == NULL) {
+                PyObject *discarded = it_runtime_pop_callback_item(state);
+                Py_XDECREF(discarded);
                 return NULL;
             }
             int truth = PyObject_IsTrue(predicate);
             Py_DECREF(predicate);
+            item = it_runtime_pop_callback_item(state);
+            if (item == NULL) {
+                return NULL;
+            }
             if (truth < 0) {
+                Py_DECREF(item);
                 return NULL;
             }
             if (state->kind == ITERTOOLS_TAKEWHILE && !truth) {
+                state->exhausted = 1;
+                Py_DECREF(item);
                 return NULL;
             }
             if (state->kind == ITERTOOLS_TAKEWHILE && truth) {
-                PyObject *item = state->item;
-                state->item = NULL;
                 return item;
             }
             if (state->kind == ITERTOOLS_DROPWHILE && truth && !state->started) {
-                Py_CLEAR(state->item);
+                Py_DECREF(item);
                 continue;
             }
             if (state->kind == ITERTOOLS_FILTERFALSE ? !truth : !state->started || !truth) {
-                PyObject *item = state->item;
-                state->item = NULL;
                 state->started = 1;
                 return item;
             }
-            Py_CLEAR(state->item);
+            Py_DECREF(item);
         }
     }
 
@@ -2263,6 +2790,9 @@ it_runtime_continue(ItRuntimeState *state, PyObject *resumed_value, int is_resum
             if (state->phase == IT_RUNTIME_SOURCE) {
                 if (resumed_value == NULL) {
                     state->exhausted = 1;
+                }
+                else if (state->started) {
+                    return Py_NewRef(resumed_value);
                 }
                 else if (PyList_Append(state->cache, resumed_value) < 0) {
                     return NULL;
@@ -2278,6 +2808,9 @@ it_runtime_continue(ItRuntimeState *state, PyObject *resumed_value, int is_resum
                 state->phase = IT_RUNTIME_SOURCE;
                 PyObject *item = Py_TYPE(state->source)->tp_iternext(state->source);
                 if (item != NULL) {
+                    if (state->started) {
+                        return item;
+                    }
                     if (PyList_Append(state->cache, item) < 0) {
                         Py_DECREF(item);
                         return NULL;
@@ -2346,21 +2879,6 @@ it_runtime_continue(ItRuntimeState *state, PyObject *resumed_value, int is_resum
                 item = Py_TYPE(PyTuple_GET_ITEM(state->sources, state->index))->tp_iternext(
                     PyTuple_GET_ITEM(state->sources, state->index)
                 );
-                PyObject *position = PyList_GET_ITEM(state->source_positions, state->index);
-                Py_ssize_t current = PyLong_AsSsize_t(position);
-                if (current == -1 && PyErr_Occurred()) {
-                    return NULL;
-                }
-                PyObject *next_position = PyLong_FromSsize_t(current + 1);
-                if (next_position == NULL) {
-                    Py_XDECREF(item);
-                    return NULL;
-                }
-                if (PyList_SetItem(state->source_positions, state->index, next_position) < 0) {
-                    Py_DECREF(next_position);
-                    Py_XDECREF(item);
-                    return NULL;
-                }
             }
             if (item == NULL) {
                 if (PyErr_Occurred() && !PyErr_ExceptionMatches(PyExc_StopIteration)) {
@@ -2422,10 +2940,30 @@ it_runtime_continue(ItRuntimeState *state, PyObject *resumed_value, int is_resum
 
 static PyObject *it_runtime_resume(const void *raw_state, PyObject *value);
 
+static int
+it_runtime_prepare_resume(void *raw_state)
+{
+    ItRuntimeState *state = raw_state;
+    if (state->kind != ITERTOOLS_ZIP_LONGEST) {
+        return it_runtime_commit_native(state);
+    }
+    PyObject *sources = it_runtime_clone_sources(state->sources);
+    if (sources == NULL) {
+        return -1;
+    }
+    PyObject *saved_sources = state->sources;
+    state->sources = sources;
+    int result = it_runtime_commit_native(state);
+    state->sources = saved_sources;
+    Py_DECREF(sources);
+    return result;
+}
+
 static const AleffAdapterVTable it_runtime_vtable = {
     .copy_state = (void *(*)(const void *))it_runtime_copy,
     .free_state = (void (*)(void *))it_runtime_free,
     .resume = it_runtime_resume,
+    .prepare_resume = it_runtime_prepare_resume,
 };
 
 static PyObject *
@@ -2437,11 +2975,13 @@ it_runtime_resume(const void *raw_state, PyObject *value)
     }
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &it_runtime_vtable, state) < 0) {
+        it_runtime_free(state);
         return NULL;
     }
-    PyObject *result = it_runtime_continue(state, value, 1);
-    ItRuntimeState *target = it_runtime_lookup(state->owner);
-    if (target != NULL && it_runtime_assign(target, state) < 0) {
+    PyObject *result = state->group_active
+        ? it_runtime_grouper_next(state, value, 1)
+        : it_runtime_continue(state, value, 1);
+    if (it_runtime_commit_native(state) < 0) {
         Py_XDECREF(result);
         result = NULL;
     }
@@ -2451,18 +2991,59 @@ it_runtime_resume(const void *raw_state, PyObject *value)
 }
 
 static int
-adapter_itertools_runtime_next(PyObject *object, PyObject **result)
+adapter_native_itertools_next(PyObject *object, PyObject **result)
 {
-    ItRuntimeState *state = it_runtime_lookup(object);
-    if (state == NULL) {
+    static const int kinds[] = {
+        -1,
+        -1,
+        -1,
+        ITERTOOLS_COUNT,
+        ITERTOOLS_CYCLE,
+        ITERTOOLS_DROPWHILE,
+        ITERTOOLS_FILTERFALSE,
+        ITERTOOLS_GROUPBY,
+        ITERTOOLS_ISLICE,
+        ITERTOOLS_PAIRWISE,
+        -1,
+        -1,
+        -1,
+        ITERTOOLS_STARMAP,
+        ITERTOOLS_TAKEWHILE,
+        -1,
+        ITERTOOLS_ZIP_LONGEST,
+    };
+    int kind = -1;
+    for (int index = 0; index < 17; index++) {
+        if (itertools_next_types[index] != NULL &&
+            Py_TYPE(object) == itertools_next_types[index]) {
+            kind = kinds[index];
+            break;
+        }
+    }
+    if (kind < 0) {
         return 0;
+    }
+    if (kind == ITERTOOLS_GROUPBY) {
+        ((AleffNativeGroupbyObject *)object)->current_grouper = NULL;
+    }
+    ItRuntimeState *state = it_runtime_from_native(
+        object, (ItIteratorKind)kind
+    );
+    if (state == NULL) {
+        return -1;
     }
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &it_runtime_vtable, state) < 0) {
+        it_runtime_free(state);
         return -1;
     }
     *result = it_runtime_continue(state, NULL, 0);
+    if (it_runtime_commit_native(state) < 0) {
+        Py_XDECREF(*result);
+        *result = NULL;
+    }
     adapter_leave(&frame);
+    it_runtime_free(state);
     return 1;
 }
 
@@ -2472,11 +3053,7 @@ adapter_itertools_runtime_next(PyObject *object, PyObject **result)
 static int
 adapter_itertools_install(PyObject *itertools)
 {
-    if (PyType_Ready(&AleffGroupbyGrouper_Type) < 0) {
-        return -1;
-    }
-    if (PyType_Ready(&AleffTeeData_Type) < 0 ||
-        PyType_Ready(&AleffTeeIterator_Type) < 0) {
+    if (PyType_Ready(&ItIteratorHolderType) < 0) {
         return -1;
     }
     static const char *next_names[] = {
@@ -2524,12 +3101,24 @@ adapter_itertools_install(PyObject *itertools)
         }
         itertools_next_types[index] = type;
         original_itertools_next[index] = type->tp_iternext;
-        original_itertools_dealloc[index] = type->tp_dealloc;
         type->tp_iternext = adapter_itertools_next;
-        type->tp_dealloc = adapter_itertools_dealloc;
         PyType_Modified(type);
         Py_DECREF(object);
     }
+    PyObject *grouper = PyObject_GetAttrString(itertools, "_grouper");
+    if (grouper == NULL || !PyType_Check(grouper)) {
+        Py_XDECREF(grouper);
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "cannot access native itertools._grouper type"
+        );
+        return -1;
+    }
+    native_grouper_type = (PyTypeObject *)grouper;
+    original_grouper_next = native_grouper_type->tp_iternext;
+    native_grouper_type->tp_iternext = adapter_groupby_grouper_next;
+    PyType_Modified(native_grouper_type);
+    Py_DECREF(grouper);
 
     static const char *new_names[] = {
         "accumulate", "batched", "chain", "combinations",
@@ -2549,10 +3138,29 @@ adapter_itertools_install(PyObject *itertools)
             continue;
         }
         PyTypeObject *type = (PyTypeObject *)object;
+        if (
+            index == ITERTOOLS_BATCHED &&
+            type->tp_basicsize < (Py_ssize_t)sizeof(AleffBatchedObject)
+        ) {
+            Py_DECREF(object);
+            PyErr_SetString(
+                PyExc_RuntimeError,
+                "unsupported itertools.batched layout"
+            );
+            return -1;
+        }
         itertools_new_types[index] = type;
-        /* accumulate and batched already have their specialized constructor
-         * adapters installed by the bootstrap. */
-        if (index >= ITERTOOLS_COMBINATIONS && index != ITERTOOLS_TEE) {
+        if (index == ITERTOOLS_ACCUMULATE) {
+            original_accumulate_new = type->tp_new;
+            type->tp_new = adapter_accumulate_new;
+            PyType_Modified(type);
+        }
+        else if (index == ITERTOOLS_BATCHED) {
+            original_batched_next = type->tp_iternext;
+            type->tp_iternext = adapter_batched_next;
+            PyType_Modified(type);
+        }
+        else if (index >= ITERTOOLS_COMBINATIONS && index != ITERTOOLS_TEE) {
             original_itertools_new[index] = type->tp_new;
             type->tp_new = index == ITERTOOLS_REPEAT
                 ? adapter_repeat_new
@@ -2561,29 +3169,22 @@ adapter_itertools_install(PyObject *itertools)
         }
         Py_DECREF(object);
     }
-    static PyMethodDef tee_method = {
-        .ml_name = "tee",
-        .ml_meth = (PyCFunction)(void(*)(void))adapter_itertools_tee,
-        .ml_flags = METH_VARARGS | METH_KEYWORDS,
-        .ml_doc = "Return n independent iterators from an iterable.",
-    };
-    PyObject *tee_function = PyCFunction_NewEx(&tee_method, NULL, NULL);
-    if (tee_function == NULL) {
-        return -1;
-    }
-    int tee_status = PyObject_SetAttrString(itertools, "tee", tee_function);
-    Py_DECREF(tee_function);
-    if (tee_status < 0) {
-        return -1;
-    }
     return 0;
 }
 
 static void
 adapter_itertools_rollback(void)
 {
+    if (original_accumulate_type != NULL && original_accumulate_new != NULL) {
+        original_accumulate_type->tp_new = original_accumulate_new;
+        PyType_Modified(original_accumulate_type);
+    }
     if (original_batched_type != NULL && original_batched_new != NULL) {
         original_batched_type->tp_new = original_batched_new;
+        PyType_Modified(original_batched_type);
+    }
+    if (original_batched_type != NULL && original_batched_next != NULL) {
+        original_batched_type->tp_iternext = original_batched_next;
         PyType_Modified(original_batched_type);
     }
     if (original_accumulate_next != NULL) {
@@ -2598,13 +3199,17 @@ adapter_itertools_rollback(void)
         PyTypeObject *type = itertools_next_types[index];
         if (type != NULL) {
             type->tp_iternext = original_itertools_next[index];
-            type->tp_dealloc = original_itertools_dealloc[index];
             PyType_Modified(type);
         }
         itertools_next_types[index] = NULL;
         original_itertools_next[index] = NULL;
-        original_itertools_dealloc[index] = NULL;
     }
+    if (native_grouper_type != NULL && original_grouper_next != NULL) {
+        native_grouper_type->tp_iternext = original_grouper_next;
+        PyType_Modified(native_grouper_type);
+    }
+    native_grouper_type = NULL;
+    original_grouper_next = NULL;
     for (Py_ssize_t index = 0; index < 20; index++) {
         PyTypeObject *type = itertools_new_types[index];
         if (type != NULL) {
@@ -2617,5 +3222,7 @@ adapter_itertools_rollback(void)
         original_itertools_new[index] = NULL;
     }
     original_batched_new = NULL;
+    original_batched_next = NULL;
     original_batched_type = NULL;
+    original_accumulate_new = NULL;
 }

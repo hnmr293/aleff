@@ -16,7 +16,11 @@ typedef struct {
     OperatorResumeKind kind;
 } OperatorCallState;
 
-static PyObject *operator_call_adapter(PyObject *self, PyObject *args);
+static PyObject *operator_call_adapter(
+    PyObject *self,
+    PyObject *args,
+    PyObject *kwargs
+);
 static PyObject *operator_search_adapter(PyObject *self, PyObject *args);
 
 typedef enum {
@@ -44,44 +48,13 @@ typedef struct {
     OperatorAccessorPhase phase;
 } OperatorAccessorState;
 
-static PyObject *operator_accessor_constructor_adapter(
-    PyObject *self,
-    PyObject *args,
-    PyObject *kwargs
-);
 static PyObject *operator_accessor_adapter(
     PyObject *self,
     PyObject *args,
     PyObject *kwargs
 );
 
-static PyMethodDef operator_call_method = {
-    .ml_name = "operator",
-    .ml_meth = operator_call_adapter,
-    .ml_flags = METH_VARARGS,
-    .ml_doc = NULL,
-};
-
-static PyMethodDef operator_search_method = {
-    .ml_name = "operator_search",
-    .ml_meth = operator_search_adapter,
-    .ml_flags = METH_VARARGS,
-    .ml_doc = NULL,
-};
-
-static PyMethodDef operator_accessor_constructor_method = {
-    .ml_name = "operator_accessor_constructor",
-    .ml_meth = _PyCFunction_CAST(operator_accessor_constructor_adapter),
-    .ml_flags = METH_VARARGS | METH_KEYWORDS,
-    .ml_doc = NULL,
-};
-
-static PyMethodDef operator_accessor_method = {
-    .ml_name = "operator_accessor",
-    .ml_meth = _PyCFunction_CAST(operator_accessor_adapter),
-    .ml_flags = METH_VARARGS | METH_KEYWORDS,
-    .ml_doc = NULL,
-};
+static PyTypeObject *operator_accessor_types[3] = {NULL, NULL, NULL};
 
 static void *
 operator_call_copy_state(const void *raw_state)
@@ -161,7 +134,7 @@ static const AleffAdapterVTable operator_call_vtable = {
 };
 
 static PyObject *
-operator_call_adapter(PyObject *self, PyObject *args)
+operator_call_adapter(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     if (!PyTuple_Check(self) || PyTuple_GET_SIZE(self) != 2) {
         PyErr_SetString(PyExc_RuntimeError, "invalid operator adapter state");
@@ -179,7 +152,7 @@ operator_call_adapter(PyObject *self, PyObject *args)
     if (adapter_enter(&frame, &operator_call_vtable, &state) < 0) {
         return NULL;
     }
-    PyObject *result = PyObject_Call(original, args, NULL);
+    PyObject *result = PyObject_Call(original, args, kwargs);
     adapter_leave(&frame);
     return result;
 }
@@ -333,6 +306,20 @@ operator_accessor_continue(
                 Py_DECREF(separator);
                 if (state->parts == NULL) {
                     return NULL;
+                }
+                for (
+                    Py_ssize_t part = 0;
+                    part < PyList_GET_SIZE(state->parts);
+                    part++
+                ) {
+                    PyObject *name = Py_NewRef(PyList_GET_ITEM(state->parts, part));
+                    PyUnicode_InternInPlace(&name);
+                    if (name == NULL) {
+                        return NULL;
+                    }
+                    if (PyList_SetItem(state->parts, part, name) < 0) {
+                        return NULL;
+                    }
                 }
                 state->part_index = 0;
                 state->current = Py_NewRef(state->target);
@@ -490,98 +477,137 @@ operator_accessor_adapter(PyObject *self, PyObject *args, PyObject *kwargs)
 }
 
 static PyObject *
-operator_accessor_constructor_adapter(
-    PyObject *self,
-    PyObject *args,
-    PyObject *kwargs
-)
+operator_accessor_spec(PyObject *accessor, OperatorAccessorKind kind)
 {
-    if (!PyTuple_Check(self) || PyTuple_GET_SIZE(self) != 3) {
-        PyErr_SetString(PyExc_RuntimeError, "invalid operator accessor constructor state");
+    PyObject *reduced = PyObject_CallMethod(accessor, "__reduce__", NULL);
+    if (reduced == NULL) {
         return NULL;
     }
-    PyObject *original = PyTuple_GET_ITEM(self, 0);
-    PyObject *module = PyTuple_GET_ITEM(self, 1);
-    OperatorAccessorKind kind = (OperatorAccessorKind)
-        PyLong_AsLong(PyTuple_GET_ITEM(self, 2));
-    if (PyErr_Occurred()) {
+    if (!PyTuple_Check(reduced) || PyTuple_GET_SIZE(reduced) != 2) {
+        Py_DECREF(reduced);
+        PyErr_SetString(PyExc_RuntimeError, "invalid operator accessor reduction");
         return NULL;
     }
-    PyObject *validated = PyObject_Call(original, args, kwargs);
-    if (validated == NULL) {
+    PyObject *constructor = PyTuple_GET_ITEM(reduced, 0);
+    PyObject *reduced_args = PyTuple_GET_ITEM(reduced, 1);
+    if (!PyTuple_Check(reduced_args)) {
+        Py_DECREF(reduced);
+        PyErr_SetString(PyExc_RuntimeError, "invalid operator accessor arguments");
         return NULL;
     }
-    Py_DECREF(validated);
-
     PyObject *tag = PyLong_FromLong(kind);
-    PyObject *spec = NULL;
     if (tag == NULL) {
+        Py_DECREF(reduced);
         return NULL;
     }
-    if (kind == OPERATOR_ACCESSOR_METHOD) {
-        PyObject *call_args = PyTuple_GetSlice(args, 1, PyTuple_GET_SIZE(args));
-        PyObject *call_kwargs = kwargs == NULL ? PyDict_New() : PyDict_Copy(kwargs);
-        if (call_args != NULL && call_kwargs != NULL) {
+    PyObject *spec = NULL;
+    if (kind != OPERATOR_ACCESSOR_METHOD) {
+        spec = PyTuple_Pack(2, tag, reduced_args);
+    }
+    else if (PyType_Check(constructor)) {
+        if (PyTuple_GET_SIZE(reduced_args) < 1) {
+            PyErr_SetString(PyExc_RuntimeError, "invalid methodcaller reduction");
+        }
+        else {
+            PyObject *call_args = PyTuple_GetSlice(
+                reduced_args,
+                1,
+                PyTuple_GET_SIZE(reduced_args)
+            );
+            PyObject *call_kwargs = PyDict_New();
+            if (call_args != NULL && call_kwargs != NULL) {
+                spec = PyTuple_Pack(
+                    4,
+                    tag,
+                    PyTuple_GET_ITEM(reduced_args, 0),
+                    call_args,
+                    call_kwargs
+                );
+            }
+            Py_XDECREF(call_args);
+            Py_XDECREF(call_kwargs);
+        }
+    }
+    else {
+        PyObject *bound_args = PyObject_GetAttrString(constructor, "args");
+        PyObject *call_kwargs = PyObject_GetAttrString(constructor, "keywords");
+        if (
+            bound_args != NULL && PyTuple_Check(bound_args) &&
+            PyTuple_GET_SIZE(bound_args) >= 1 &&
+            call_kwargs != NULL && PyDict_Check(call_kwargs)
+        ) {
             spec = PyTuple_Pack(
                 4,
                 tag,
-                PyTuple_GET_ITEM(args, 0),
-                call_args,
+                PyTuple_GET_ITEM(bound_args, 0),
+                reduced_args,
                 call_kwargs
             );
         }
-        Py_XDECREF(call_args);
+        else if (!PyErr_Occurred()) {
+            PyErr_SetString(PyExc_RuntimeError, "invalid methodcaller reduction");
+        }
+        Py_XDECREF(bound_args);
         Py_XDECREF(call_kwargs);
     }
-    else {
-        PyObject *items = PyTuple_GetSlice(args, 0, PyTuple_GET_SIZE(args));
-        if (items != NULL) {
-            spec = PyTuple_Pack(2, tag, items);
-        }
-        Py_XDECREF(items);
-    }
     Py_DECREF(tag);
+    Py_DECREF(reduced);
+    return spec;
+}
+
+static PyObject *
+operator_accessor_type_call(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    OperatorAccessorKind kind;
+    if (Py_TYPE(self) == operator_accessor_types[OPERATOR_ACCESSOR_ATTR]) {
+        kind = OPERATOR_ACCESSOR_ATTR;
+    }
+    else if (Py_TYPE(self) == operator_accessor_types[OPERATOR_ACCESSOR_ITEM]) {
+        kind = OPERATOR_ACCESSOR_ITEM;
+    }
+    else if (Py_TYPE(self) == operator_accessor_types[OPERATOR_ACCESSOR_METHOD]) {
+        kind = OPERATOR_ACCESSOR_METHOD;
+    }
+    else {
+        PyErr_SetString(PyExc_RuntimeError, "unknown operator accessor type");
+        return NULL;
+    }
+    PyObject *spec = operator_accessor_spec(self, kind);
     if (spec == NULL) {
         return NULL;
     }
-    PyObject *result = PyCFunction_NewEx(&operator_accessor_method, spec, module);
+    PyObject *result = operator_accessor_adapter(spec, args, kwargs);
     Py_DECREF(spec);
     return result;
 }
 
 static int
-operator_replace_accessor_constructor(
+operator_install_accessor_type(
     PyObject *module,
     const char *name,
     OperatorAccessorKind kind
 )
 {
-    PyObject *original = PyObject_GetAttrString(module, name);
-    if (original == NULL) {
+    PyObject *object = PyObject_GetAttrString(module, name);
+    if (object == NULL) {
         return -1;
     }
-    PyObject *tag = PyLong_FromLong(kind);
-    PyObject *state = tag == NULL ? NULL : PyTuple_Pack(3, original, module, tag);
-    Py_XDECREF(tag);
-    Py_DECREF(original);
-    if (state == NULL) {
+    if (!PyType_Check(object)) {
+        Py_DECREF(object);
+        PyErr_Format(PyExc_RuntimeError, "operator.%s is not a type", name);
         return -1;
     }
-    PyObject *replacement = PyCFunction_NewEx(
-        &operator_accessor_constructor_method,
-        state,
-        module
-    );
-    Py_DECREF(state);
-    if (replacement == NULL) {
-        return -1;
-    }
-    int result = PyObject_SetAttrString(module, name, replacement);
-    Py_DECREF(replacement);
-    return result;
+    PyTypeObject *type = (PyTypeObject *)object;
+    operator_accessor_types[kind] = type;
+    type->tp_call = operator_accessor_type_call;
+    type->tp_flags &= ~Py_TPFLAGS_HAVE_VECTORCALL;
+    PyType_Modified(type);
+    Py_DECREF(object);
+    return 0;
 }
 
 typedef struct {
+    PyObject *sequence;
     PyObject *iterator;
     PyObject *target;
     PyObject *item;
@@ -601,7 +627,8 @@ operator_search_copy_state(const void *raw_state)
         return NULL;
     }
     *copy = *state;
-    copy->iterator = Py_NewRef(state->iterator);
+    copy->sequence = Py_XNewRef(state->sequence);
+    copy->iterator = Py_XNewRef(state->iterator);
     copy->target = Py_NewRef(state->target);
     copy->item = Py_XNewRef(state->item);
     return copy;
@@ -614,7 +641,8 @@ operator_search_free_state(void *raw_state)
     if (state == NULL) {
         return;
     }
-    Py_DECREF(state->iterator);
+    Py_XDECREF(state->sequence);
+    Py_XDECREF(state->iterator);
     Py_DECREF(state->target);
     Py_XDECREF(state->item);
     PyMem_Free(state);
@@ -644,7 +672,21 @@ operator_search_continue(
     }
     for (;;) {
         if (state->item == NULL) {
-            state->item = PyIter_Next(state->iterator);
+            if (state->sequence != NULL) {
+                Py_ssize_t size = PyTuple_CheckExact(state->sequence)
+                    ? PyTuple_GET_SIZE(state->sequence)
+                    : PyList_GET_SIZE(state->sequence);
+                state->item = state->index < size
+                    ? Py_NewRef(
+                        PyTuple_CheckExact(state->sequence)
+                            ? PyTuple_GET_ITEM(state->sequence, state->index)
+                            : PyList_GET_ITEM(state->sequence, state->index)
+                    )
+                    : NULL;
+            }
+            else {
+                state->item = PyIter_Next(state->iterator);
+            }
             if (state->item == NULL) {
                 if (PyErr_Occurred()) {
                     return NULL;
@@ -707,11 +749,15 @@ operator_search_adapter(PyObject *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "OO:indexOf/countOf", &iterable, &target)) {
         return NULL;
     }
-    PyObject *iterator = PyObject_GetIter(iterable);
-    if (iterator == NULL) {
+    PyObject *sequence = (
+        PyTuple_CheckExact(iterable) || PyList_CheckExact(iterable)
+    ) ? Py_NewRef(iterable) : NULL;
+    PyObject *iterator = sequence == NULL ? PyObject_GetIter(iterable) : NULL;
+    if (sequence == NULL && iterator == NULL) {
         return NULL;
     }
     OperatorSearchState state = {
+        .sequence = sequence,
         .iterator = iterator,
         .target = Py_NewRef(target),
         .item = NULL,
@@ -721,7 +767,8 @@ operator_search_adapter(PyObject *self, PyObject *args)
         .waiting_for_equal = 0,
     };
     if (PyErr_Occurred()) {
-        Py_DECREF(iterator);
+        Py_XDECREF(sequence);
+        Py_XDECREF(iterator);
         Py_DECREF(state.target);
         return NULL;
     }
@@ -731,7 +778,8 @@ operator_search_adapter(PyObject *self, PyObject *args)
     }
     PyObject *result = operator_search_continue(&state, NULL, 0);
     adapter_leave(&frame);
-    Py_DECREF(state.iterator);
+    Py_XDECREF(state.sequence);
+    Py_XDECREF(state.iterator);
     Py_DECREF(state.target);
     Py_XDECREF(state.item);
     return result;
@@ -741,24 +789,42 @@ static int
 operator_replace_function(
     PyObject *module,
     const char *name,
-    OperatorResumeKind kind
+    OperatorResumeKind kind,
+    PyMethodDef *method
 )
 {
     PyObject *original = PyObject_GetAttrString(module, name);
     if (original == NULL) {
         return -1;
     }
+    if (!PyCFunction_Check(original)) {
+        Py_DECREF(original);
+        PyErr_Format(PyExc_RuntimeError, "operator.%s is not a C function", name);
+        return -1;
+    }
+    *method = *(((PyCFunctionObject *)original)->m_ml);
+    method->ml_meth = _PyCFunction_CAST(operator_call_adapter);
+    method->ml_flags = METH_VARARGS | METH_KEYWORDS;
+    PyObject *module_name = PyObject_GetAttrString(original, "__module__");
+    if (module_name == NULL) {
+        Py_DECREF(original);
+        return -1;
+    }
     PyObject *tag = PyLong_FromLong(kind);
     if (tag == NULL) {
+        Py_DECREF(module_name);
+        Py_DECREF(original);
         return -1;
     }
     PyObject *state = PyTuple_Pack(2, original, tag);
     Py_DECREF(tag);
     Py_DECREF(original);
     if (state == NULL) {
+        Py_DECREF(module_name);
         return -1;
     }
-    PyObject *replacement = PyCFunction_NewEx(&operator_call_method, state, module);
+    PyObject *replacement = PyCFunction_NewEx(method, state, module_name);
+    Py_DECREF(module_name);
     Py_DECREF(state);
     if (replacement == NULL) {
         return -1;
@@ -766,6 +832,101 @@ operator_replace_function(
     int result = PyObject_SetAttrString(module, name, replacement);
     Py_DECREF(replacement);
     return result;
+}
+
+static int
+operator_restore_public_aliases(PyObject *module)
+{
+    static const struct {
+        const char *alias;
+        const char *canonical;
+    } aliases[] = {
+        {"__abs__", "abs"}, {"__add__", "add"}, {"__and__", "and_"},
+        {"__call__", "call"}, {"__concat__", "concat"},
+        {"__contains__", "contains"}, {"__delitem__", "delitem"},
+        {"__eq__", "eq"}, {"__floordiv__", "floordiv"}, {"__ge__", "ge"},
+        {"__getitem__", "getitem"}, {"__gt__", "gt"},
+        {"__iadd__", "iadd"}, {"__iand__", "iand"},
+        {"__iconcat__", "iconcat"}, {"__ifloordiv__", "ifloordiv"},
+        {"__ilshift__", "ilshift"}, {"__imatmul__", "imatmul"},
+        {"__imod__", "imod"}, {"__imul__", "imul"},
+        {"__index__", "index"}, {"__inv__", "inv"},
+        {"__invert__", "invert"}, {"__ior__", "ior"},
+        {"__ipow__", "ipow"}, {"__irshift__", "irshift"},
+        {"__isub__", "isub"}, {"__itruediv__", "itruediv"},
+        {"__ixor__", "ixor"}, {"__le__", "le"},
+        {"__lshift__", "lshift"}, {"__lt__", "lt"},
+        {"__matmul__", "matmul"}, {"__mod__", "mod"},
+        {"__mul__", "mul"}, {"__ne__", "ne"}, {"__neg__", "neg"},
+        {"__not__", "not_"}, {"__or__", "or_"}, {"__pos__", "pos"},
+        {"__pow__", "pow"}, {"__rshift__", "rshift"},
+        {"__setitem__", "setitem"}, {"__sub__", "sub"},
+        {"__truediv__", "truediv"}, {"__xor__", "xor"},
+    };
+    for (
+        Py_ssize_t index = 0;
+        index < (Py_ssize_t)(sizeof(aliases) / sizeof(*aliases));
+        index++
+    ) {
+        PyObject *function = PyObject_GetAttrString(
+            module,
+            aliases[index].canonical
+        );
+        if (function == NULL) {
+            return -1;
+        }
+        int status = PyObject_SetAttrString(
+            module,
+            aliases[index].alias,
+            function
+        );
+        Py_DECREF(function);
+        if (status < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int
+operator_replace_search(
+    PyObject *module,
+    const char *name,
+    OperatorSearchKind kind,
+    PyMethodDef *method
+)
+{
+    PyObject *original = PyObject_GetAttrString(module, name);
+    if (original == NULL) {
+        return -1;
+    }
+    if (!PyCFunction_Check(original)) {
+        Py_DECREF(original);
+        PyErr_Format(PyExc_RuntimeError, "operator.%s is not a C function", name);
+        return -1;
+    }
+    *method = *(((PyCFunctionObject *)original)->m_ml);
+    method->ml_meth = operator_search_adapter;
+    method->ml_flags = METH_VARARGS;
+    PyObject *module_name = PyObject_GetAttrString(original, "__module__");
+    Py_DECREF(original);
+    if (module_name == NULL) {
+        return -1;
+    }
+    PyObject *tag = PyLong_FromLong(kind);
+    if (tag == NULL) {
+        Py_DECREF(module_name);
+        return -1;
+    }
+    PyObject *replacement = PyCFunction_NewEx(method, tag, module_name);
+    Py_DECREF(tag);
+    Py_DECREF(module_name);
+    if (replacement == NULL) {
+        return -1;
+    }
+    int status = PyObject_SetAttrString(module, name, replacement);
+    Py_DECREF(replacement);
+    return status;
 }
 
 static int
@@ -801,11 +962,13 @@ adapter_operator_install(PyObject *operator_module)
         {"length_hint", OPERATOR_LENGTH_HINT}, {"contains", OPERATOR_BOOL},
     };
     Py_ssize_t count = (Py_ssize_t)(sizeof(functions) / sizeof(*functions));
+    static PyMethodDef methods[sizeof(functions) / sizeof(*functions)];
     for (Py_ssize_t index = 0; index < count; index++) {
         if (operator_replace_function(
                 operator_module,
                 functions[index].name,
-                functions[index].kind
+                functions[index].kind,
+                &methods[index]
             ) < 0) {
             return -1;
         }
@@ -820,7 +983,7 @@ adapter_operator_install(PyObject *operator_module)
     };
     count = (Py_ssize_t)(sizeof(accessors) / sizeof(*accessors));
     for (Py_ssize_t index = 0; index < count; index++) {
-        if (operator_replace_accessor_constructor(
+        if (operator_install_accessor_type(
                 operator_module,
                 accessors[index].name,
                 accessors[index].kind
@@ -828,35 +991,23 @@ adapter_operator_install(PyObject *operator_module)
             return -1;
         }
     }
-    PyObject *index_tag = PyLong_FromLong(OPERATOR_SEARCH_INDEX);
-    PyObject *count_tag = PyLong_FromLong(OPERATOR_SEARCH_COUNT);
-    if (index_tag == NULL || count_tag == NULL) {
-        Py_XDECREF(index_tag);
-        Py_XDECREF(count_tag);
-        return -1;
-    }
-    PyObject *index_function = PyCFunction_NewEx(
-        &operator_search_method,
-        index_tag,
-        operator_module
+    static PyMethodDef search_methods[2];
+    int result = operator_replace_search(
+        operator_module,
+        "indexOf",
+        OPERATOR_SEARCH_INDEX,
+        &search_methods[0]
     );
-    PyObject *count_function = PyCFunction_NewEx(
-        &operator_search_method,
-        count_tag,
-        operator_module
-    );
-    Py_DECREF(index_tag);
-    Py_DECREF(count_tag);
-    if (index_function == NULL || count_function == NULL) {
-        Py_XDECREF(index_function);
-        Py_XDECREF(count_function);
-        return -1;
-    }
-    int result = PyObject_SetAttrString(operator_module, "indexOf", index_function);
     if (result == 0) {
-        result = PyObject_SetAttrString(operator_module, "countOf", count_function);
+        result = operator_replace_search(
+            operator_module,
+            "countOf",
+            OPERATOR_SEARCH_COUNT,
+            &search_methods[1]
+        );
     }
-    Py_DECREF(index_function);
-    Py_DECREF(count_function);
+    if (result == 0) {
+        result = operator_restore_public_aliases(operator_module);
+    }
     return result;
 }

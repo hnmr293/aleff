@@ -2,6 +2,7 @@ typedef struct {
     PyObject *source;
     PyObject *encoding;
     PyObject *errors;
+    PyObject *prefix;
     int kind;
 } CodecState;
 
@@ -19,6 +20,7 @@ codec_copy_state(const void *raw_state)
     copy->source = Py_NewRef(state->source);
     copy->encoding = Py_XNewRef(state->encoding);
     copy->errors = Py_XNewRef(state->errors);
+    copy->prefix = Py_NewRef(state->prefix);
     copy->kind = state->kind;
     return copy;
 }
@@ -33,22 +35,132 @@ codec_free_state(void *raw_state)
     Py_DECREF(state->source);
     Py_XDECREF(state->encoding);
     Py_XDECREF(state->errors);
+    Py_DECREF(state->prefix);
     PyMem_Free(state);
 }
 
 static const char *
 codec_name(PyObject *object)
 {
-    if (object == NULL || object == Py_None) {
+    if (object == NULL) {
         return NULL;
     }
     return PyUnicode_AsUTF8(object);
 }
 
 static PyObject *
-codec_resume(const void *raw_state, PyObject *value)
+codec_concat(PyObject *left, PyObject *right, int encode)
 {
-    const CodecState *state = raw_state;
+    if (encode) {
+        PyObject *result = Py_NewRef(left);
+        PyBytes_Concat(&result, right);
+        return result;
+    }
+    return PyUnicode_Concat(left, right);
+}
+
+static int
+codec_error_bounds(
+    CodecState *state,
+    Py_ssize_t *start,
+    Py_ssize_t *end
+)
+{
+    const char *encoding = codec_name(state->encoding);
+    if (state->encoding != NULL && encoding == NULL) {
+        return -1;
+    }
+    PyObject *strict_result = state->kind == 0
+        ? PyUnicode_AsEncodedString(state->source, encoding, "strict")
+        : PyUnicode_Decode(
+            PyBytes_AS_STRING(state->source),
+            PyBytes_GET_SIZE(state->source),
+            encoding,
+            "strict"
+        );
+    if (strict_result != NULL) {
+        Py_DECREF(strict_result);
+        PyErr_SetString(PyExc_RuntimeError, "codec handler resumed without an encoding error");
+        return -1;
+    }
+    PyObject *exception = PyErr_GetRaisedException();
+    if (exception == NULL) {
+        return -1;
+    }
+    int status;
+    if (state->kind == 0) {
+        status = PyUnicodeEncodeError_GetStart(exception, start);
+        if (status == 0) {
+            status = PyUnicodeEncodeError_GetEnd(exception, end);
+        }
+    }
+    else {
+        status = PyUnicodeDecodeError_GetStart(exception, start);
+        if (status == 0) {
+            status = PyUnicodeDecodeError_GetEnd(exception, end);
+        }
+    }
+    Py_DECREF(exception);
+    return status;
+}
+
+static int
+codec_position(PyObject *position, Py_ssize_t length, Py_ssize_t *result)
+{
+    if (!PyLong_Check(position)) {
+        PyErr_SetString(PyExc_TypeError, "position from error handler must be an integer");
+        return -1;
+    }
+    Py_ssize_t value = PyLong_AsSsize_t(position);
+    if (value == -1 && PyErr_Occurred()) {
+        return -1;
+    }
+    Py_ssize_t original = value;
+    if (value < 0) {
+        value += length;
+    }
+    if (value < 0 || value > length) {
+        PyErr_Format(
+            PyExc_IndexError,
+            "position %zd from error handler out of bounds",
+            original
+        );
+        return -1;
+    }
+    *result = value;
+    return 0;
+}
+
+static PyObject *
+codec_convert_remaining(CodecState *state)
+{
+    const char *encoding = codec_name(state->encoding);
+    if (state->encoding != NULL && encoding == NULL) {
+        return NULL;
+    }
+    const char *errors = codec_name(state->errors);
+    if (state->errors != NULL && errors == NULL) {
+        return NULL;
+    }
+    PyObject *tail = state->kind == 0
+        ? PyUnicode_AsEncodedString(state->source, encoding, errors)
+        : PyUnicode_Decode(
+            PyBytes_AS_STRING(state->source),
+            PyBytes_GET_SIZE(state->source),
+            encoding,
+            errors
+        );
+    if (tail == NULL) {
+        return NULL;
+    }
+    PyObject *result = codec_concat(state->prefix, tail, state->kind == 0);
+    Py_DECREF(tail);
+    return result;
+}
+
+static PyObject *
+codec_continue(CodecState *state, PyObject *value)
+{
     if (value == NULL) {
         return NULL;
     }
@@ -58,37 +170,118 @@ codec_resume(const void *raw_state, PyObject *value)
     }
     PyObject *replacement = PyTuple_GET_ITEM(value, 0);
     PyObject *position = PyTuple_GET_ITEM(value, 1);
-    if (!PyUnicode_Check(replacement) || !PyLong_Check(position)) {
-        PyErr_SetString(PyExc_TypeError, "codec error handler returned invalid replacement");
+    if ((state->kind == 0 &&
+            !PyUnicode_Check(replacement) && !PyBytes_Check(replacement)) ||
+        (state->kind != 0 && !PyUnicode_Check(replacement))) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "codec error handler returned an invalid replacement"
+        );
         return NULL;
     }
+
+    Py_ssize_t error_start;
+    Py_ssize_t error_end;
+    if (codec_error_bounds(state, &error_start, &error_end) < 0) {
+        return NULL;
+    }
+    (void)error_end;
     const char *encoding = codec_name(state->encoding);
-    const char *errors = "strict";
+    if (state->encoding != NULL && encoding == NULL) {
+        return NULL;
+    }
+    Py_ssize_t source_length = state->kind == 0
+        ? PyUnicode_GET_LENGTH(state->source)
+        : PyBytes_GET_SIZE(state->source);
+    Py_ssize_t next_position;
+    if (codec_position(position, source_length, &next_position) < 0) {
+        return NULL;
+    }
+
+    PyObject *valid_prefix;
+    PyObject *replacement_result;
     if (state->kind == 0) {
-        PyObject *result = PyUnicode_AsEncodedString(replacement, encoding, errors);
-        if (result == NULL) {
+        PyObject *prefix_text = PyUnicode_Substring(
+            state->source, 0, error_start
+        );
+        if (prefix_text == NULL) {
             return NULL;
         }
-        return result;
+        valid_prefix = PyUnicode_AsEncodedString(
+            prefix_text, encoding, "strict"
+        );
+        Py_DECREF(prefix_text);
+        if (valid_prefix == NULL) {
+            return NULL;
+        }
+        replacement_result = PyBytes_Check(replacement)
+            ? Py_NewRef(replacement)
+            : PyUnicode_AsEncodedString(replacement, encoding, "strict");
     }
-    const char *replacement_text = PyUnicode_AsUTF8(replacement);
-    if (replacement_text == NULL) {
+    else {
+        valid_prefix = PyUnicode_Decode(
+            PyBytes_AS_STRING(state->source),
+            error_start,
+            encoding,
+            "strict"
+        );
+        replacement_result = Py_NewRef(replacement);
+    }
+    if (replacement_result == NULL) {
+        Py_DECREF(valid_prefix);
         return NULL;
     }
-    Py_ssize_t replacement_size = PyUnicode_GET_LENGTH(replacement);
-    (void)position;
-    if (state->kind == 1) {
-        return PyUnicode_DecodeUTF8(
-            replacement_text,
-            (Py_ssize_t)strlen(replacement_text),
-            errors
-        );
-    }
-    return PyUnicode_DecodeUTF8(
-        replacement_text,
-        replacement_size,
-        errors
+    PyObject *with_prefix = codec_concat(
+        state->prefix, valid_prefix, state->kind == 0
     );
+    Py_DECREF(valid_prefix);
+    if (with_prefix == NULL) {
+        Py_DECREF(replacement_result);
+        return NULL;
+    }
+    PyObject *accumulated = codec_concat(
+        with_prefix, replacement_result, state->kind == 0
+    );
+    Py_DECREF(with_prefix);
+    Py_DECREF(replacement_result);
+    if (accumulated == NULL) {
+        return NULL;
+    }
+
+    PyObject *remaining = state->kind == 0
+        ? PyUnicode_Substring(state->source, next_position, source_length)
+        : PyBytes_FromStringAndSize(
+            PyBytes_AS_STRING(state->source) + next_position,
+            source_length - next_position
+        );
+    if (remaining == NULL) {
+        Py_DECREF(accumulated);
+        return NULL;
+    }
+    Py_SETREF(state->source, remaining);
+    Py_SETREF(state->prefix, accumulated);
+    return codec_convert_remaining(state);
+}
+
+static PyObject *
+codec_resume(const void *raw_state, PyObject *value)
+{
+    if (value == NULL) {
+        return NULL;
+    }
+    CodecState *state = codec_copy_state(raw_state);
+    if (state == NULL) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &codec_vtable, state) < 0) {
+        codec_free_state(state);
+        return NULL;
+    }
+    PyObject *result = codec_continue(state, value);
+    adapter_leave(&frame);
+    codec_free_state(state);
+    return result;
 }
 
 static const AleffAdapterVTable codec_vtable = {
@@ -100,8 +293,8 @@ static const AleffAdapterVTable codec_vtable = {
 static PyObject *
 adapter_str_encode(PyObject *self, PyObject *args, PyObject *kwargs)
 {
-    PyObject *encoding_object = Py_None;
-    PyObject *errors_object = Py_None;
+    PyObject *encoding_object = NULL;
+    PyObject *errors_object = NULL;
     static char *keywords[] = {"encoding", "errors", NULL};
     if (!PyArg_ParseTupleAndKeywords(
         args,
@@ -114,21 +307,26 @@ adapter_str_encode(PyObject *self, PyObject *args, PyObject *kwargs)
         return NULL;
     }
     const char *encoding = codec_name(encoding_object);
-    if (encoding_object != Py_None && encoding == NULL) {
+    if (encoding_object != NULL && encoding == NULL) {
         return NULL;
     }
     const char *errors = codec_name(errors_object);
-    if (errors_object != Py_None && errors == NULL) {
+    if (errors_object != NULL && errors == NULL) {
         return NULL;
     }
     CodecState state = {
         .source = self,
-        .encoding = encoding_object == Py_None ? NULL : encoding_object,
-        .errors = errors_object == Py_None ? NULL : errors_object,
+        .encoding = encoding_object,
+        .errors = errors_object,
+        .prefix = PyBytes_FromStringAndSize("", 0),
         .kind = 0,
     };
+    if (state.prefix == NULL) {
+        return NULL;
+    }
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &codec_vtable, &state) < 0) {
+        Py_DECREF(state.prefix);
         return NULL;
     }
     PyObject *result = PyUnicode_AsEncodedString(
@@ -137,6 +335,7 @@ adapter_str_encode(PyObject *self, PyObject *args, PyObject *kwargs)
         errors
     );
     adapter_leave(&frame);
+    Py_DECREF(state.prefix);
     return result;
 }
 
@@ -148,8 +347,8 @@ adapter_bytes_decode_common(
     int kind
 )
 {
-    PyObject *encoding_object = Py_None;
-    PyObject *errors_object = Py_None;
+    PyObject *encoding_object = NULL;
+    PyObject *errors_object = NULL;
     static char *keywords[] = {"encoding", "errors", NULL};
     if (!PyArg_ParseTupleAndKeywords(
         args,
@@ -162,11 +361,11 @@ adapter_bytes_decode_common(
         return NULL;
     }
     const char *encoding = codec_name(encoding_object);
-    if (encoding_object != Py_None && encoding == NULL) {
+    if (encoding_object != NULL && encoding == NULL) {
         return NULL;
     }
     const char *errors = codec_name(errors_object);
-    if (errors_object != Py_None && errors == NULL) {
+    if (errors_object != NULL && errors == NULL) {
         return NULL;
     }
     PyObject *source = kind == 1
@@ -180,12 +379,19 @@ adapter_bytes_decode_common(
     }
     CodecState state = {
         .source = source,
-        .encoding = encoding_object == Py_None ? NULL : encoding_object,
-        .errors = errors_object == Py_None ? NULL : errors_object,
+        .encoding = encoding_object,
+        .errors = errors_object,
+        .prefix = PyUnicode_New(0, 0),
         .kind = kind,
     };
+    if (state.prefix == NULL) {
+        Py_DECREF(source);
+        return NULL;
+    }
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &codec_vtable, &state) < 0) {
+        Py_DECREF(state.prefix);
+        Py_DECREF(source);
         return NULL;
     }
     PyObject *result = PyUnicode_Decode(
@@ -195,6 +401,7 @@ adapter_bytes_decode_common(
         errors
     );
     adapter_leave(&frame);
+    Py_DECREF(state.prefix);
     Py_DECREF(source);
     return result;
 }
@@ -347,6 +554,26 @@ bytearray_replace_buffer(PyObject *target, PyObject *source)
 }
 
 static PyObject *
+call_raw_special_onearg(PyObject *object, const char *name, PyObject *argument)
+{
+    PyObject *descriptor = lookup_raw_special(object, name);
+    if (descriptor == NULL) {
+        return NULL;
+    }
+    descrgetfunc get = Py_TYPE(descriptor)->tp_descr_get;
+    PyObject *callable = get == NULL
+        ? Py_NewRef(descriptor)
+        : get(descriptor, object, (PyObject *)Py_TYPE(object));
+    Py_DECREF(descriptor);
+    if (callable == NULL) {
+        return NULL;
+    }
+    PyObject *result = PyObject_CallOneArg(callable, argument);
+    Py_DECREF(callable);
+    return result;
+}
+
+static PyObject *
 bytes_buffer_continue(BytesState *state, PyObject *value)
 {
     if (!PyMemoryView_Check(value)) {
@@ -369,11 +596,8 @@ bytes_buffer_continue(BytesState *state, PyObject *value)
     Py_DECREF(release_descriptor);
 
     state->phase = BYTES_WAIT_BUFFER_RELEASE;
-    PyObject *released = PyObject_CallMethod(
-        state->input,
-        "__release_buffer__",
-        "O",
-        state->view
+    PyObject *released = call_raw_special_onearg(
+        state->input, "__release_buffer__", state->view
     );
     if (released == NULL) {
         PyErr_WriteUnraisable(state->input);
@@ -450,7 +674,11 @@ convert_python_buffer(PyObject *input, int make_bytearray)
     if (adapter_enter(&frame, &bytes_vtable, &state) < 0) {
         return NULL;
     }
-    PyObject *view = PyObject_CallMethod(input, "__buffer__", "i", PyBUF_FULL_RO);
+    PyObject *flags = PyLong_FromLong(PyBUF_FULL_RO);
+    PyObject *view = flags == NULL
+        ? NULL
+        : call_raw_special_onearg(input, "__buffer__", flags);
+    Py_XDECREF(flags);
     PyObject *result = view == NULL ? NULL : bytes_buffer_continue(&state, view);
     Py_XDECREF(view);
     adapter_leave(&frame);
@@ -523,6 +751,9 @@ adapter_bytes_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         Py_DECREF(buffer_descriptor);
         return convert_python_buffer(input, 0);
     }
+    if (Py_TYPE(input)->tp_iter == NULL && !PySequence_Check(input)) {
+        return original_bytes_new(type, args, kwargs);
+    }
     return collect_iterable(input, COLLECT_BYTES);
 }
 
@@ -568,6 +799,9 @@ adapter_bytearray_init(PyObject *self, PyObject *args, PyObject *kwargs)
         result = convert_python_buffer(input, 1);
     }
     else {
+        if (Py_TYPE(input)->tp_iter == NULL && !PySequence_Check(input)) {
+            return original_bytearray_init(self, args, kwargs);
+        }
         result = collect_iterable(input, COLLECT_BYTEARRAY);
     }
     if (result == NULL) {
@@ -578,105 +812,29 @@ adapter_bytearray_init(PyObject *self, PyObject *args, PyObject *kwargs)
     return status;
 }
 
-static PyObject *
-bytearray_join_items(PyObject *self, PyObject *items)
-{
-    PyObject *result = PyByteArray_FromStringAndSize(NULL, 0);
-    PyObject *separator = result == NULL ? NULL : PyByteArray_FromObject(self);
-    if (separator == NULL) {
-        Py_XDECREF(result);
-        return NULL;
-    }
-    Py_ssize_t size = PyList_GET_SIZE(items);
-    for (Py_ssize_t index = 0; result != NULL && index < size; index++) {
-        if (index != 0) {
-            PyObject *joined = PyByteArray_Concat(result, separator);
-            Py_DECREF(result);
-            result = joined;
-        }
-        Py_buffer view;
-        if (PyObject_GetBuffer(PyList_GET_ITEM(items, index), &view, PyBUF_SIMPLE) < 0) {
-            PyErr_Clear();
-            PyErr_Format(
-                PyExc_TypeError,
-                "sequence item %zd: expected a bytes-like object, %.80s found",
-                index,
-                Py_TYPE(PyList_GET_ITEM(items, index))->tp_name
-            );
-            Py_CLEAR(result);
-            break;
-        }
-        PyObject *item = PyByteArray_FromStringAndSize(view.buf, view.len);
-        PyBuffer_Release(&view);
-        if (item == NULL) {
-            Py_CLEAR(result);
-            break;
-        }
-        PyObject *joined = PyByteArray_Concat(result, item);
-        Py_DECREF(item);
-        Py_DECREF(result);
-        result = joined;
-    }
-    Py_DECREF(separator);
-    return result;
-}
-
-#if PY_VERSION_HEX < 0x030e0000
-static PyObject *
-bytes_join_items(PyObject *self, PyObject *items)
-{
-    PyObject *result = PyBytes_FromStringAndSize(NULL, 0);
-    PyObject *separator = result == NULL ? NULL : PyBytes_FromObject(self);
-    if (separator == NULL) {
-        Py_XDECREF(result);
-        return NULL;
-    }
-    Py_ssize_t size = PyList_GET_SIZE(items);
-    for (Py_ssize_t index = 0; result != NULL && index < size; index++) {
-        if (index != 0) {
-            PyBytes_Concat(&result, separator);
-        }
-        if (result == NULL) {
-            break;
-        }
-        PyObject *item = PyBytes_FromObject(PyList_GET_ITEM(items, index));
-        if (item == NULL) {
-            Py_CLEAR(result);
-            break;
-        }
-        PyBytes_Concat(&result, item);
-        Py_DECREF(item);
-    }
-    Py_DECREF(separator);
-    return result;
-}
-#endif
-
 typedef struct {
     PyObject *separator;
-    int kind;
-} JoinState;
+} UnicodeJoinState;
 
-static const AleffAdapterVTable join_vtable;
+static const AleffAdapterVTable unicode_join_vtable;
 
 static void *
-join_copy_state(const void *raw_state)
+unicode_join_copy_state(const void *raw_state)
 {
-    const JoinState *state = raw_state;
-    JoinState *copy = PyMem_Malloc(sizeof(*copy));
+    const UnicodeJoinState *state = raw_state;
+    UnicodeJoinState *copy = PyMem_Malloc(sizeof(*copy));
     if (copy == NULL) {
         PyErr_NoMemory();
         return NULL;
     }
     copy->separator = Py_NewRef(state->separator);
-    copy->kind = state->kind;
     return copy;
 }
 
 static void
-join_free_state(void *raw_state)
+unicode_join_free_state(void *raw_state)
 {
-    JoinState *state = raw_state;
+    UnicodeJoinState *state = raw_state;
     if (state == NULL) {
         return;
     }
@@ -685,70 +843,534 @@ join_free_state(void *raw_state)
 }
 
 static PyObject *
-join_apply(JoinState *state, PyObject *items)
-{
-    if (state->kind == 0) {
-        return PyUnicode_Join(state->separator, items);
-    }
-    if (state->kind == 1) {
-#if PY_VERSION_HEX >= 0x030e0000
-        return PyBytes_Join(state->separator, items);
-#else
-        return bytes_join_items(state->separator, items);
-#endif
-    }
-    return bytearray_join_items(state->separator, items);
-}
-
-static PyObject *
-join_resume(const void *raw_state, PyObject *value)
+unicode_join_resume(const void *raw_state, PyObject *value)
 {
     if (value == NULL) {
         return NULL;
     }
-    return join_apply((JoinState *)raw_state, value);
+    const UnicodeJoinState *state = raw_state;
+    return PyUnicode_Join(state->separator, value);
 }
 
-static const AleffAdapterVTable join_vtable = {
-    .copy_state = join_copy_state,
-    .free_state = join_free_state,
-    .resume = join_resume,
+static const AleffAdapterVTable unicode_join_vtable = {
+    .copy_state = unicode_join_copy_state,
+    .free_state = unicode_join_free_state,
+    .resume = unicode_join_resume,
 };
 
 static PyObject *
-adapter_join(PyObject *self, PyObject *iterable, int kind)
+adapter_unicode_join(PyObject *self, PyObject *iterable)
 {
-    JoinState state = {
-        .separator = self,
-        .kind = kind,
-    };
+    UnicodeJoinState state = {.separator = self};
     AleffAdapterFrame frame;
-    if (adapter_enter(&frame, &join_vtable, &state) < 0) {
+    if (adapter_enter(&frame, &unicode_join_vtable, &state) < 0) {
         return NULL;
     }
-    PyObject *items = collect_iterable(iterable, COLLECT_LIST);
-    PyObject *result = items == NULL ? NULL : join_apply(&state, items);
+    PyObject *items = NULL;
+    PyObject *result;
+    if (PyList_CheckExact(iterable) || PyTuple_CheckExact(iterable)) {
+        result = PyUnicode_Join(self, iterable);
+    }
+    else {
+        items = collect_iterable(iterable, COLLECT_LIST);
+        result = items == NULL ? NULL : PyUnicode_Join(self, items);
+    }
     Py_XDECREF(items);
     adapter_leave(&frame);
+    return result;
+}
+
+typedef enum {
+    BINARY_JOIN_WAIT_ITEMS,
+    BINARY_JOIN_WAIT_ITEM_BUFFER,
+    BINARY_JOIN_WAIT_ITEM_RELEASE,
+} BinaryJoinPhase;
+
+typedef struct {
+    PyObject *separator;
+    PyObject *separator_view;
+    PyObject *items;
+    PyObject *views;
+    PyObject *release_items;
+    PyObject *current_item;
+    PyObject *result;
+    Py_ssize_t source_size;
+    Py_ssize_t index;
+    Py_ssize_t release_index;
+    BinaryJoinPhase phase;
+    int make_bytearray;
+    int source_is_exact_list;
+} BinaryJoinState;
+
+static const AleffAdapterVTable binary_join_vtable;
+
+static void *
+binary_join_copy_state(const void *raw_state)
+{
+    const BinaryJoinState *state = raw_state;
+    BinaryJoinState *copy = PyMem_Malloc(sizeof(*copy));
+    if (copy == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    *copy = *state;
+    copy->separator = Py_NewRef(state->separator);
+    copy->separator_view = Py_NewRef(state->separator_view);
+    copy->items = Py_XNewRef(state->items);
+    copy->views = PyList_GetSlice(
+        state->views, 0, PyList_GET_SIZE(state->views)
+    );
+    copy->release_items = copy->views == NULL
+        ? NULL
+        : PyList_GetSlice(
+            state->release_items,
+            0,
+            PyList_GET_SIZE(state->release_items)
+        );
+    copy->current_item = Py_XNewRef(state->current_item);
+    copy->result = Py_XNewRef(state->result);
+    if (copy->views == NULL || copy->release_items == NULL) {
+        Py_DECREF(copy->separator);
+        Py_DECREF(copy->separator_view);
+        Py_XDECREF(copy->items);
+        Py_XDECREF(copy->views);
+        Py_XDECREF(copy->release_items);
+        Py_XDECREF(copy->current_item);
+        Py_XDECREF(copy->result);
+        PyMem_Free(copy);
+        return NULL;
+    }
+    return copy;
+}
+
+static void
+binary_join_free_state(void *raw_state)
+{
+    BinaryJoinState *state = raw_state;
+    if (state == NULL) {
+        return;
+    }
+    Py_DECREF(state->separator);
+    Py_DECREF(state->separator_view);
+    Py_XDECREF(state->items);
+    Py_DECREF(state->views);
+    Py_DECREF(state->release_items);
+    Py_XDECREF(state->current_item);
+    Py_XDECREF(state->result);
+    PyMem_Free(state);
+}
+
+static int
+binary_join_source_unchanged(BinaryJoinState *state)
+{
+    if (
+        state->source_is_exact_list &&
+        PyList_GET_SIZE(state->items) != state->source_size
+    ) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "sequence changed size during iteration"
+        );
+        return 0;
+    }
+    return 1;
+}
+
+static void
+binary_join_item_type_error(BinaryJoinState *state)
+{
+    PyErr_Clear();
+    PyErr_Format(
+        PyExc_TypeError,
+        "sequence item %zd: expected a bytes-like object, %.80s found",
+        state->index,
+        Py_TYPE(state->current_item)->tp_name
+    );
+}
+
+static int
+binary_join_store_view(
+    BinaryJoinState *state,
+    PyObject *view,
+    int needs_release
+)
+{
+    if (!PyMemoryView_Check(view)) {
+        binary_join_item_type_error(state);
+        return -1;
+    }
+    Py_buffer buffer;
+    if (PyObject_GetBuffer(view, &buffer, PyBUF_SIMPLE) < 0) {
+        binary_join_item_type_error(state);
+        return -1;
+    }
+    PyBuffer_Release(&buffer);
+    if (!binary_join_source_unchanged(state)) {
+        return -1;
+    }
+    if (PyList_Append(state->views, view) < 0) {
+        return -1;
+    }
+    if (PyList_Append(
+            state->release_items,
+            needs_release ? state->current_item : Py_None
+        ) < 0) {
+        if (PySequence_DelItem(
+                state->views, PyList_GET_SIZE(state->views) - 1
+            ) < 0) {
+            PyErr_Clear();
+            PyErr_NoMemory();
+        }
+        return -1;
+    }
+    Py_CLEAR(state->current_item);
+    state->index++;
+    return 0;
+}
+
+static PyObject *binary_join_continue(
+    BinaryJoinState *state,
+    PyObject *resumed_value,
+    int is_resumed
+);
+
+static PyObject *
+binary_join_release_continue(
+    BinaryJoinState *state,
+    PyObject *resumed_value,
+    int is_resumed
+)
+{
+    if (is_resumed) {
+        PyObject *item = PyList_GET_ITEM(
+            state->release_items, state->release_index
+        );
+        if (resumed_value == NULL && PyErr_Occurred()) {
+            PyErr_WriteUnraisable(item);
+        }
+        state->release_index++;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(state->release_items);
+    while (state->release_index < count) {
+        PyObject *item = PyList_GET_ITEM(
+            state->release_items, state->release_index
+        );
+        if (item == Py_None) {
+            state->release_index++;
+            continue;
+        }
+        PyObject *descriptor = lookup_raw_special(item, "__release_buffer__");
+        if (descriptor == NULL) {
+            state->release_index++;
+            continue;
+        }
+        Py_DECREF(descriptor);
+        PyObject *view = PyList_GET_ITEM(state->views, state->release_index);
+        state->phase = BINARY_JOIN_WAIT_ITEM_RELEASE;
+        PyObject *released = call_raw_special_onearg(
+            item, "__release_buffer__", view
+        );
+        if (released == NULL) {
+            PyErr_WriteUnraisable(item);
+        }
+        else {
+            Py_DECREF(released);
+        }
+        state->release_index++;
+    }
+    return Py_NewRef(state->result);
+}
+
+static PyObject *
+binary_join_build_result(BinaryJoinState *state)
+{
+    if (!binary_join_source_unchanged(state)) {
+        return NULL;
+    }
+    Py_buffer separator;
+    if (PyObject_GetBuffer(state->separator_view, &separator, PyBUF_SIMPLE) < 0) {
+        return NULL;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(state->views);
+    Py_ssize_t total = 0;
+    for (Py_ssize_t index = 0; index < count; index++) {
+        Py_buffer view;
+        if (PyObject_GetBuffer(
+                PyList_GET_ITEM(state->views, index),
+                &view,
+                PyBUF_SIMPLE
+            ) < 0) {
+            PyBuffer_Release(&separator);
+            return NULL;
+        }
+        if (view.len > PY_SSIZE_T_MAX - total) {
+            PyBuffer_Release(&view);
+            PyBuffer_Release(&separator);
+            PyErr_NoMemory();
+            return NULL;
+        }
+        total += view.len;
+        PyBuffer_Release(&view);
+    }
+    if (count > 1) {
+        if (separator.len > (PY_SSIZE_T_MAX - total) / (count - 1)) {
+            PyBuffer_Release(&separator);
+            PyErr_NoMemory();
+            return NULL;
+        }
+        total += separator.len * (count - 1);
+    }
+
+    PyObject *result;
+    if (
+        !state->make_bytearray && count == 1 &&
+        PyBytes_CheckExact(PyList_GET_ITEM(state->items, 0))
+    ) {
+        result = Py_NewRef(PyList_GET_ITEM(state->items, 0));
+    }
+    else {
+        result = state->make_bytearray
+            ? PyByteArray_FromStringAndSize(NULL, total)
+            : PyBytes_FromStringAndSize(NULL, total);
+        if (result != NULL) {
+            char *output = state->make_bytearray
+                ? PyByteArray_AS_STRING(result)
+                : PyBytes_AS_STRING(result);
+            Py_ssize_t offset = 0;
+            for (Py_ssize_t index = 0; index < count; index++) {
+                if (index != 0 && separator.len != 0) {
+                    memcpy(
+                        output + offset,
+                        separator.buf,
+                        (size_t)separator.len
+                    );
+                    offset += separator.len;
+                }
+                Py_buffer view;
+                if (PyObject_GetBuffer(
+                        PyList_GET_ITEM(state->views, index),
+                        &view,
+                        PyBUF_SIMPLE
+                    ) < 0) {
+                    Py_CLEAR(result);
+                    break;
+                }
+                if (view.len != 0) {
+                    memcpy(output + offset, view.buf, (size_t)view.len);
+                    offset += view.len;
+                }
+                PyBuffer_Release(&view);
+            }
+        }
+    }
+    PyBuffer_Release(&separator);
+    if (result == NULL) {
+        return NULL;
+    }
+    Py_XSETREF(state->result, result);
+    state->release_index = 0;
+    return binary_join_release_continue(state, NULL, 0);
+}
+
+static PyObject *
+binary_join_continue(
+    BinaryJoinState *state,
+    PyObject *resumed_value,
+    int is_resumed
+)
+{
+    if (is_resumed) {
+        if (state->phase == BINARY_JOIN_WAIT_ITEMS) {
+            if (!PyList_Check(resumed_value)) {
+                PyErr_SetString(
+                    PyExc_RuntimeError,
+                    "join collector returned a non-list"
+                );
+                return NULL;
+            }
+            Py_XSETREF(state->items, Py_NewRef(resumed_value));
+            state->source_size = PyList_GET_SIZE(state->items);
+        }
+        else if (state->phase == BINARY_JOIN_WAIT_ITEM_BUFFER) {
+            if (binary_join_store_view(state, resumed_value, 1) < 0) {
+                return NULL;
+            }
+        }
+        else {
+            PyErr_SetString(PyExc_RuntimeError, "invalid binary join phase");
+            return NULL;
+        }
+    }
+
+    while (state->index < state->source_size) {
+        if (!binary_join_source_unchanged(state)) {
+            return NULL;
+        }
+        state->current_item = Py_NewRef(
+            PyList_GET_ITEM(state->items, state->index)
+        );
+        PyObject *descriptor = lookup_raw_special(
+            state->current_item, "__buffer__"
+        );
+        int has_python_buffer = descriptor != NULL &&
+            !Py_IS_TYPE(descriptor, &PyWrapperDescr_Type);
+        Py_XDECREF(descriptor);
+        if (has_python_buffer) {
+            state->phase = BINARY_JOIN_WAIT_ITEM_BUFFER;
+            PyObject *flags = PyLong_FromLong(PyBUF_SIMPLE);
+            PyObject *view = flags == NULL
+                ? NULL
+                : call_raw_special_onearg(
+                    state->current_item, "__buffer__", flags
+                );
+            Py_XDECREF(flags);
+            if (view == NULL) {
+                if (PyErr_ExceptionMatches(PyExc_BufferError)) {
+                    binary_join_item_type_error(state);
+                }
+                return NULL;
+            }
+            int stored = binary_join_store_view(state, view, 1);
+            Py_DECREF(view);
+            if (stored < 0) {
+                return NULL;
+            }
+        }
+        else {
+            PyObject *view = PyMemoryView_FromObject(state->current_item);
+            if (view == NULL) {
+                binary_join_item_type_error(state);
+                return NULL;
+            }
+            int stored = binary_join_store_view(state, view, 0);
+            Py_DECREF(view);
+            if (stored < 0) {
+                return NULL;
+            }
+        }
+    }
+    return binary_join_build_result(state);
+}
+
+static PyObject *
+binary_join_resume(const void *raw_state, PyObject *value)
+{
+    const BinaryJoinState *source = raw_state;
+    if (
+        value == NULL &&
+        source->phase != BINARY_JOIN_WAIT_ITEM_RELEASE
+    ) {
+        return NULL;
+    }
+    BinaryJoinState *state = binary_join_copy_state(raw_state);
+    if (state == NULL) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &binary_join_vtable, state) < 0) {
+        binary_join_free_state(state);
+        return NULL;
+    }
+    PyObject *result = state->phase == BINARY_JOIN_WAIT_ITEM_RELEASE
+        ? binary_join_release_continue(state, value, 1)
+        : binary_join_continue(state, value, 1);
+    adapter_leave(&frame);
+    binary_join_free_state(state);
+    return result;
+}
+
+static const AleffAdapterVTable binary_join_vtable = {
+    .copy_state = binary_join_copy_state,
+    .free_state = binary_join_free_state,
+    .resume = binary_join_resume,
+};
+
+static PyObject *
+adapter_binary_join(PyObject *self, PyObject *iterable, int make_bytearray)
+{
+    BinaryJoinState state = {
+        .separator = self,
+        .separator_view = PyMemoryView_FromObject(self),
+        .items = NULL,
+        .views = PyList_New(0),
+        .release_items = PyList_New(0),
+        .current_item = NULL,
+        .result = NULL,
+        .source_size = 0,
+        .index = 0,
+        .release_index = 0,
+        .phase = BINARY_JOIN_WAIT_ITEMS,
+        .make_bytearray = make_bytearray,
+        .source_is_exact_list = 0,
+    };
+    if (
+        state.separator_view == NULL || state.views == NULL ||
+        state.release_items == NULL
+    ) {
+        Py_XDECREF(state.separator_view);
+        Py_XDECREF(state.views);
+        Py_XDECREF(state.release_items);
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &binary_join_vtable, &state) < 0) {
+        Py_DECREF(state.separator_view);
+        Py_DECREF(state.views);
+        Py_DECREF(state.release_items);
+        return NULL;
+    }
+    PyObject *result;
+    if (PyList_CheckExact(iterable)) {
+        state.items = Py_NewRef(iterable);
+        state.source_size = PyList_GET_SIZE(iterable);
+        state.source_is_exact_list = 1;
+        result = binary_join_continue(&state, NULL, 0);
+    }
+    else if (PyTuple_CheckExact(iterable)) {
+        state.items = PySequence_List(iterable);
+        state.source_size = state.items == NULL
+            ? 0
+            : PyList_GET_SIZE(state.items);
+        result = state.items == NULL
+            ? NULL
+            : binary_join_continue(&state, NULL, 0);
+    }
+    else {
+        state.phase = BINARY_JOIN_WAIT_ITEMS;
+        state.items = collect_iterable(iterable, COLLECT_LIST);
+        state.source_size = state.items == NULL
+            ? 0
+            : PyList_GET_SIZE(state.items);
+        result = state.items == NULL
+            ? NULL
+            : binary_join_continue(&state, NULL, 0);
+    }
+    adapter_leave(&frame);
+    Py_DECREF(state.separator_view);
+    Py_XDECREF(state.items);
+    Py_DECREF(state.views);
+    Py_DECREF(state.release_items);
+    Py_XDECREF(state.current_item);
+    Py_XDECREF(state.result);
     return result;
 }
 
 static PyObject *
 adapter_str_join(PyObject *self, PyObject *iterable)
 {
-    return adapter_join(self, iterable, 0);
+    return adapter_unicode_join(self, iterable);
 }
 
 static PyObject *
 adapter_bytes_join(PyObject *self, PyObject *iterable)
 {
-    return adapter_join(self, iterable, 1);
+    return adapter_binary_join(self, iterable, 0);
 }
 
 static PyObject *
 adapter_bytearray_join(PyObject *self, PyObject *iterable)
 {
-    return adapter_join(self, iterable, 2);
+    return adapter_binary_join(self, iterable, 1);
 }
 
 static PyMethodDef containers_str_encode_method = {

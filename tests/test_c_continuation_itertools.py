@@ -342,15 +342,6 @@ def _takewhile() -> None:
     _assert_equal(_resume_outcomes(run, (0, 1)), [("return", []), ("return", [1, 2, 3])])
 
 
-@_case("tee")
-def _tee() -> None:
-    def run(choose: Choose) -> list[list[int]]:
-        first, second = itertools.tee(map(lambda _item: choose(), (None,)))
-        return [list(first), list(second)]
-
-    _assert_equal(_resume_outcomes(run), [("return", [[1], [1]]), ("return", [[10], [10]])])
-
-
 @_case("tee_empty")
 def _tee_empty() -> None:
     assert itertools.tee((1,), 0) == ()

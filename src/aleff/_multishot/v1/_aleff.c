@@ -861,6 +861,8 @@ create_snapshot(PyFrameObject *boundary_frame, int max_depth)
 typedef PyObject *(*evalframe_fn_t)(PyThreadState *, void *, int);
 static evalframe_fn_t _evalframe = nullptr;
 
+static int _aleff_opcode_is_backward_jump(int opcode);
+
 /* ========================================================================
  * Frame chain restoration and continuation resume
  * ======================================================================== */
@@ -897,6 +899,9 @@ _aleff_opcode_result_count(int opcode, int oparg)
         case COMPARE_OP:
         case CONTAINS_OP:
         case LOAD_ATTR:
+#ifdef TO_BOOL
+        case TO_BOOL:
+#endif
             return 1;
         case STORE_ATTR:
         case DELETE_ATTR:
@@ -914,6 +919,22 @@ _aleff_opcode_result_count(int opcode, int oparg)
     }
 #endif
     return -1;
+}
+
+static int
+_aleff_is_active_truth_opcode(int opcode)
+{
+    switch (opcode) {
+        case UNARY_NOT:
+        case POP_JUMP_IF_FALSE:
+        case POP_JUMP_IF_TRUE:
+#ifdef TO_BOOL
+        case TO_BOOL:
+#endif
+            return 1;
+        default:
+            return 0;
+    }
 }
 
 static void
@@ -1153,12 +1174,118 @@ static void
 inject_resume_value(
     _aleff_frame_t *frame,
     PyObject *value,
-    const _aleff_frame_copy_t *source
+    const _aleff_frame_copy_t *source,
+    const PyCodeObject *completed_code
 )
 {
     uint8_t raw_opcode = (*ALEFF_PREV_INSTR(frame)) & 0xFF;
     uint8_t base_opcode = _aleff_opcode_deopt[raw_opcode];
     uint8_t oparg = (*ALEFF_PREV_INSTR(frame) >> 8) & 0xFF;
+
+    if (
+        source != nullptr && source->active_stack_depth >= 0 &&
+        _aleff_is_active_truth_opcode(base_opcode)
+    ) {
+        int truth;
+        int completed_bool = completed_code != nullptr &&
+            PyUnicode_Check(completed_code->co_name) &&
+            PyUnicode_CompareWithASCIIString(
+                completed_code->co_name,
+                "__bool__"
+            ) == 0;
+        int completed_len = completed_code != nullptr &&
+            PyUnicode_Check(completed_code->co_name) &&
+            PyUnicode_CompareWithASCIIString(
+                completed_code->co_name,
+                "__len__"
+            ) == 0;
+        if (completed_bool) {
+            if (!PyBool_Check(value)) {
+                PyErr_Format(
+                    PyExc_TypeError,
+                    "__bool__ should return bool, returned %.200s",
+                    Py_TYPE(value)->tp_name
+                );
+                return;
+            }
+            truth = value == Py_True;
+        }
+        else if (completed_len) {
+            PyObject *index = PyNumber_Index(value);
+            if (index == nullptr) {
+                return;
+            }
+            Py_ssize_t length = PyLong_AsSsize_t(index);
+            Py_DECREF(index);
+            if (length == -1 && PyErr_Occurred()) {
+                return;
+            }
+            if (length < 0) {
+                PyErr_SetString(PyExc_ValueError, "__len__() should return >= 0");
+                return;
+            }
+            truth = length != 0;
+        }
+        else {
+            truth = PyObject_IsTrue(value);
+            if (truth < 0) {
+                return;
+            }
+        }
+
+        PyCodeObject *code = _aleff_frame_get_code(frame);
+        int value_stack_base = code->co_nlocalsplus;
+        int entry_top = value_stack_base + source->active_stack_depth;
+        int result_slot = entry_top - 1;
+        if (result_slot < value_stack_base || entry_top > source->num_slots) {
+            PyErr_SetString(PyExc_RuntimeError, "invalid active truth operand stack");
+            return;
+        }
+        for (int i = result_slot; i < entry_top; i++) {
+            ALEFF_LOCALSPLUS_CLOSE(frame, i);
+            ALEFF_LOCALSPLUS_SET(frame, i, nullptr);
+        }
+        _aleff_frame_set_stacktop(frame, result_slot);
+
+        if (base_opcode == POP_JUMP_IF_FALSE || base_opcode == POP_JUMP_IF_TRUE) {
+            int take_jump = base_opcode == POP_JUMP_IF_FALSE ? !truth : truth;
+            if (take_jump) {
+                int cache_count = _aleff_opcode_caches[base_opcode];
+                int next_offset = (int)(
+                    (ALEFF_PREV_INSTR(frame) - ALEFF_CODE_CODE(code) +
+                     cache_count + 1) * 2
+                );
+                int jump_distance = oparg * 2;
+                int target_offset = _aleff_opcode_is_backward_jump(base_opcode)
+                    ? next_offset - jump_distance
+                    : next_offset + jump_distance;
+#if PY_VERSION_HEX >= 0x030d0000
+                ALEFF_PREV_INSTR(frame) =
+                    ALEFF_CODE_CODE(code) + target_offset / 2;
+#else
+                ALEFF_PREV_INSTR(frame) =
+                    ALEFF_CODE_CODE(code) + target_offset / 2 - 1;
+#endif
+            }
+            else {
+                _aleff_advance_past_opcode_and_caches(frame, base_opcode);
+            }
+            return;
+        }
+
+        PyObject *truth_value = PyBool_FromLong(
+            base_opcode == UNARY_NOT ? !truth : truth
+        );
+        if (truth_value == nullptr) {
+            return;
+        }
+        _aleff_advance_past_opcode_and_caches(frame, base_opcode);
+        ALEFF_LOCALSPLUS_SET_NEW(frame, result_slot, truth_value);
+        Py_DECREF(truth_value);
+        _aleff_frame_set_stacktop(frame, result_slot + 1);
+        return;
+    }
+
     int push_result;
     int stacktop = prepare_resume_frame(frame, source, &push_result);
     if (stacktop < 0) {
@@ -1530,7 +1657,12 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
     frames_on_stack[num - 1]->previous = nullptr;
 
     /* Inject the resume value into the innermost frame */
-    inject_resume_value(frames_on_stack[0], value, &snapshot->frames[skip]);
+    inject_resume_value(
+        frames_on_stack[0],
+        value,
+        &snapshot->frames[skip],
+        nullptr
+    );
     if (PyErr_Occurred()) {
         tstate->datastack_top = saved_datastack_top;
         return nullptr;
@@ -1571,9 +1703,15 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
                 (completed_code->co_flags & CO_COROUTINE) &&
                 outer_source->send_target_offset < 0
             ) {
-                PyErr_SetObject(PyExc_StopIteration, result);
+                PyObject *stop_iteration = PyObject_CallOneArg(
+                    PyExc_StopIteration,
+                    result
+                );
                 Py_DECREF(result);
                 result = nullptr;
+                if (stop_iteration != nullptr) {
+                    PyErr_SetRaisedException(stop_iteration);
+                }
             }
             result = aleff_adapter_resume_before_frame(
                 snapshot->adapters,
@@ -1598,7 +1736,12 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
                 throwflag = 1;
             }
             else {
-                inject_resume_value(outer, result, outer_source);
+                inject_resume_value(
+                    outer,
+                    result,
+                    outer_source,
+                    completed_code
+                );
                 Py_DECREF(result);
                 result = nullptr;
                 if (PyErr_Occurred()) {
@@ -1700,6 +1843,10 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
     }
 
     PyObject *pending = Py_NewRef(outcome);
+    const PyCodeObject *pending_code =
+        from_coroutine && start > 0
+            ? _aleff_frame_get_code(snapshot->frames[start - 1].frame)
+            : nullptr;
     int pending_is_exception = is_exception;
     PyThreadState *tstate = PyThreadState_Get();
     _PyErr_StackItem restored_exc_state = {
@@ -1787,7 +1934,7 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
             result = _evalframe(tstate, frame, 1);
         }
         else {
-            inject_resume_value(frame, pending, src);
+            inject_resume_value(frame, pending, src, pending_code);
             Py_DECREF(pending);
             pending = nullptr;
             if (PyErr_Occurred()) {
@@ -1813,6 +1960,7 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
         else {
             pending = result;
             pending_is_exception = 0;
+            pending_code = code;
         }
         from_coroutine = 0;
     }
@@ -2019,12 +2167,22 @@ load_frame_stack_metadata(
         result = 0;
         goto done;
     }
+    int metadata_offset = current_offset;
+    if (bytecode[metadata_offset] == CACHE) {
+        int preceding_offset = metadata_offset - 2;
+        while (preceding_offset >= 0 && bytecode[preceding_offset] == CACHE) {
+            preceding_offset -= 2;
+        }
+        if (preceding_offset >= 0 && bytecode[preceding_offset] == SEND) {
+            metadata_offset = preceding_offset;
+        }
+    }
     if (
         _aleff_frame_stacktop(_aleff_frame_from_pyframe(frame)) >= 0 &&
 #if PY_VERSION_HEX >= 0x030e0000
         bytecode[current_offset] == CACHE
 #else
-        bytecode[current_offset] != SEND
+        bytecode[metadata_offset] != SEND
 #endif
     ) {
         result = 0;
@@ -2032,12 +2190,12 @@ load_frame_stack_metadata(
     }
 
     int send_target = -1;
-    if (bytecode[current_offset] == SEND) {
+    if (bytecode[metadata_offset] == SEND) {
         uint32_t send_arg;
-        if (_aleff_instruction_arg(bytecode, current_offset, &send_arg) < 0) {
+        if (_aleff_instruction_arg(bytecode, metadata_offset, &send_arg) < 0) {
             goto done;
         }
-        int send_next = current_offset + 2;
+        int send_next = metadata_offset + 2;
         while (send_next < code_size && bytecode[send_next] == CACHE) {
             send_next += 2;
         }
@@ -2254,7 +2412,7 @@ load_frame_stack_metadata(
         }
     }
 
-    int depth = depths[current_offset / 2];
+    int depth = depths[metadata_offset / 2];
     int minimum_depth = send_target >= 0 ? 2 : 0;
     if (depth < minimum_depth || depth > code->co_stacksize) {
         PyErr_SetString(PyExc_RuntimeError, "cannot determine active operand stack depth");

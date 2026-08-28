@@ -100,82 +100,38 @@ functools_compare_resume(const void *raw_state, PyObject *value)
     return result;
 }
 
-typedef struct {
-    PyObject_HEAD
-    PyObject *compare;
-} FunctoolsKeyFactory;
-
+/* functools.KeyWrapper is a native type whose private layout is stable in
+ * the CPython versions supported by this extension.  This is only a layout
+ * view of instances created by the real functools.cmp_to_key; no replacement
+ * type is exposed to Python. */
 typedef struct {
     PyObject_HEAD
     PyObject *compare;
     PyObject *object;
-} FunctoolsKeyObject;
+} FunctoolsNativeKeyWrapper;
 
-static PyTypeObject FunctoolsKeyFactoryType;
-static PyTypeObject FunctoolsKeyObjectType;
-
-static void
-functools_key_factory_dealloc(FunctoolsKeyFactory *self)
-{
-    Py_DECREF(self->compare);
-    Py_TYPE(self)->tp_free((PyObject *)self);
-}
+static PyTypeObject *functools_native_key_wrapper_type = NULL;
+static richcmpfunc functools_original_key_wrapper_richcompare = NULL;
 
 static PyObject *
-functools_key_factory_call(
-    FunctoolsKeyFactory *self,
-    PyObject *args,
-    PyObject *kwargs
-)
-{
-    if (kwargs != NULL && PyDict_GET_SIZE(kwargs) != 0) {
-        PyErr_SetString(PyExc_TypeError, "KeyWrapper() takes no keyword arguments");
-        return NULL;
-    }
-    PyObject *object;
-    if (!PyArg_ParseTuple(args, "O:KeyWrapper", &object)) {
-        return NULL;
-    }
-    FunctoolsKeyObject *result = PyObject_New(
-        FunctoolsKeyObject,
-        &FunctoolsKeyObjectType
-    );
-    if (result == NULL) {
-        return NULL;
-    }
-    result->compare = Py_NewRef(self->compare);
-    result->object = Py_NewRef(object);
-    return (PyObject *)result;
-}
-
-static PyTypeObject FunctoolsKeyFactoryType = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "functools.KeyWrapperFactory",
-    .tp_basicsize = sizeof(FunctoolsKeyFactory),
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_dealloc = (destructor)functools_key_factory_dealloc,
-    .tp_call = (ternaryfunc)functools_key_factory_call,
-};
-
-static void
-functools_key_object_dealloc(FunctoolsKeyObject *self)
-{
-    Py_DECREF(self->compare);
-    Py_DECREF(self->object);
-    Py_TYPE(self)->tp_free((PyObject *)self);
-}
-
-static PyObject *
-functools_key_object_richcompare(
-    FunctoolsKeyObject *self,
+functools_key_wrapper_richcompare(
+    PyObject *self_object,
     PyObject *other,
     int operation
 )
 {
-    if (!PyObject_TypeCheck(other, &FunctoolsKeyObjectType)) {
-        Py_RETURN_NOTIMPLEMENTED;
+    if (Py_TYPE(other) != Py_TYPE(self_object)) {
+        PyErr_SetString(PyExc_TypeError, "other argument must be K instance");
+        return NULL;
     }
-    FunctoolsKeyObject *right = (FunctoolsKeyObject *)other;
+    FunctoolsNativeKeyWrapper *self =
+        (FunctoolsNativeKeyWrapper *)self_object;
+    FunctoolsNativeKeyWrapper *right =
+        (FunctoolsNativeKeyWrapper *)other;
+    if (self->object == NULL || right->object == NULL) {
+        PyErr_SetString(PyExc_AttributeError, "object");
+        return NULL;
+    }
     FunctoolsCompareState state = {
         .compare = self->compare,
         .left = self->object,
@@ -189,40 +145,6 @@ functools_key_object_richcompare(
     PyObject *result = functools_compare_continue(&state, NULL, 0);
     adapter_leave(&frame);
     return result;
-}
-
-static PyMemberDef functools_key_object_members[] = {
-    {"obj", T_OBJECT, offsetof(FunctoolsKeyObject, object), READONLY, NULL},
-    {NULL, 0, 0, 0, NULL}
-};
-
-static PyTypeObject FunctoolsKeyObjectType = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "functools.KeyWrapper",
-    .tp_basicsize = sizeof(FunctoolsKeyObject),
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_dealloc = (destructor)functools_key_object_dealloc,
-    .tp_richcompare = (richcmpfunc)functools_key_object_richcompare,
-    .tp_members = functools_key_object_members,
-    .tp_hash = PyObject_HashNotImplemented,
-};
-
-static PyObject *
-adapter_cmp_to_key(PyObject *Py_UNUSED(self), PyObject *compare)
-{
-    if (!PyCallable_Check(compare)) {
-        PyErr_SetString(PyExc_TypeError, "the comparison function must be callable");
-        return NULL;
-    }
-    FunctoolsKeyFactory *factory = PyObject_New(
-        FunctoolsKeyFactory,
-        &FunctoolsKeyFactoryType
-    );
-    if (factory == NULL) {
-        return NULL;
-    }
-    factory->compare = Py_NewRef(compare);
-    return (PyObject *)factory;
 }
 
 /* The adapter keeps CPython's actual _lru_cache_wrapper as the cache owner.
@@ -594,8 +516,8 @@ functools_cache_store(
     /* This is the post-call check from CPython's bounded implementation. */
     PyObject *cached = PyDict_GetItemWithError(cache->cache, key);
     if (cached != NULL) {
-        FunctoolsLruListElem *link = (FunctoolsLruListElem *)cached;
-        Py_XSETREF(link->result, Py_NewRef(value));
+        /* A recursive call filled this key while the user function was
+         * running.  CPython keeps that recursive result. */
         Py_DECREF(key);
         return 0;
     }
@@ -677,13 +599,25 @@ functools_cache_callable_call(
     PyObject *kwargs
 )
 {
-    PyObject *wrapper = PyWeakref_GetObject(callable->wrapper_ref);
-    if (wrapper == Py_None) {
+    PyObject *wrapper = NULL;
+#if PY_VERSION_HEX >= 0x030d0000
+    int weakref_status = PyWeakref_GetRef(callable->wrapper_ref, &wrapper);
+    if (weakref_status < 0) {
+        return NULL;
+    }
+    if (weakref_status == 0) {
+#else
+    PyObject *borrowed_wrapper = PyWeakref_GetObject(callable->wrapper_ref);
+    if (borrowed_wrapper == Py_None) {
+#endif
         PyErr_SetString(
             PyExc_RuntimeError, "lru cache wrapper is no longer alive"
         );
         return NULL;
     }
+#if PY_VERSION_HEX < 0x030d0000
+    wrapper = Py_NewRef(borrowed_wrapper);
+#endif
     FunctoolsCacheState state = {
         .wrapper = wrapper,
         .args = args,
@@ -692,13 +626,16 @@ functools_cache_callable_call(
     };
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &functools_cache_vtable, &state) < 0) {
+        Py_DECREF(wrapper);
         return NULL;
     }
     if (frame.node == NULL) {
+        Py_DECREF(wrapper);
         return NULL;
     }
     PyObject *result = PyObject_Call(callable->func, args, kwargs);
     adapter_leave(&frame);
+    Py_DECREF(wrapper);
     return result;
 }
 
@@ -733,44 +670,28 @@ functools_cache_callable_new(PyObject *func)
     return (PyObject *)callable;
 }
 
-typedef struct {
-    PyObject_HEAD
-    PyObject *decorator;
-} FunctoolsCacheDecorator;
-
-static PyObject *functools_cache_decorator_call(
-    FunctoolsCacheDecorator *self,
-    PyObject *args,
-    PyObject *kwargs
-);
-
-static void
-functools_cache_decorator_dealloc(FunctoolsCacheDecorator *self)
-{
-    Py_DECREF(self->decorator);
-    Py_TYPE(self)->tp_free((PyObject *)self);
-}
-
-static PyTypeObject FunctoolsCacheDecoratorType = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "aleff._functools_lru_decorator",
-    .tp_basicsize = sizeof(FunctoolsCacheDecorator),
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_dealloc = (destructor)functools_cache_decorator_dealloc,
-    .tp_call = (ternaryfunc)functools_cache_decorator_call,
-};
-
-static PyObject *functools_original_lru_cache = NULL;
-static PyObject *functools_update_wrapper = NULL;
+static PyObject *functools_original_lru_cache_wrapper = NULL;
 
 static PyObject *
-functools_cache_wrap(PyObject *func, PyObject *decorator)
+functools_cache_wrap(
+    PyObject *func,
+    PyObject *maxsize,
+    PyObject *typed,
+    PyObject *cache_info_type
+)
 {
     PyObject *callable = functools_cache_callable_new(func);
     if (callable == NULL) {
         return NULL;
     }
-    PyObject *wrapper = PyObject_CallOneArg(decorator, callable);
+    PyObject *wrapper = PyObject_CallFunctionObjArgs(
+        functools_original_lru_cache_wrapper,
+        callable,
+        maxsize,
+        typed,
+        cache_info_type,
+        NULL
+    );
     if (wrapper == NULL) {
         Py_DECREF(callable);
         return NULL;
@@ -783,102 +704,113 @@ functools_cache_wrap(PyObject *func, PyObject *decorator)
         Py_DECREF(callable);
         return NULL;
     }
-    PyObject *updated = PyObject_CallFunctionObjArgs(
-        functools_update_wrapper, wrapper, func, NULL
-    );
     Py_DECREF(callable);
-    if (updated == NULL) {
-        Py_DECREF(wrapper);
-        return NULL;
-    }
-    Py_DECREF(updated);
     return wrapper;
 }
 
 static PyObject *
-functools_cache_decorator_call(
-    FunctoolsCacheDecorator *self,
+adapter_lru_cache_wrapper(
+    PyObject *Py_UNUSED(self),
     PyObject *args,
     PyObject *kwargs
 )
 {
-    if (kwargs != NULL && PyDict_GET_SIZE(kwargs) != 0) {
-        PyErr_SetString(PyExc_TypeError, "lru_cache() takes no keyword arguments");
-        return NULL;
-    }
     PyObject *func;
-    if (!PyArg_ParseTuple(args, "O:lru_cache", &func)) {
+    PyObject *maxsize;
+    PyObject *typed;
+    PyObject *cache_info_type;
+    static char *keywords[] = {
+        "user_function", "maxsize", "typed", "cache_info_type", NULL
+    };
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "OOOO:_lru_cache_wrapper",
+            keywords,
+            &func,
+            &maxsize,
+            &typed,
+            &cache_info_type)) {
         return NULL;
     }
     if (!PyCallable_Check(func)) {
         PyErr_SetString(PyExc_TypeError, "the first argument must be callable");
         return NULL;
     }
-    return functools_cache_wrap(func, self->decorator);
-}
-
-static PyObject *
-adapter_lru_cache(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
-{
-    if (PyTuple_GET_SIZE(args) == 1 &&
-        (kwargs == NULL || PyDict_GET_SIZE(kwargs) == 0) &&
-        PyCallable_Check(PyTuple_GET_ITEM(args, 0))) {
-        return functools_cache_wrap(
-            PyTuple_GET_ITEM(args, 0), functools_original_lru_cache
-        );
-    }
-    PyObject *decorator = PyObject_Call(functools_original_lru_cache, args, kwargs);
-    if (decorator == NULL) {
-        return NULL;
-    }
-    FunctoolsCacheDecorator *result = PyObject_New(
-        FunctoolsCacheDecorator,
-        &FunctoolsCacheDecoratorType
-    );
-    if (result == NULL) {
-        Py_DECREF(decorator);
-        return NULL;
-    }
-    result->decorator = decorator;
-    return (PyObject *)result;
+    return functools_cache_wrap(func, maxsize, typed, cache_info_type);
 }
 
 static int
 adapter_functools_install(PyObject *functools)
 {
-    if (PyType_Ready(&FunctoolsKeyFactoryType) < 0 ||
-        PyType_Ready(&FunctoolsKeyObjectType) < 0 ||
-        PyType_Ready(&FunctoolsCacheCallableType) < 0 ||
-        PyType_Ready(&FunctoolsCacheDecoratorType) < 0) {
+    if (PyType_Ready(&FunctoolsCacheCallableType) < 0) {
         return -1;
     }
-    functools_original_lru_cache = PyObject_GetAttrString(functools, "lru_cache");
-    if (functools_original_lru_cache == NULL) {
+    PyObject *cmp_to_key = PyObject_GetAttrString(functools, "cmp_to_key");
+    if (cmp_to_key == NULL) {
         return -1;
     }
-    functools_update_wrapper = PyObject_GetAttrString(functools, "update_wrapper");
-    if (functools_update_wrapper == NULL) {
-        return -1;
-    }
-    static PyMethodDef cmp_to_key_method = {
-        "cmp_to_key", adapter_cmp_to_key, METH_O, NULL
-    };
-    PyObject *cmp_to_key = PyCFunction_NewEx(&cmp_to_key_method, NULL, functools);
-    if (cmp_to_key == NULL ||
-        PyObject_SetAttrString(functools, "cmp_to_key", cmp_to_key) < 0) {
-        Py_XDECREF(cmp_to_key);
-        return -1;
-    }
+    PyObject *factory = PyObject_CallOneArg(cmp_to_key, Py_None);
     Py_DECREF(cmp_to_key);
-    static PyMethodDef lru_cache_method = {
-        "lru_cache", _PyCFunction_CAST(adapter_lru_cache), METH_VARARGS | METH_KEYWORDS, NULL
-    };
-    PyObject *lru_cache = PyCFunction_NewEx(&lru_cache_method, NULL, functools);
-    if (lru_cache == NULL ||
-        PyObject_SetAttrString(functools, "lru_cache", lru_cache) < 0) {
-        Py_XDECREF(lru_cache);
+    if (factory == NULL) {
         return -1;
     }
-    Py_DECREF(lru_cache);
+    functools_native_key_wrapper_type = Py_TYPE(factory);
+    functools_original_key_wrapper_richcompare =
+        functools_native_key_wrapper_type->tp_richcompare;
+    Py_DECREF(factory);
+    if (functools_original_key_wrapper_richcompare == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "cannot access KeyWrapper comparison");
+        functools_native_key_wrapper_type = NULL;
+        return -1;
+    }
+    functools_native_key_wrapper_type->tp_richcompare =
+        functools_key_wrapper_richcompare;
+    PyType_Modified(functools_native_key_wrapper_type);
+    functools_original_lru_cache_wrapper = PyObject_GetAttrString(
+        functools, "_lru_cache_wrapper"
+    );
+    if (functools_original_lru_cache_wrapper == NULL) {
+        functools_native_key_wrapper_type->tp_richcompare =
+            functools_original_key_wrapper_richcompare;
+        PyType_Modified(functools_native_key_wrapper_type);
+        functools_native_key_wrapper_type = NULL;
+        functools_original_key_wrapper_richcompare = NULL;
+        return -1;
+    }
+    static PyMethodDef lru_cache_wrapper_method = {
+        "_lru_cache_wrapper",
+        _PyCFunction_CAST(adapter_lru_cache_wrapper),
+        METH_VARARGS | METH_KEYWORDS,
+        NULL
+    };
+    PyObject *lru_cache_wrapper = PyCFunction_NewEx(
+        &lru_cache_wrapper_method, NULL, functools
+    );
+    if (lru_cache_wrapper == NULL ||
+        PyObject_SetAttrString(
+            functools, "_lru_cache_wrapper", lru_cache_wrapper
+        ) < 0) {
+        Py_XDECREF(lru_cache_wrapper);
+        return -1;
+    }
+    Py_DECREF(lru_cache_wrapper);
     return 0;
+}
+
+static void
+adapter_functools_rollback(void)
+{
+    if (functools_native_key_wrapper_type != NULL &&
+        functools_original_key_wrapper_richcompare != NULL) {
+        if (functools_native_key_wrapper_type->tp_richcompare ==
+                functools_key_wrapper_richcompare) {
+            functools_native_key_wrapper_type->tp_richcompare =
+                functools_original_key_wrapper_richcompare;
+            PyType_Modified(functools_native_key_wrapper_type);
+        }
+    }
+    functools_native_key_wrapper_type = NULL;
+    functools_original_key_wrapper_richcompare = NULL;
+    Py_CLEAR(functools_original_lru_cache_wrapper);
 }

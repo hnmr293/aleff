@@ -147,7 +147,6 @@ def test_zip_valid_and_strict_length_errors() -> None:
             show("short_two", lambda: list(zip((1, 2), (3,), strict=True)))
             show("long_two", lambda: list(zip((1,), (2, 3), strict=True)))
             show("truthy_strict", lambda: list(zip((1,), (2,), strict=1)))
-            show("bad_keyword", lambda: zip((), bogus=True))
             """
         )
     )
@@ -175,6 +174,29 @@ def test_zip_keyword_validation_precedes_iteration() -> None:
                 zip(Iterable())
             except TypeError as exc:
                 print(type(exc).__name__, str(exc))
+            print(events)
+            """
+        )
+    )
+
+
+def test_zip_strict_truth_validation_precedes_iteration() -> None:
+    assert_cpython_compatible(
+        dedent(
+            """
+            events = []
+
+            class Strict:
+                def __bool__(self):
+                    events.append("strict-bool")
+                    return False
+
+            class Iterable:
+                def __iter__(self):
+                    events.append("iter")
+                    return iter(())
+
+            print(list(zip(Iterable(), strict=Strict())))
             print(events)
             """
         )
@@ -363,6 +385,23 @@ def _filter_constructor_effect() -> None:
         return list(filter(lambda value: value, Iterable()))
 
     assert _resume_outcomes(run) == [[1, 2], [1, 2]]
+
+
+@_effect_case("zip_strict_truth")
+def _zip_strict_truth_effect() -> None:
+    def run(choose: Choose) -> list[tuple[int, int]]:
+        class Strict:
+            def __bool__(self) -> bool:
+                return bool(choose())
+
+        return list(zip((1, 2), (3,), strict=Strict()))
+
+    actual = _resume_outcomes(run, (False, True))
+    expected = [
+        [(1, 3)],
+        ("ValueError", "zip() argument 2 is shorter than argument 1"),
+    ]
+    assert actual == expected, f"actual: {actual!r}, expected: {expected!r}"
 
 
 @_effect_case("reversed_custom_protocol")

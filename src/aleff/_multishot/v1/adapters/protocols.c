@@ -36,27 +36,51 @@ protocol_type_has_method(PyObject *object, const char *name)
     if (name_object == NULL) {
         return -1;
     }
-    PyObject *mro = PyObject_GetAttrString((PyObject *)Py_TYPE(object), "__mro__");
+    PyObject *mro = Py_TYPE(object)->tp_mro;
     if (mro == NULL) {
         Py_DECREF(name_object);
-        return -1;
+        return 0;
     }
     Py_ssize_t size = PyTuple_GET_SIZE(mro);
     for (Py_ssize_t index = 0; index < size; index++) {
         PyTypeObject *type = (PyTypeObject *)PyTuple_GET_ITEM(mro, index);
-        PyObject *dict = PyObject_GetAttrString((PyObject *)type, "__dict__");
+        PyObject *dict = PyType_GetDict(type);
         if (dict == NULL) {
             Py_DECREF(name_object);
             return -1;
         }
-        int contains = PyMapping_HasKey(dict, name_object);
-        Py_DECREF(dict);
+        int contains = PyDict_Contains(dict, name_object);
+        if (contains < 0) {
+            Py_DECREF(name_object);
+            return -1;
+        }
         if (contains > 0) {
             Py_DECREF(name_object);
             return 1;
         }
     }
     Py_DECREF(name_object);
+    return 0;
+}
+
+static int
+protocol_type_has_python_method(PyObject *object, const char *name)
+{
+    PyObject *mro = Py_TYPE(object)->tp_mro;
+    if (mro == NULL) {
+        return 0;
+    }
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(mro); index++) {
+        PyTypeObject *type = (PyTypeObject *)PyTuple_GET_ITEM(mro, index);
+        PyObject *dict = PyType_GetDict(type);
+        if (dict == NULL) {
+            return -1;
+        }
+        PyObject *method = PyDict_GetItemString(dict, name);
+        if (method != NULL) {
+            return PyFunction_Check(method);
+        }
+    }
     return 0;
 }
 
@@ -418,6 +442,255 @@ protocol_type_vectorcall(
     );
 }
 
+typedef struct {
+    PyObject *real_argument;
+    PyObject *imag_argument;
+    PyObject *real_value;
+    ProtocolResumeKind real_kind;
+    ProtocolResumeKind imag_kind;
+    int phase;
+} ComplexTwoState;
+
+enum {
+    COMPLEX_TWO_WAIT_REAL,
+    COMPLEX_TWO_WAIT_IMAG,
+};
+
+static void *
+complex_two_copy_state(const void *raw_state)
+{
+    const ComplexTwoState *state = raw_state;
+    ComplexTwoState *copy = PyMem_Malloc(sizeof(*copy));
+    if (copy == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    *copy = *state;
+    copy->real_argument = Py_NewRef(state->real_argument);
+    copy->imag_argument = Py_NewRef(state->imag_argument);
+    copy->real_value = Py_XNewRef(state->real_value);
+    return copy;
+}
+
+static void
+complex_two_free_state(void *raw_state)
+{
+    ComplexTwoState *state = raw_state;
+    if (state == NULL) {
+        return;
+    }
+    Py_DECREF(state->real_argument);
+    Py_DECREF(state->imag_argument);
+    Py_XDECREF(state->real_value);
+    PyMem_Free(state);
+}
+
+static PyObject *
+complex_two_real_result(ComplexTwoState *state, PyObject *value)
+{
+    switch (state->real_kind) {
+        case PROTOCOL_COMPLEX:
+            return protocol_complex_result(value);
+        case PROTOCOL_COMPLEX_INDEX:
+            return protocol_complex_real_result(value, 1);
+        default:
+            return protocol_complex_real_result(value, 0);
+    }
+}
+
+static PyObject *
+complex_two_imag_result(ComplexTwoState *state, PyObject *value)
+{
+    PyObject *number = state->imag_kind == PROTOCOL_COMPLEX_INDEX
+        ? protocol_float_index_result(value)
+        : protocol_float_result(value);
+    if (number == NULL) {
+        return NULL;
+    }
+    double imaginary = PyFloat_AS_DOUBLE(number);
+    Py_DECREF(number);
+    return PyComplex_FromDoubles(0.0, imaginary);
+}
+
+static PyObject *
+complex_two_finish(ComplexTwoState *state, PyObject *imaginary)
+{
+    return PyNumber_Add(state->real_value, imaginary);
+}
+
+static PyObject *
+complex_two_continue(
+    ComplexTwoState *state,
+    PyObject *resumed_value,
+    int is_resumed
+)
+{
+    vectorcallfunc complex_vectorcall = original_complex_vectorcall == NULL
+        ? original_type_vectorcall
+        : original_complex_vectorcall;
+    if (is_resumed) {
+        if (state->phase == COMPLEX_TWO_WAIT_REAL) {
+            state->real_value = complex_two_real_result(state, resumed_value);
+            if (state->real_value == NULL) {
+                return NULL;
+            }
+        }
+        else if (state->phase == COMPLEX_TWO_WAIT_IMAG) {
+            PyObject *imaginary = complex_two_imag_result(state, resumed_value);
+            if (imaginary == NULL) {
+                return NULL;
+            }
+            PyObject *result = complex_two_finish(state, imaginary);
+            Py_DECREF(imaginary);
+            return result;
+        }
+        else {
+            PyErr_SetString(PyExc_RuntimeError, "invalid complex conversion phase");
+            return NULL;
+        }
+    }
+
+    if (state->real_value == NULL) {
+        state->phase = COMPLEX_TWO_WAIT_REAL;
+        PyObject *arguments[1] = {state->real_argument};
+        state->real_value = complex_vectorcall(
+            (PyObject *)&PyComplex_Type,
+            arguments,
+            1,
+            NULL
+        );
+        if (state->real_value == NULL) {
+            return NULL;
+        }
+    }
+
+    state->phase = COMPLEX_TWO_WAIT_IMAG;
+    PyObject *zero = PyLong_FromLong(0);
+    if (zero == NULL) {
+        return NULL;
+    }
+    PyObject *arguments[2] = {zero, state->imag_argument};
+    PyObject *imaginary = complex_vectorcall(
+        (PyObject *)&PyComplex_Type,
+        arguments,
+        2,
+        NULL
+    );
+    Py_DECREF(zero);
+    if (imaginary == NULL) {
+        return NULL;
+    }
+    PyObject *result = complex_two_finish(state, imaginary);
+    Py_DECREF(imaginary);
+    return result;
+}
+
+static PyObject *complex_two_resume(const void *raw_state, PyObject *value);
+
+static const AleffAdapterVTable complex_two_vtable = {
+    .copy_state = complex_two_copy_state,
+    .free_state = complex_two_free_state,
+    .resume = complex_two_resume,
+};
+
+static PyObject *
+complex_two_resume(const void *raw_state, PyObject *value)
+{
+    if (value == NULL) {
+        return NULL;
+    }
+    ComplexTwoState *state = complex_two_copy_state(raw_state);
+    if (state == NULL) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &complex_two_vtable, state) < 0) {
+        complex_two_free_state(state);
+        return NULL;
+    }
+    PyObject *result = complex_two_continue(state, value, 1);
+    adapter_leave(&frame);
+    complex_two_free_state(state);
+    return result;
+}
+
+static int
+complex_two_arguments(
+    PyObject *const *args,
+    size_t nargsf,
+    PyObject *kwnames,
+    PyObject **real,
+    PyObject **imag
+)
+{
+    Py_ssize_t positional = PyVectorcall_NARGS(nargsf);
+    if (positional > 2) {
+        return 0;
+    }
+    *real = positional >= 1 ? args[0] : NULL;
+    *imag = positional >= 2 ? args[1] : NULL;
+    Py_ssize_t keyword_count = kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
+    for (Py_ssize_t index = 0; index < keyword_count; index++) {
+        PyObject *name = PyTuple_GET_ITEM(kwnames, index);
+        PyObject *argument = args[positional + index];
+        if (PyUnicode_CompareWithASCIIString(name, "real") == 0 && *real == NULL) {
+            *real = argument;
+        }
+        else if (PyUnicode_CompareWithASCIIString(name, "imag") == 0 && *imag == NULL) {
+            *imag = argument;
+        }
+        else {
+            return 0;
+        }
+    }
+    return *real != NULL && *imag != NULL;
+}
+
+static PyObject *
+adapter_complex_two(
+    PyObject *real,
+    PyObject *imag
+)
+{
+    ComplexTwoState state = {
+        .real_argument = real,
+        .imag_argument = imag,
+        .real_value = NULL,
+        .real_kind = PROTOCOL_COMPLEX,
+        .imag_kind = PROTOCOL_COMPLEX_FLOAT,
+        .phase = COMPLEX_TWO_WAIT_REAL,
+    };
+    if (protocol_kind_for_object(
+            real,
+            "__complex__",
+            "__float__",
+            "__index__",
+            PROTOCOL_COMPLEX,
+            PROTOCOL_COMPLEX_FLOAT,
+            PROTOCOL_COMPLEX_INDEX,
+            &state.real_kind
+        ) < 0 || protocol_kind_for_object(
+            imag,
+            "__float__",
+            "__index__",
+            NULL,
+            PROTOCOL_COMPLEX_FLOAT,
+            PROTOCOL_COMPLEX_INDEX,
+            PROTOCOL_COMPLEX_FLOAT,
+            &state.imag_kind
+        ) < 0) {
+        return NULL;
+    }
+    AleffAdapterFrame frame;
+    if (adapter_enter(&frame, &complex_two_vtable, &state) < 0) {
+        return NULL;
+    }
+    PyObject *result = complex_two_continue(&state, NULL, 0);
+    adapter_leave(&frame);
+    Py_XDECREF(state.real_value);
+    return result;
+}
+
 static PyObject *
 adapter_core_type_vectorcall(
     PyObject *callable,
@@ -426,6 +699,37 @@ adapter_core_type_vectorcall(
     PyObject *kwnames
 )
 {
+    if (callable == (PyObject *)&PyComplex_Type) {
+        PyObject *real;
+        PyObject *imaginary;
+        if (complex_two_arguments(
+                args, nargsf, kwnames, &real, &imaginary
+            )) {
+            int real_python = protocol_type_has_python_method(
+                real, "__complex__"
+            );
+            if (real_python == 0) {
+                real_python = protocol_type_has_python_method(real, "__float__");
+            }
+            int imaginary_python = protocol_type_has_python_method(
+                imaginary, "__float__"
+            );
+            if (imaginary_python == 0) {
+                imaginary_python = protocol_type_has_python_method(
+                    imaginary, "__index__"
+                );
+            }
+            if (real_python < 0 || imaginary_python < 0) {
+                return NULL;
+            }
+            if ((real_python || imaginary_python) &&
+                !PyUnicode_Check(real) &&
+                !PyBytes_Check(real) &&
+                !PyByteArray_Check(real)) {
+                return adapter_complex_two(real, imaginary);
+            }
+        }
+    }
     vectorcallfunc original = NULL;
     ProtocolResumeKind kind = PROTOCOL_INT;
     if (callable == (PyObject *)&PyBool_Type) {

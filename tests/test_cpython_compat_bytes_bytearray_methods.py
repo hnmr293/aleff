@@ -47,6 +47,26 @@ record("receiver", lambda: (separator.join([b"a", b"b"]), separator))
     )
 
 
+def test_bytes_join_exact_list_input_matches_cpython() -> None:
+    assert_cpython_compatible(
+        r"""
+items = [b"a", bytearray(b"b"), memoryview(b"c")]
+result = b"|".join(items)
+print(type(items).__name__, type(result).__name__, repr(result))
+"""
+    )
+
+
+def test_bytes_join_exact_tuple_input_matches_cpython() -> None:
+    assert_cpython_compatible(
+        r"""
+items = (b"a", bytearray(b"b"), memoryview(b"c"))
+result = b"|".join(items)
+print(type(items).__name__, type(result).__name__, repr(result))
+"""
+    )
+
+
 def test_bytes_join_rejects_invalid_and_noncontiguous_items() -> None:
     assert_cpython_compatible(
         r"""
@@ -112,6 +132,20 @@ record("empty", lambda: separator.join(()))
 record("single", lambda: separator.join((memoryview(b"x"),)))
 record("generator", lambda: separator.join(item for item in (b"a", b"b")))
 record("receiver", lambda: (separator.join([b"a", b"b"]), separator))
+"""
+    )
+
+
+def test_bytearray_join_exact_list_and_tuple_inputs_match_cpython() -> None:
+    assert_cpython_compatible(
+        r"""
+separator = bytearray(b"|")
+for name, items in (
+    ("list", [b"a", bytearray(b"b"), memoryview(b"c")]),
+    ("tuple", (b"a", bytearray(b"b"), memoryview(b"c"))),
+):
+    result = separator.join(items)
+    print(name, type(items).__name__, type(result).__name__, repr(result), separator)
 """
     )
 
@@ -257,7 +291,7 @@ def test_effectful_bytes_decode_preserves_embedded_nul_in_replacement() -> None:
         codecs.register_error("compat_22_nul_bytes", lambda exc: (choose(), exc.end))
         return b"a\xffb".decode("ascii", "compat_22_nul_bytes")
 
-    assert _effect_outcomes(nul_bytes, ("X", "A\x00B")) == ["aXb", "aA\x00B"]
+    assert _effect_outcomes(nul_bytes, ("X", "A\x00B")) == ["aXb", "aA\x00Bb"]
 
 
 def test_effectful_bytearray_decode_uses_utf8_byte_length_for_replacement() -> None:

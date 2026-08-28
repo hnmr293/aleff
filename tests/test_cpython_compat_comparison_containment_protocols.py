@@ -351,4 +351,4 @@ def test_dictionary_containment_resumes_equality_without_restarting_lookup() -> 
         return dict.__contains__({Key(): None}, Key())
 
     assert _resume_outcomes(run, (True, False)) == [True, False]
-    assert calls == 2
+    assert calls == 1

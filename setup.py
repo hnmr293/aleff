@@ -31,9 +31,11 @@ setup(
             sources=[
                 "src/aleff/_multishot/v1/_aleff.c",
                 "src/aleff/_multishot/v1/adapters/framework.c",
+                "src/aleff/_multishot/v1/adapters/sort_engine.c",
             ],
             depends=[
                 "src/aleff/_multishot/v1/adapters/api.h",
+                "src/aleff/_multishot/v1/adapters/sort_engine.h",
                 "src/aleff/_multishot/v1/adapters/builtins.c",
                 "src/aleff/_multishot/v1/adapters/protocols.c",
                 "src/aleff/_multishot/v1/adapters/containers.c",

@@ -138,6 +138,54 @@ report("comparator_error", lambda: failing_factory(1) < failing_factory(2))
     )
 
 
+def test_cmp_to_key_uses_public_native_objects() -> None:
+    assert_cpython_compatible(
+        """\
+import copy
+import functools
+import _functools
+import pickle
+
+factory = functools.cmp_to_key(lambda left, right: (left > right) - (left < right))
+wrapped = factory(1)
+native_factory = _functools.cmp_to_key(lambda left, right: (left > right) - (left < right))
+native_wrapped = native_factory(1)
+print("public_identity", functools.cmp_to_key is _functools.cmp_to_key)
+print("factory", type(factory).__module__, type(factory).__name__)
+print("wrapped", type(wrapped).__module__, type(wrapped).__name__)
+print("native_types", type(factory) is type(native_factory), type(wrapped) is type(native_wrapped))
+
+def shape(value):
+    return (
+        type(value).__module__,
+        type(value).__name__,
+        repr(value).split(" object at ", 1)[0],
+        getattr(value, "obj", "missing"),
+    )
+
+print("wrapped_shape", shape(wrapped))
+for label, operation in (
+    ("copy", lambda: copy.copy(wrapped)),
+    ("deepcopy", lambda: copy.deepcopy(wrapped)),
+    ("pickle", lambda: pickle.loads(pickle.dumps(wrapped, protocol=4))),
+):
+    try:
+        copied = operation()
+    except BaseException as exc:
+        print(label, "raise", type(exc).__name__, str(exc))
+    else:
+        print(label, "return", shape(copied))
+
+try:
+    wrapped.obj = 2
+except BaseException as exc:
+    print("obj_assignment", type(exc).__name__, str(exc))
+else:
+    print("obj_assignment", "succeeded")
+"""
+    )
+
+
 def test_functools_metadata_matches_cpython() -> None:
     assert_cpython_compatible(
         """\
@@ -160,7 +208,16 @@ for name in ("reduce", "cmp_to_key", "lru_cache"):
     first_line = None if doc is None else doc.splitlines()[0]
     module = function.__module__
     module_shape = (type(module).__name__, getattr(module, "__name__", module))
-    print(name, function.__name__, module_shape, doc is not None, first_line, signature_shape(function))
+    print(
+        name,
+        function.__name__,
+        module_shape,
+        doc is not None,
+        first_line,
+        repr(doc),
+        getattr(function, "__text_signature__", None),
+        signature_shape(function),
+    )
 """
     )
 

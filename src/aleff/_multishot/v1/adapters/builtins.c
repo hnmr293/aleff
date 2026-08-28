@@ -59,6 +59,23 @@ static const AleffAdapterVTable next_vtable = {
 static PyObject *
 adapter_next(PyObject *Py_UNUSED(self), PyObject *args)
 {
+    Py_ssize_t argument_count = PyTuple_GET_SIZE(args);
+    if (argument_count < 1) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "next expected at least 1 argument, got %zd",
+            argument_count
+        );
+        return NULL;
+    }
+    if (argument_count > 2) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "next expected at most 2 arguments, got %zd",
+            argument_count
+        );
+        return NULL;
+    }
     PyObject *iterator;
     PyObject *default_value = NULL;
     if (!PyArg_ParseTuple(args, "O|O:next", &iterator, &default_value)) {
@@ -67,7 +84,7 @@ adapter_next(PyObject *Py_UNUSED(self), PyObject *args)
     if (!PyIter_Check(iterator)) {
         PyErr_Format(
             PyExc_TypeError,
-            "'%s' object is not an iterator",
+            "'%.200s' object is not an iterator",
             Py_TYPE(iterator)->tp_name
         );
         return NULL;
@@ -747,6 +764,23 @@ anext_awaitable_new(PyObject *awaitable, PyObject *default_value)
 static PyObject *
 adapter_anext(PyObject *Py_UNUSED(self), PyObject *args)
 {
+    Py_ssize_t argument_count = PyTuple_GET_SIZE(args);
+    if (argument_count < 1) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "anext expected at least 1 argument, got %zd",
+            argument_count
+        );
+        return NULL;
+    }
+    if (argument_count > 2) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "anext expected at most 2 arguments, got %zd",
+            argument_count
+        );
+        return NULL;
+    }
     PyObject *iterator;
     PyObject *default_value = NULL;
     if (!PyArg_ParseTuple(args, "O|O:anext", &iterator, &default_value)) {
@@ -755,6 +789,9 @@ adapter_anext(PyObject *Py_UNUSED(self), PyObject *args)
     PyObject *awaitable = PyObject_Call(original_anext, args, NULL);
     if (awaitable == NULL) {
         return NULL;
+    }
+    if (default_value == NULL) {
+        return awaitable;
     }
     PyObject *result = anext_awaitable_new(awaitable, default_value);
     Py_DECREF(awaitable);
@@ -773,31 +810,25 @@ input_normalize_line(PyObject *line)
             return NULL;
         }
         if (length == 0) {
-            PyErr_SetNone(PyExc_EOFError);
+            PyErr_SetString(PyExc_EOFError, "EOF when reading a line");
             return NULL;
         }
         Py_ssize_t end = length;
         if (PyUnicode_ReadChar(line, end - 1) == '\n') {
             end--;
-            if (end > 0 && PyUnicode_ReadChar(line, end - 1) == '\r') {
-                end--;
-            }
         }
         return PyUnicode_Substring(line, 0, end);
     }
     if (PyBytes_Check(line)) {
         Py_ssize_t length = PyBytes_GET_SIZE(line);
         if (length == 0) {
-            PyErr_SetNone(PyExc_EOFError);
+            PyErr_SetString(PyExc_EOFError, "EOF when reading a line");
             return NULL;
         }
         const char *data = PyBytes_AS_STRING(line);
         Py_ssize_t end = length;
         if (data[end - 1] == '\n') {
             end--;
-            if (end > 0 && data[end - 1] == '\r') {
-                end--;
-            }
         }
         return PyBytes_FromStringAndSize(data, end);
     }
@@ -817,6 +848,7 @@ typedef enum {
 typedef struct {
     InputPhase phase;
     PyObject *stdin_object;
+    PyObject *stdout_object;
 } InputState;
 
 static void *
@@ -830,6 +862,7 @@ input_copy_state(const void *raw_state)
     }
     *copy = *state;
     copy->stdin_object = Py_NewRef(state->stdin_object);
+    copy->stdout_object = Py_NewRef(state->stdout_object);
     return copy;
 }
 
@@ -839,6 +872,7 @@ input_free_state(void *state)
     InputState *input_state = state;
     if (input_state != NULL) {
         Py_DECREF(input_state->stdin_object);
+        Py_DECREF(input_state->stdout_object);
         PyMem_Free(input_state);
     }
 }
@@ -849,31 +883,25 @@ static PyObject *
 input_read_line(InputState *state)
 {
     state->phase = INPUT_WAIT_LINE;
-    PyObject *empty = PyTuple_New(0);
-    if (empty == NULL) {
+    PyObject *line = PyObject_CallMethod(state->stdin_object, "readline", NULL);
+    if (line == NULL) {
         return NULL;
     }
-    PyObject *current_stdin = PySys_GetObject("stdin");
-    Py_XINCREF(current_stdin);
-    if (PySys_SetObject("stdin", state->stdin_object) < 0) {
-        Py_DECREF(empty);
-        Py_XDECREF(current_stdin);
-        return NULL;
+    PyObject *result = input_normalize_line(line);
+    Py_DECREF(line);
+    return result;
+}
+
+static void
+input_flush_ignoring_errors(PyObject *stream)
+{
+    PyObject *result = PyObject_CallMethod(stream, "flush", NULL);
+    if (result == NULL) {
+        PyErr_Clear();
     }
-    PyObject *line = PyObject_Call(original_input, empty, NULL);
-    PyObject *exception = line == NULL ? PyErr_GetRaisedException() : NULL;
-    int restored = PySys_SetObject("stdin", current_stdin);
-    Py_XDECREF(current_stdin);
-    Py_DECREF(empty);
-    if (restored < 0) {
-        Py_XDECREF(line);
-        Py_XDECREF(exception);
-        return NULL;
+    else {
+        Py_DECREF(result);
     }
-    if (exception != NULL) {
-        PyErr_SetRaisedException(exception);
-    }
-    return line;
 }
 
 static PyObject *
@@ -892,8 +920,10 @@ input_resume(const void *raw_state, PyObject *value)
     }
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &input_vtable, state) < 0) {
+        input_free_state(state);
         return NULL;
     }
+    input_flush_ignoring_errors(state->stdout_object);
     PyObject *result = input_read_line(state);
     adapter_leave(&frame);
     input_free_state(state);
@@ -913,37 +943,41 @@ adapter_input(PyObject *Py_UNUSED(self), PyObject *args)
     if (count > 1) {
         return PyObject_Call(original_input, args, NULL);
     }
-    InputState state = {
-        .phase = count == 0 ? INPUT_WAIT_LINE : INPUT_WAIT_PROMPT,
-        .stdin_object = PySys_GetObject("stdin"),
-    };
-    if (state.stdin_object == NULL) {
+    PyObject *stdin_object = PySys_GetObject("stdin");
+    PyObject *stdout_object = PySys_GetObject("stdout");
+    PyObject *stderr_object = PySys_GetObject("stderr");
+    if (stdin_object == NULL || stdin_object == Py_None) {
         PyErr_SetString(PyExc_RuntimeError, "lost sys.stdin");
         return NULL;
     }
+    if (stdout_object == NULL || stdout_object == Py_None) {
+        PyErr_SetString(PyExc_RuntimeError, "lost sys.stdout");
+        return NULL;
+    }
+    if (stderr_object == NULL || stderr_object == Py_None) {
+        PyErr_SetString(PyExc_RuntimeError, "lost sys.stderr");
+        return NULL;
+    }
+    PyObject *prompt = count == 0 ? Py_None : PyTuple_GET_ITEM(args, 0);
+    if (PySys_Audit("builtins.input", "(O)", prompt) < 0) {
+        return NULL;
+    }
+    input_flush_ignoring_errors(stderr_object);
+    InputState state = {
+        .phase = count == 0 ? INPUT_WAIT_LINE : INPUT_WAIT_PROMPT,
+        .stdin_object = stdin_object,
+        .stdout_object = stdout_object,
+    };
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &input_vtable, &state) < 0) {
         return NULL;
     }
     PyObject *result = NULL;
     if (count == 1) {
-        PyObject *prompt_args = PyTuple_Pack(1, PyTuple_GET_ITEM(args, 0));
-        PyObject *prompt_kwargs = Py_BuildValue(
-            "{s:s,s:O}",
-            "end",
-            "",
-            "flush",
-            Py_True
-        );
-        if (prompt_args != NULL && prompt_kwargs != NULL) {
-            PyObject *printed = adapter_print(NULL, prompt_args, prompt_kwargs);
-            if (printed != NULL) {
-                Py_DECREF(printed);
-                result = input_read_line(&state);
-            }
+        if (PyFile_WriteObject(prompt, stdout_object, Py_PRINT_RAW) == 0) {
+            input_flush_ignoring_errors(stdout_object);
+            result = input_read_line(&state);
         }
-        Py_XDECREF(prompt_args);
-        Py_XDECREF(prompt_kwargs);
     }
     else {
         result = input_read_line(&state);
@@ -1072,10 +1106,13 @@ open_resume(const void *raw_state, PyObject *value)
     if (state->phase == OPEN_WAIT_PATH) {
         return open_with_path(state, value);
     }
-    if (PyLong_Check(value)) {
-        return open_with_file_descriptor(state, value);
+    PyObject *descriptor = PyNumber_Index(value);
+    if (descriptor == NULL) {
+        return NULL;
     }
-    return Py_NewRef(value);
+    PyObject *result = open_with_file_descriptor(state, descriptor);
+    Py_DECREF(descriptor);
+    return result;
 }
 
 static const AleffAdapterVTable open_vtable = {
@@ -1101,7 +1138,7 @@ adapter_open(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
         return NULL;
     }
     PyObject *result;
-    if (PyLong_Check(file)) {
+    if (PyIndex_Check(file)) {
         state.phase = OPEN_WAIT_OPEN;
         result = PyObject_Call(original_open, args, kwargs);
     }
@@ -1119,6 +1156,10 @@ typedef struct {
     PyObject *name;
     PyObject *module;
     PyObject *spec;
+    PyObject *parent_name;
+    PyObject *parent_module;
+    PyObject *parent_spec;
+    PyObject *parent_submodules;
     int spec_initializing;
     int module_lock_held;
     int global_lock_held;
@@ -1164,6 +1205,10 @@ import_copy_state(const void *raw_state)
     }
     copy->module = Py_XNewRef(module);
     copy->spec = NULL;
+    copy->parent_name = NULL;
+    copy->parent_module = NULL;
+    copy->parent_spec = NULL;
+    copy->parent_submodules = NULL;
     copy->spec_initializing = 0;
     if (module != NULL) {
         copy->spec = PyObject_GetAttrString(module, "__spec__");
@@ -1197,6 +1242,69 @@ import_copy_state(const void *raw_state)
             return NULL;
         }
     }
+    PyObject *parts = PyObject_CallMethod(state->name, "rpartition", "s", ".");
+    if (parts == NULL) {
+        Py_DECREF(copy->module_lock);
+        Py_DECREF(copy->name);
+        Py_XDECREF(copy->module);
+        Py_XDECREF(copy->spec);
+        PyMem_Free(copy);
+        return NULL;
+    }
+    PyObject *parent_name = PyTuple_GET_ITEM(parts, 0);
+    if (PyUnicode_GetLength(parent_name) > 0) {
+        PyObject *parent = PyDict_GetItemWithError(modules, parent_name);
+        if (parent == NULL && PyErr_Occurred()) {
+            Py_DECREF(parts);
+            Py_DECREF(copy->module_lock);
+            Py_DECREF(copy->name);
+            Py_XDECREF(copy->module);
+            Py_XDECREF(copy->spec);
+            PyMem_Free(copy);
+            return NULL;
+        }
+        if (parent != NULL) {
+            copy->parent_name = Py_NewRef(parent_name);
+            copy->parent_module = Py_NewRef(parent);
+            copy->parent_spec = PyObject_GetAttrString(parent, "__spec__");
+            if (copy->parent_spec == NULL) {
+                Py_DECREF(parts);
+                Py_DECREF(copy->module_lock);
+                Py_DECREF(copy->name);
+                Py_XDECREF(copy->module);
+                Py_XDECREF(copy->spec);
+                PyMem_Free(copy);
+                return NULL;
+            }
+            PyObject *submodules = PyObject_GetAttrString(
+                copy->parent_spec,
+                "_uninitialized_submodules"
+            );
+            if (submodules == NULL) {
+                Py_DECREF(parts);
+                Py_DECREF(copy->module_lock);
+                Py_DECREF(copy->name);
+                Py_XDECREF(copy->module);
+                Py_XDECREF(copy->spec);
+                Py_DECREF(copy->parent_spec);
+                PyMem_Free(copy);
+                return NULL;
+            }
+            copy->parent_submodules = PySequence_List(submodules);
+            Py_DECREF(submodules);
+            if (copy->parent_submodules == NULL) {
+                Py_DECREF(parts);
+                Py_DECREF(copy->module_lock);
+                Py_DECREF(copy->name);
+                Py_XDECREF(copy->module);
+                Py_XDECREF(copy->spec);
+                Py_DECREF(copy->parent_spec);
+                PyMem_Free(copy);
+                return NULL;
+            }
+        }
+    }
+    Py_DECREF(parts);
     copy->module_lock_held = import_module_lock_is_held(state->module_lock);
     if (copy->module_lock_held < 0) {
         Py_DECREF(copy->module_lock);
@@ -1239,6 +1347,10 @@ import_free_state(void *raw_state)
     Py_DECREF(state->name);
     Py_XDECREF(state->module);
     Py_XDECREF(state->spec);
+    Py_XDECREF(state->parent_name);
+    Py_XDECREF(state->parent_module);
+    Py_XDECREF(state->parent_spec);
+    Py_XDECREF(state->parent_submodules);
     PyMem_Free(state);
 }
 
@@ -1252,11 +1364,18 @@ import_prepare_resume(void *raw_state)
             return -1;
         }
     }
-    else if (PyDict_DelItem(modules, state->name) < 0) {
-        if (!PyErr_ExceptionMatches(PyExc_KeyError)) {
+    else {
+        if (PyDict_DelItem(modules, state->name) < 0) {
+            if (!PyErr_ExceptionMatches(PyExc_KeyError)) {
+                return -1;
+            }
+            PyErr_Clear();
+        }
+    }
+    if (state->parent_name != NULL && state->parent_module != NULL) {
+        if (PyDict_SetItem(modules, state->parent_name, state->parent_module) < 0) {
             return -1;
         }
-        PyErr_Clear();
     }
     if (state->spec != NULL) {
         if (
@@ -1266,6 +1385,30 @@ import_prepare_resume(void *raw_state)
                 state->spec_initializing ? Py_True : Py_False
             ) < 0
         ) {
+            return -1;
+        }
+    }
+    if (state->parent_spec != NULL && state->parent_submodules != NULL) {
+        PyObject *submodules = PyObject_GetAttrString(
+            state->parent_spec,
+            "_uninitialized_submodules"
+        );
+        if (submodules == NULL) {
+            return -1;
+        }
+        if (!PyList_Check(submodules) || !PyList_Check(state->parent_submodules)) {
+            Py_DECREF(submodules);
+            PyErr_SetString(PyExc_RuntimeError, "invalid package import state");
+            return -1;
+        }
+        int result = PyList_SetSlice(
+            submodules,
+            0,
+            PyList_GET_SIZE(submodules),
+            state->parent_submodules
+        );
+        Py_DECREF(submodules);
+        if (result < 0) {
             return -1;
         }
     }
@@ -1330,6 +1473,10 @@ adapter_import(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
         .name = name,
         .module = NULL,
         .spec = NULL,
+        .parent_name = NULL,
+        .parent_module = NULL,
+        .parent_spec = NULL,
+        .parent_submodules = NULL,
         .spec_initializing = 0,
         .module_lock_held = 0,
         .global_lock_held = 0,
@@ -1399,6 +1546,56 @@ print_free_state(void *raw_state)
 
 static PyObject *print_continue(PrintState *state, PyObject *value, int resuming);
 
+static int
+print_prepare_options(PrintState *state)
+{
+    if (state->separator != Py_None && !PyUnicode_Check(state->separator)) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "sep must be None or a string, not %.200s",
+            Py_TYPE(state->separator)->tp_name
+        );
+        return -1;
+    }
+    if (state->end != Py_None && !PyUnicode_Check(state->end)) {
+        PyErr_Format(
+            PyExc_TypeError,
+            "end must be None or a string, not %.200s",
+            Py_TYPE(state->end)->tp_name
+        );
+        return -1;
+    }
+    if (state->separator == Py_None) {
+        PyObject *separator = PyUnicode_FromString(" ");
+        if (separator == NULL) {
+            return -1;
+        }
+        Py_SETREF(state->separator, separator);
+    }
+    else if (!PyUnicode_CheckExact(state->separator)) {
+        PyObject *separator = PyObject_Str(state->separator);
+        if (separator == NULL) {
+            return -1;
+        }
+        Py_SETREF(state->separator, separator);
+    }
+    if (state->end == Py_None) {
+        PyObject *end = PyUnicode_FromString("\n");
+        if (end == NULL) {
+            return -1;
+        }
+        Py_SETREF(state->end, end);
+    }
+    else if (!PyUnicode_CheckExact(state->end)) {
+        PyObject *end = PyObject_Str(state->end);
+        if (end == NULL) {
+            return -1;
+        }
+        Py_SETREF(state->end, end);
+    }
+    return 0;
+}
+
 static PyObject *
 print_write(PrintState *state, PyObject *text, PrintPhase phase)
 {
@@ -1444,6 +1641,9 @@ print_continue(PrintState *state, PyObject *value, int resuming)
                     return NULL;
                 }
                 state->flush = truth;
+                if (print_prepare_options(state) < 0) {
+                    return NULL;
+                }
                 return print_next_argument(state);
             }
             case PRINT_WAIT_SEPARATOR:
@@ -1553,57 +1753,30 @@ adapter_print(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
                 flush_object = item;
             }
             else {
-                PyErr_Format(PyExc_TypeError, "'%.200s' is an invalid keyword argument for print()", name);
+                PyErr_Format(
+                    PyExc_TypeError,
+#if PY_VERSION_HEX < 0x030d0000
+                    "'%.200s' is an invalid keyword argument for print()",
+#else
+                    "print() got an unexpected keyword argument '%.200s'",
+#endif
+                    name
+                );
                 return NULL;
             }
         }
     }
-    if (separator != Py_None && !PyUnicode_Check(separator)) {
-        PyErr_Format(
-            PyExc_TypeError,
-            "sep must be None or a string, not %.200s",
-            Py_TYPE(separator)->tp_name
-        );
-        return NULL;
-    }
-    if (end != Py_None && !PyUnicode_Check(end)) {
-        PyErr_Format(
-            PyExc_TypeError,
-            "end must be None or a string, not %.200s",
-            Py_TYPE(end)->tp_name
-        );
-        return NULL;
-    }
-    PyObject *default_separator = NULL;
-    PyObject *default_end = NULL;
-    if (separator == Py_None) {
-        default_separator = PyUnicode_FromString(" ");
-        if (default_separator == NULL) {
-            return NULL;
-        }
-        separator = default_separator;
-    }
-    if (end == Py_None) {
-        default_end = PyUnicode_FromString("\n");
-        if (default_end == NULL) {
-            Py_XDECREF(default_separator);
-            return NULL;
-        }
-        end = default_end;
-    }
     if (file == Py_None) {
         file = PySys_GetObject("stdout");
         if (file == NULL || file == Py_None) {
-            Py_XDECREF(default_separator);
-            Py_XDECREF(default_end);
             return Py_NewRef(Py_None);
         }
     }
     PrintState state = {
-        .args = args,
-        .file = file,
-        .separator = separator,
-        .end = end,
+        .args = Py_NewRef(args),
+        .file = Py_NewRef(file),
+        .separator = Py_NewRef(separator),
+        .end = Py_NewRef(end),
         .text = NULL,
         .index = 0,
         .flush = 0,
@@ -1611,18 +1784,26 @@ adapter_print(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
     };
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &print_vtable, &state) < 0) {
+        Py_DECREF(state.args);
+        Py_DECREF(state.file);
+        Py_DECREF(state.separator);
+        Py_DECREF(state.end);
         return NULL;
     }
     int flush = PyObject_IsTrue(flush_object);
     PyObject *result = NULL;
     if (flush >= 0) {
         state.flush = flush;
-        result = print_next_argument(&state);
+        if (print_prepare_options(&state) == 0) {
+            result = print_next_argument(&state);
+        }
     }
     adapter_leave(&frame);
+    Py_DECREF(state.args);
+    Py_DECREF(state.file);
+    Py_DECREF(state.separator);
+    Py_DECREF(state.end);
     Py_XDECREF(state.text);
-    Py_XDECREF(default_separator);
-    Py_XDECREF(default_end);
     return result;
 }
 
@@ -1640,10 +1821,15 @@ typedef struct {
     PyObject *namespace;
     PyObject *owner;
     PyObject *current_name;
+    PyObject *classcell;
+    int is_type_call;
+    int shadowed_by_type_call;
     TypeConstructionPhase phase;
 } TypeConstructionState;
 
 static PyObject *original_build_class = NULL;
+static PyObject *type_construction_copy_namespace(PyObject *source);
+static int type_construction_prepare_resume(void *raw_state);
 
 static int
 type_construction_capture_frame(TypeConstructionState *state)
@@ -1665,7 +1851,52 @@ type_construction_capture_frame(TypeConstructionState *state)
             PyUnicode_CompareWithASCIIString(name, "__set_name__") == 0;
         int is_init_subclass = PyUnicode_Check(name) &&
             PyUnicode_CompareWithASCIIString(name, "__init_subclass__") == 0;
+        int is_prepare = PyUnicode_Check(name) &&
+            PyUnicode_CompareWithASCIIString(name, "__prepare__") == 0;
         Py_DECREF(name);
+        if (is_prepare) {
+            Py_DECREF(code);
+            Py_DECREF(frame);
+            return 0;
+        }
+        if (
+            (is_set_name || is_init_subclass) &&
+            !state->is_type_call && state->shadowed_by_type_call
+        ) {
+            Py_DECREF(code);
+            Py_DECREF(frame);
+            return 0;
+        }
+        if (state->is_type_call && !is_set_name && !is_init_subclass) {
+            PyObject *varnames = PyCode_GetVarnames(code);
+            PyObject *locals = PyFrame_GetLocals(frame);
+            if (varnames == NULL || locals == NULL) {
+                Py_XDECREF(varnames);
+                Py_XDECREF(locals);
+                Py_DECREF(code);
+                Py_DECREF(frame);
+                return -1;
+            }
+            if (PyTuple_GET_SIZE(varnames) > 2) {
+                PyObject *owner_name = PyTuple_GET_ITEM(varnames, 1);
+                PyObject *current_name_name = PyTuple_GET_ITEM(varnames, 2);
+                if (
+                    PyUnicode_Check(owner_name) &&
+                    PyUnicode_CompareWithASCIIString(owner_name, "owner") == 0 &&
+                    PyUnicode_Check(current_name_name) &&
+                    PyUnicode_CompareWithASCIIString(current_name_name, "name") == 0
+                ) {
+                    PyObject *owner = PyObject_GetItem(locals, owner_name);
+                    if (owner != NULL && PyType_Check(owner)) {
+                        is_set_name = 1;
+                    }
+                    Py_XDECREF(owner);
+                    PyErr_Clear();
+                }
+            }
+            Py_DECREF(locals);
+            Py_DECREF(varnames);
+        }
         if (is_set_name || is_init_subclass) {
             PyObject *varnames = PyCode_GetVarnames(code);
             PyObject *locals = PyFrame_GetLocals(frame);
@@ -1683,6 +1914,19 @@ type_construction_capture_frame(TypeConstructionState *state)
                 if (owner != NULL && PyType_Check(owner)) {
                     Py_XSETREF(state->owner, owner);
                     owner = NULL;
+                    PyObject *owner_dictionary = PyType_GetDict(
+                        (PyTypeObject *)state->owner
+                    );
+                    PyObject *namespace_snapshot =
+                        type_construction_copy_namespace(owner_dictionary);
+                    if (namespace_snapshot == NULL) {
+                        Py_DECREF(locals);
+                        Py_DECREF(varnames);
+                        Py_DECREF(code);
+                        Py_DECREF(frame);
+                        return -1;
+                    }
+                    Py_XSETREF(state->namespace, namespace_snapshot);
                     state->phase = is_set_name
                         ? TYPE_CONSTRUCTION_SET_NAME
                         : TYPE_CONSTRUCTION_INIT_SUBCLASS;
@@ -1746,6 +1990,8 @@ type_construction_copy_state(const void *raw_state)
     copy->namespace = Py_XNewRef(state->namespace);
     copy->owner = Py_XNewRef(state->owner);
     copy->current_name = Py_XNewRef(state->current_name);
+    copy->classcell = Py_XNewRef(state->classcell);
+    copy->is_type_call = state->is_type_call;
     if (type_construction_capture_frame(copy) < 0) {
         Py_XDECREF(copy->build_args);
         Py_XDECREF(copy->build_kwargs);
@@ -1753,6 +1999,7 @@ type_construction_copy_state(const void *raw_state)
         Py_XDECREF(copy->namespace);
         Py_XDECREF(copy->owner);
         Py_XDECREF(copy->current_name);
+        Py_XDECREF(copy->classcell);
         PyMem_Free(copy);
         return NULL;
     }
@@ -1772,6 +2019,7 @@ type_construction_free_state(void *raw_state)
     Py_XDECREF(state->namespace);
     Py_XDECREF(state->owner);
     Py_XDECREF(state->current_name);
+    Py_XDECREF(state->classcell);
     PyMem_Free(state);
 }
 
@@ -1781,7 +2029,29 @@ static const AleffAdapterVTable type_construction_vtable = {
     .copy_state = type_construction_copy_state,
     .free_state = type_construction_free_state,
     .resume = type_construction_resume,
+    .prepare_resume = type_construction_prepare_resume,
 };
+
+static TypeConstructionState *
+type_construction_shadow_outer_build_class(int *previous_value)
+{
+    for (AleffAdapterNode *node = active_adapter;
+         node != NULL;
+         node = node->previous) {
+        if (
+            node->vtable == &type_construction_vtable &&
+            node->state != NULL
+        ) {
+            TypeConstructionState *state = (TypeConstructionState *)node->state;
+            if (!state->is_type_call) {
+                *previous_value = state->shadowed_by_type_call;
+                state->shadowed_by_type_call = 1;
+                return state;
+            }
+        }
+    }
+    return NULL;
+}
 
 static PyObject *
 type_construction_init_subclass(TypeConstructionState *state)
@@ -1800,20 +2070,61 @@ type_construction_init_subclass(TypeConstructionState *state)
     if (method == NULL) {
         return NULL;
     }
-    PyObject *empty = PyTuple_New(0);
-    if (empty == NULL) {
+    PyObject *keywords = state->build_kwargs == NULL
+        ? PyDict_New()
+        : PyDict_Copy(state->build_kwargs);
+    if (keywords == NULL) {
         Py_DECREF(method);
         return NULL;
     }
+    if (PyDict_DelItemString(keywords, "metaclass") < 0) {
+        if (!PyErr_ExceptionMatches(PyExc_KeyError)) {
+            Py_DECREF(method);
+            Py_DECREF(keywords);
+            return NULL;
+        }
+        PyErr_Clear();
+    }
+    PyObject *empty = PyTuple_New(0);
+    if (empty == NULL) {
+        Py_DECREF(method);
+        Py_DECREF(keywords);
+        return NULL;
+    }
     state->phase = TYPE_CONSTRUCTION_INIT_SUBCLASS;
-    PyObject *result = PyObject_Call(method, empty, NULL);
+    PyObject *result = PyObject_Call(method, empty, keywords);
     Py_DECREF(empty);
+    Py_DECREF(keywords);
     Py_DECREF(method);
     if (result == NULL) {
         return NULL;
     }
     Py_DECREF(result);
     return Py_NewRef(state->owner);
+}
+
+static PyObject *
+type_construction_call_set_name(
+    PyObject *descriptor,
+    PyObject *owner,
+    PyObject *name
+)
+{
+    PyObject *set_name = lookup_raw_special(descriptor, "__set_name__");
+    if (set_name == NULL) {
+        return NULL;
+    }
+    descrgetfunc get = Py_TYPE(set_name)->tp_descr_get;
+    PyObject *callable = get == NULL
+        ? Py_NewRef(set_name)
+        : get(set_name, descriptor, (PyObject *)Py_TYPE(descriptor));
+    Py_DECREF(set_name);
+    if (callable == NULL) {
+        return NULL;
+    }
+    PyObject *result = PyObject_CallFunctionObjArgs(callable, owner, name, NULL);
+    Py_DECREF(callable);
+    return result;
 }
 
 static PyObject *
@@ -1865,10 +2176,8 @@ type_construction_continue_set_names(TypeConstructionState *state)
         Py_DECREF(set_name);
         Py_XSETREF(state->current_name, Py_NewRef(name));
         state->phase = TYPE_CONSTRUCTION_SET_NAME;
-        PyObject *called = PyObject_CallMethod(
+        PyObject *called = type_construction_call_set_name(
             descriptor,
-            "__set_name__",
-            "OO",
             state->owner,
             name
         );
@@ -1883,22 +2192,199 @@ type_construction_continue_set_names(TypeConstructionState *state)
 }
 
 static PyObject *
-type_construction_build_from_namespace(TypeConstructionState *state)
+type_construction_copy_namespace(PyObject *source)
+{
+    PyObject *namespace = PyDict_Copy(source);
+    if (namespace == NULL) {
+        return NULL;
+    }
+    PyObject *items = PyDict_Items(namespace);
+    if (items == NULL) {
+        Py_DECREF(namespace);
+        return NULL;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(items);
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *item = PyList_GET_ITEM(items, index);
+        PyObject *key = PyTuple_GET_ITEM(item, 0);
+        PyObject *value = PyTuple_GET_ITEM(item, 1);
+        PyObject *copy = NULL;
+        if (PyList_Check(value)) {
+            copy = PyList_GetSlice(value, 0, PyList_GET_SIZE(value));
+        }
+        else if (PyDict_Check(value)) {
+            copy = PyDict_Copy(value);
+        }
+        else if (PySet_Check(value)) {
+            copy = PySet_New(value);
+        }
+        if (copy == NULL && PyErr_Occurred()) {
+            Py_DECREF(items);
+            Py_DECREF(namespace);
+            return NULL;
+        }
+        if (copy != NULL) {
+            if (PyDict_SetItem(namespace, key, copy) < 0) {
+                Py_DECREF(copy);
+                Py_DECREF(items);
+                Py_DECREF(namespace);
+                return NULL;
+            }
+            Py_DECREF(copy);
+        }
+    }
+    Py_DECREF(items);
+    return namespace;
+}
+
+static int
+type_construction_prepare_resume(void *raw_state)
+{
+    TypeConstructionState *state = raw_state;
+    if (
+        state->owner == NULL || state->namespace == NULL ||
+        (state->phase != TYPE_CONSTRUCTION_SET_NAME &&
+         state->phase != TYPE_CONSTRUCTION_INIT_SUBCLASS)
+    ) {
+        return 0;
+    }
+    PyObject *items = PyDict_Items(state->namespace);
+    if (items == NULL) {
+        return -1;
+    }
+    Py_ssize_t count = PyList_GET_SIZE(items);
+    for (Py_ssize_t index = 0; index < count; index++) {
+        PyObject *item = PyList_GET_ITEM(items, index);
+        PyObject *name = PyTuple_GET_ITEM(item, 0);
+        PyObject *value = PyTuple_GET_ITEM(item, 1);
+        PyObject *copy = NULL;
+        if (PyList_Check(value)) {
+            copy = PyList_GetSlice(value, 0, PyList_GET_SIZE(value));
+        }
+        else if (PyDict_Check(value)) {
+            copy = PyDict_Copy(value);
+        }
+        else if (PySet_Check(value)) {
+            copy = PySet_New(value);
+        }
+        if (copy == NULL) {
+            if (PyErr_Occurred()) {
+                Py_DECREF(items);
+                return -1;
+            }
+            continue;
+        }
+        if (PyObject_SetAttr(state->owner, name, copy) < 0) {
+            Py_DECREF(copy);
+            Py_DECREF(items);
+            return -1;
+        }
+        Py_DECREF(copy);
+    }
+    Py_DECREF(items);
+    return 0;
+}
+
+static PyObject *
+type_construction_build_from_namespace(
+    TypeConstructionState *state,
+    PyObject *classcell
+)
 {
     Py_ssize_t count = PyTuple_GET_SIZE(state->build_args);
     if (count < 2 || state->namespace == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "incomplete __build_class__ adapter state");
         return NULL;
     }
-    PyObject *name = PyTuple_GET_ITEM(state->build_args, 1);
-    PyObject *bases = PyTuple_GetSlice(state->build_args, 2, count);
-    if (bases == NULL) {
+    if (classcell != NULL) {
+        Py_XSETREF(state->classcell, Py_NewRef(classcell));
+    }
+    PyObject *namespace = PyDict_Check(state->namespace)
+        ? type_construction_copy_namespace(state->namespace)
+        : Py_NewRef(state->namespace);
+    if (namespace == NULL) {
         return NULL;
     }
+    PyObject *name = PyTuple_GET_ITEM(state->build_args, 1);
+    PyObject *original_bases = PyTuple_GetSlice(state->build_args, 2, count);
+    if (original_bases == NULL) {
+        Py_DECREF(namespace);
+        return NULL;
+    }
+    PyObject *bases = PyTuple_New(0);
+    if (bases == NULL) {
+        Py_DECREF(namespace);
+        Py_DECREF(original_bases);
+        return NULL;
+    }
+    int has_original_bases = 0;
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(original_bases); index++) {
+        PyObject *base = PyTuple_GET_ITEM(original_bases, index);
+        if (PyType_Check(base)) {
+            PyObject *expanded = PyTuple_Pack(1, base);
+            if (expanded == NULL) {
+                Py_DECREF(namespace);
+                Py_DECREF(original_bases);
+                Py_DECREF(bases);
+                return NULL;
+            }
+            PyObject *joined = PySequence_Concat(bases, expanded);
+            Py_DECREF(expanded);
+            Py_DECREF(bases);
+            if (joined == NULL) {
+                Py_DECREF(namespace);
+                Py_DECREF(original_bases);
+                return NULL;
+            }
+            bases = joined;
+            continue;
+        }
+        PyObject *mro_entries = PyObject_GetAttrString(base, "__mro_entries__");
+        if (mro_entries == NULL) {
+            Py_DECREF(namespace);
+            Py_DECREF(original_bases);
+            Py_DECREF(bases);
+            return NULL;
+        }
+        PyObject *replacement = PyObject_CallOneArg(mro_entries, original_bases);
+        Py_DECREF(mro_entries);
+        if (replacement == NULL || !PyTuple_Check(replacement)) {
+            Py_XDECREF(replacement);
+            Py_DECREF(namespace);
+            Py_DECREF(original_bases);
+            Py_DECREF(bases);
+            if (!PyErr_Occurred()) {
+                PyErr_SetString(PyExc_TypeError, "__mro_entries__ must return a tuple");
+            }
+            return NULL;
+        }
+        PyObject *joined = PySequence_Concat(bases, replacement);
+        Py_DECREF(replacement);
+        Py_DECREF(bases);
+        if (joined == NULL) {
+            Py_DECREF(namespace);
+            Py_DECREF(original_bases);
+            return NULL;
+        }
+        bases = joined;
+        has_original_bases = 1;
+    }
+    if (has_original_bases && PyDict_SetItemString(
+            namespace,
+            "__orig_bases__",
+            original_bases
+        ) < 0) {
+        Py_DECREF(namespace);
+        Py_DECREF(original_bases);
+        Py_DECREF(bases);
+        return NULL;
+    }
+    Py_DECREF(original_bases);
     PyObject *keywords = state->build_kwargs == NULL
         ? PyDict_New()
         : PyDict_Copy(state->build_kwargs);
     if (keywords == NULL) {
+        Py_DECREF(namespace);
         Py_DECREF(bases);
         return NULL;
     }
@@ -1908,11 +2394,31 @@ type_construction_build_from_namespace(TypeConstructionState *state)
         PyErr_Clear();
     }
     if (metaclass == NULL) {
-        metaclass = PyTuple_GET_SIZE(bases) == 0
-            ? Py_NewRef((PyObject *)&PyType_Type)
-            : Py_NewRef((PyObject *)Py_TYPE(PyTuple_GET_ITEM(bases, 0)));
+        metaclass = Py_NewRef((PyObject *)&PyType_Type);
+        for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(bases); index++) {
+            PyObject *base = PyTuple_GET_ITEM(bases, index);
+            PyObject *candidate = (PyObject *)Py_TYPE(base);
+            if (PyType_IsSubtype((PyTypeObject *)candidate, (PyTypeObject *)metaclass)) {
+                Py_INCREF(candidate);
+                Py_DECREF(metaclass);
+                metaclass = candidate;
+            }
+            else if (!PyType_IsSubtype((PyTypeObject *)metaclass, (PyTypeObject *)candidate)) {
+                Py_DECREF(metaclass);
+                Py_DECREF(keywords);
+                Py_DECREF(bases);
+                Py_DECREF(namespace);
+                PyErr_SetString(
+                    PyExc_TypeError,
+                    "metaclass conflict: the metaclass of a derived class "
+                    "must be a (non-strict) subclass of the metaclasses of all its bases"
+                );
+                return NULL;
+            }
+        }
     }
-    PyObject *call_args = PyTuple_Pack(3, name, bases, state->namespace);
+    PyObject *call_args = PyTuple_Pack(3, name, bases, namespace);
+    Py_DECREF(namespace);
     Py_DECREF(bases);
     if (call_args == NULL) {
         Py_DECREF(metaclass);
@@ -1923,6 +2429,40 @@ type_construction_build_from_namespace(TypeConstructionState *state)
     Py_DECREF(call_args);
     Py_DECREF(metaclass);
     Py_DECREF(keywords);
+    if (
+        result != NULL && PyType_Check(result) &&
+        state->classcell != NULL && PyCell_Check(state->classcell)
+    ) {
+        PyObject *cell_class = PyCell_Get(state->classcell);
+        if (cell_class == NULL && PyErr_Occurred()) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        if (cell_class != result) {
+            if (cell_class == NULL) {
+                PyErr_Format(
+                    PyExc_RuntimeError,
+                    "__class__ not set defining %.200R as %.200R. "
+                    "Was __classcell__ propagated to type.__new__?",
+                    name,
+                    result
+                );
+            }
+            else {
+                PyErr_Format(
+                    PyExc_TypeError,
+                    "__class__ set to %.200R defining %.200R as %.200R",
+                    cell_class,
+                    name,
+                    result
+                );
+            }
+            Py_XDECREF(cell_class);
+            Py_DECREF(result);
+            return NULL;
+        }
+        Py_DECREF(cell_class);
+    }
     return result;
 }
 
@@ -1942,7 +2482,7 @@ type_construction_resume(const void *raw_state, PyObject *value)
     }
     PyObject *result;
     if (state->phase == TYPE_CONSTRUCTION_BODY) {
-        result = type_construction_build_from_namespace(state);
+        result = type_construction_build_from_namespace(state, value);
     }
     else if (state->phase == TYPE_CONSTRUCTION_SET_NAME && state->owner != NULL) {
         result = type_construction_continue_set_names(state);
@@ -1952,6 +2492,14 @@ type_construction_resume(const void *raw_state, PyObject *value)
         state->owner != NULL
     ) {
         result = Py_NewRef(state->owner);
+    }
+    else if (
+        state->phase == TYPE_CONSTRUCTION_UNKNOWN &&
+        state->build_args != NULL &&
+        PyDict_Check(value)
+    ) {
+        Py_XSETREF(state->namespace, Py_NewRef(value));
+        result = type_construction_build_from_namespace(state, NULL);
     }
     else {
         result = Py_NewRef(value);
@@ -1978,6 +2526,9 @@ adapter_build_class(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
         .namespace = NULL,
         .owner = NULL,
         .current_name = NULL,
+        .classcell = NULL,
+        .is_type_call = 0,
+        .shadowed_by_type_call = 0,
         .phase = TYPE_CONSTRUCTION_UNKNOWN,
     };
     AleffAdapterFrame frame;
@@ -2063,21 +2614,66 @@ adapter_type_vectorcall(
     ) {
         return original_type_vectorcall(callable, args, nargsf, kwnames);
     }
+    Py_ssize_t positional_count = PyVectorcall_NARGS(nargsf);
+    PyObject *build_args = PyTuple_New(positional_count);
+    if (build_args == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < positional_count; index++) {
+        PyTuple_SET_ITEM(build_args, index, Py_NewRef(args[index]));
+    }
+    PyObject *build_kwargs = NULL;
+    Py_ssize_t keyword_count = kwnames == NULL ? 0 : PyTuple_GET_SIZE(kwnames);
+    if (keyword_count > 0) {
+        build_kwargs = PyDict_New();
+        if (build_kwargs == NULL) {
+            Py_DECREF(build_args);
+            return NULL;
+        }
+        for (Py_ssize_t index = 0; index < keyword_count; index++) {
+            PyObject *key = PyTuple_GET_ITEM(kwnames, index);
+            if (PyDict_SetItem(
+                    build_kwargs,
+                    key,
+                    args[positional_count + index]
+                ) < 0) {
+                Py_DECREF(build_args);
+                Py_DECREF(build_kwargs);
+                return NULL;
+            }
+        }
+    }
     TypeConstructionState state = {
-        .build_args = NULL,
-        .build_kwargs = NULL,
+        .build_args = build_args,
+        .build_kwargs = build_kwargs,
         .body_code = NULL,
         .namespace = NULL,
         .owner = NULL,
         .current_name = NULL,
+        .classcell = NULL,
+        .is_type_call = 1,
+        .shadowed_by_type_call = 0,
         .phase = TYPE_CONSTRUCTION_UNKNOWN,
     };
+    int previous_shadow = 0;
+    TypeConstructionState *outer_build_class =
+        type_construction_shadow_outer_build_class(&previous_shadow);
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &type_construction_vtable, &state) < 0) {
+        if (outer_build_class != NULL) {
+            outer_build_class->shadowed_by_type_call = previous_shadow;
+        }
+        Py_DECREF(build_args);
+        Py_XDECREF(build_kwargs);
         return NULL;
     }
     PyObject *result = original_type_vectorcall(callable, args, nargsf, kwnames);
     adapter_leave(&frame);
+    if (outer_build_class != NULL) {
+        outer_build_class->shadowed_by_type_call = previous_shadow;
+    }
+    Py_DECREF(build_args);
+    Py_XDECREF(build_kwargs);
     return result;
 }
 
@@ -2146,12 +2742,14 @@ adapter_hex(PyObject *Py_UNUSED(self), PyObject *object)
 }
 
 typedef enum {
+    EXTREME_WAIT_ITER,
     EXTREME_WAIT_NEXT,
     EXTREME_WAIT_KEY,
     EXTREME_WAIT_COMPARE,
 } ExtremePhase;
 
 typedef struct {
+    PyObject *iterable;
     PyObject *iterator;
     PyObject *key_function;
     PyObject *default_value;
@@ -2160,6 +2758,7 @@ typedef struct {
     PyObject *current_item;
     PyObject *current_value;
     int comparison_op;
+    int iterable_form;
     const char *name;
     ExtremePhase phase;
 } ExtremeState;
@@ -2174,7 +2773,8 @@ extreme_copy_state(const void *raw_state)
         return NULL;
     }
     *copy = (ExtremeState){
-        .iterator = Py_NewRef(state->iterator),
+        .iterable = Py_NewRef(state->iterable),
+        .iterator = Py_XNewRef(state->iterator),
         .key_function = Py_XNewRef(state->key_function),
         .default_value = Py_XNewRef(state->default_value),
         .best_item = Py_XNewRef(state->best_item),
@@ -2182,6 +2782,7 @@ extreme_copy_state(const void *raw_state)
         .current_item = Py_XNewRef(state->current_item),
         .current_value = Py_XNewRef(state->current_value),
         .comparison_op = state->comparison_op,
+        .iterable_form = state->iterable_form,
         .name = state->name,
         .phase = state->phase,
     };
@@ -2195,7 +2796,8 @@ extreme_free_state(void *raw_state)
     if (state == NULL) {
         return;
     }
-    Py_DECREF(state->iterator);
+    Py_DECREF(state->iterable);
+    Py_XDECREF(state->iterator);
     Py_XDECREF(state->key_function);
     Py_XDECREF(state->default_value);
     Py_XDECREF(state->best_item);
@@ -2214,7 +2816,13 @@ extreme_finish(ExtremeState *state)
     if (state->default_value != NULL) {
         return Py_NewRef(state->default_value);
     }
-    PyErr_Format(PyExc_ValueError, "%s() arg is an empty sequence", state->name);
+    PyErr_Format(
+        PyExc_ValueError,
+        state->iterable_form
+            ? "%s() iterable argument is empty"
+            : "%s() arg is an empty sequence",
+        state->name
+    );
     return NULL;
 }
 
@@ -2232,6 +2840,17 @@ extreme_continue(ExtremeState *state, PyObject *resumed_value, int is_resumed)
     int comparison = -1;
     if (is_resumed) {
         switch (state->phase) {
+            case EXTREME_WAIT_ITER:
+                if (!PyIter_Check(resumed_value)) {
+                    PyErr_Format(
+                        PyExc_TypeError,
+                        "iter() returned non-iterator of type '%.200s'",
+                        Py_TYPE(resumed_value)->tp_name
+                    );
+                    return NULL;
+                }
+                state->iterator = Py_NewRef(resumed_value);
+                break;
             case EXTREME_WAIT_NEXT:
                 state->current_item = Py_NewRef(resumed_value);
                 break;
@@ -2241,6 +2860,14 @@ extreme_continue(ExtremeState *state, PyObject *resumed_value, int is_resumed)
             case EXTREME_WAIT_COMPARE:
                 comparison = PyObject_IsTrue(resumed_value);
                 break;
+        }
+    }
+
+    if (state->iterator == NULL) {
+        state->phase = EXTREME_WAIT_ITER;
+        state->iterator = PyObject_GetIter(state->iterable);
+        if (state->iterator == NULL) {
+            return NULL;
         }
     }
 
@@ -2385,12 +3012,9 @@ adapter_extreme(PyObject *args, PyObject *kwargs, int comparison_op, const char 
     }
 
     PyObject *iterable = positional_count > 1 ? args : PyTuple_GET_ITEM(args, 0);
-    PyObject *iterator = PyObject_GetIter(iterable);
-    if (iterator == NULL) {
-        return NULL;
-    }
     ExtremeState state = {
-        .iterator = iterator,
+        .iterable = iterable,
+        .iterator = NULL,
         .key_function = key_function,
         .default_value = default_value,
         .best_item = NULL,
@@ -2398,8 +3022,9 @@ adapter_extreme(PyObject *args, PyObject *kwargs, int comparison_op, const char 
         .current_item = NULL,
         .current_value = NULL,
         .comparison_op = comparison_op,
+        .iterable_form = positional_count == 1,
         .name = name,
-        .phase = EXTREME_WAIT_NEXT,
+        .phase = EXTREME_WAIT_ITER,
     };
     AleffAdapterFrame frame;
     if (adapter_enter(&frame, &extreme_vtable, &state) < 0) {
@@ -2407,7 +3032,7 @@ adapter_extreme(PyObject *args, PyObject *kwargs, int comparison_op, const char 
     }
     PyObject *result = extreme_continue(&state, NULL, 0);
     adapter_leave(&frame);
-    Py_DECREF(iterator);
+    Py_XDECREF(state.iterator);
     Py_XDECREF(state.best_item);
     Py_XDECREF(state.best_value);
     Py_XDECREF(state.current_item);
