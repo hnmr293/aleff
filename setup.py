@@ -30,7 +30,9 @@ setup(
             "aleff._multishot.v1._aleff",
             sources=[
                 "src/aleff/_multishot/v1/_aleff.c",
+                "src/aleff/_multishot/v1/adapters/bisect.c",
                 "src/aleff/_multishot/v1/adapters/framework.c",
+                "src/aleff/_multishot/v1/adapters/heapq.c",
                 "src/aleff/_multishot/v1/adapters/sort_engine.c",
                 "src/aleff/_multishot/v1/adapters/iterators.c",
                 "src/aleff/_multishot/v1/adapters/itertools.c",
@@ -46,9 +48,11 @@ setup(
             ],
             depends=[
                 "src/aleff/_multishot/v1/adapters/api.h",
+                "src/aleff/_multishot/v1/adapters/bisect.h",
                 "src/aleff/_multishot/v1/adapters/internal.h",
                 "src/aleff/_multishot/v1/adapters/builtins.h",
                 "src/aleff/_multishot/v1/adapters/functools.h",
+                "src/aleff/_multishot/v1/adapters/heapq.h",
                 "src/aleff/_multishot/v1/adapters/itertools.h",
                 "src/aleff/_multishot/v1/adapters/operator.h",
                 "src/aleff/_multishot/v1/adapters/protocols.h",

@@ -1,6 +1,8 @@
 #include "builtins.h"
+#include "bisect.h"
 #include "containers.h"
 #include "functools.h"
+#include "heapq.h"
 #include "iterators.h"
 #include "itertools.h"
 #include "mappings.h"
@@ -548,6 +550,8 @@ aleff_adapter_install(void)
     PyObject *pre_itertools = NULL;
     PyObject *pre_operator = NULL;
     PyObject *pre_functools = NULL;
+    PyObject *pre_bisect = NULL;
+    PyObject *pre_heapq = NULL;
     if (adapters_installed) {
         return 0;
     }
@@ -622,7 +626,10 @@ aleff_adapter_install(void)
     pre_itertools = PyImport_ImportModule("itertools");
     pre_operator = PyImport_ImportModule("operator");
     pre_functools = PyImport_ImportModule("functools");
-    if (pre_itertools == NULL || pre_operator == NULL || pre_functools == NULL) {
+    pre_bisect = PyImport_ImportModule("bisect");
+    pre_heapq = PyImport_ImportModule("heapq");
+    if (pre_itertools == NULL || pre_operator == NULL || pre_functools == NULL ||
+        pre_bisect == NULL || pre_heapq == NULL) {
         goto rollback;
     }
     BACKUP_MODULE(pre_itertools, "tee");
@@ -1135,10 +1142,18 @@ aleff_adapter_install(void)
     if (functools_status < 0) {
         goto rollback;
     }
+    if (adapter_bisect_install(pre_bisect) < 0) {
+        goto rollback;
+    }
+    if (adapter_heapq_install(pre_heapq) < 0) {
+        goto rollback;
+    }
     adapters_installed = 1;
     Py_XDECREF(pre_itertools);
     Py_XDECREF(pre_operator);
     Py_XDECREF(pre_functools);
+    Py_XDECREF(pre_bisect);
+    Py_XDECREF(pre_heapq);
     free_install_backup(&backup);
     return 0;
 
@@ -1245,8 +1260,10 @@ rollback:
         PyType_Modified(&PyComplex_Type);
         PyType_Modified(&PyUnicode_Type);
         }
-        adapter_itertools_rollback();
+        adapter_heapq_rollback();
+        adapter_bisect_rollback();
         adapter_functools_rollback();
+        adapter_itertools_rollback();
         restore_install_backup(&backup);
 
         Py_CLEAR(original_input);
@@ -1266,6 +1283,8 @@ rollback:
         Py_XDECREF(pre_itertools);
         Py_XDECREF(pre_operator);
         Py_XDECREF(pre_functools);
+        Py_XDECREF(pre_bisect);
+        Py_XDECREF(pre_heapq);
         free_install_backup(&backup);
         PyErr_Restore(error_type, error_value, error_traceback);
     }

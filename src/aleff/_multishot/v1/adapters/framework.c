@@ -367,6 +367,26 @@ aleff_adapter_snapshot_from_token(PyObject *capsule)
     return adapter_snapshot_clone(token->snapshot);
 }
 
+int
+aleff_adapter_snapshot_prepare(AleffAdapterSnapshot *snapshot)
+{
+    if (snapshot == NULL) {
+        return 0;
+    }
+    for (Py_ssize_t i = 0; i < snapshot->count; i++) {
+        snapshot->items[i].prepared = 0;
+    }
+    for (Py_ssize_t i = 0; i < snapshot->count; i++) {
+        AleffAdapterSnapshotItem *item = &snapshot->items[i];
+        if (item->vtable->prepare_resume != NULL &&
+            item->vtable->prepare_resume(item->state) < 0) {
+            return -1;
+        }
+        item->prepared = 1;
+    }
+    return 0;
+}
+
 PyObject *
 aleff_adapter_resume_before_frame(
     AleffAdapterSnapshot *snapshot,
@@ -381,18 +401,6 @@ aleff_adapter_resume_before_frame(
     PyObject *pending_exception = NULL;
     if (current == NULL && PyErr_Occurred()) {
         pending_exception = PyErr_GetRaisedException();
-    }
-    for (Py_ssize_t i = 0; i < snapshot->count; i++) {
-        AleffAdapterSnapshotItem *item = &snapshot->items[i];
-        if (item->prepared || item->vtable->prepare_resume == NULL) {
-            continue;
-        }
-        if (item->vtable->prepare_resume(item->state) < 0) {
-            Py_XDECREF(current);
-            Py_XDECREF(pending_exception);
-            return NULL;
-        }
-        item->prepared = 1;
     }
     if (pending_exception != NULL) {
         PyErr_SetRaisedException(pending_exception);

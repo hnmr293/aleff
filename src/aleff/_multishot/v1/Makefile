@@ -11,13 +11,14 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 TARGET = _aleff$(EXT_SUFFIX)
-ADAPTER_SRC = adapters/framework.c adapters/iterators.c adapters/itertools.c \
+ADAPTER_SRC = adapters/framework.c adapters/bisect.c adapters/heapq.c \
+	adapters/iterators.c adapters/itertools.c \
 	adapters/builtins.c adapters/protocols.c adapters/containers.c adapters/mappings.c \
 	adapters/sets.c adapters/text.c adapters/operator.c adapters/functools.c \
 	adapters/adapters_bootstrap.c adapters/sort_engine.c
-ADAPTER_HEADERS = adapters/api.h adapters/builtins.h adapters/containers.h \
+ADAPTER_HEADERS = adapters/api.h adapters/bisect.h adapters/builtins.h adapters/containers.h \
 	adapters/functools.h adapters/internal.h adapters/iterators.h adapters/itertools.h \
-	adapters/mappings.h adapters/operator.h adapters/protocols.h adapters/sets.h \
+	adapters/heapq.h adapters/mappings.h adapters/operator.h adapters/protocols.h adapters/sets.h \
 	adapters/sort_engine.h adapters/text.h
 SRC = _aleff.c $(ADAPTER_SRC)
 

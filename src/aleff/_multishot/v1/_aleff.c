@@ -1656,6 +1656,11 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
     /* Outermost frame's previous = nullptr (eval will set it to entry_frame) */
     frames_on_stack[num - 1]->previous = nullptr;
 
+    if (aleff_adapter_snapshot_prepare(snapshot->adapters) < 0) {
+        tstate->datastack_top = saved_datastack_top;
+        return nullptr;
+    }
+
     /* Inject the resume value into the innermost frame */
     inject_resume_value(
         frames_on_stack[0],
@@ -1841,6 +1846,10 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
         PyErr_SetString(PyExc_TypeError, "replacements must be a dict or None");
         return nullptr;
     }
+    if (start == 1 &&
+        aleff_adapter_snapshot_prepare(snapshot->adapters) < 0) {
+        return nullptr;
+    }
 
     PyObject *pending = Py_NewRef(outcome);
     const PyCodeObject *pending_code =
@@ -1857,6 +1866,42 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
     };
     tstate->exc_info = &restored_exc_state;
     PyObject *return_value = nullptr;
+
+    if (from_coroutine && start < snapshot->num_frames) {
+        PyObject *adapted;
+        if (pending_is_exception) {
+            PyErr_SetRaisedException(pending);
+            pending = nullptr;
+            adapted = aleff_adapter_resume_before_frame(
+                snapshot->adapters,
+                start,
+                nullptr
+            );
+        }
+        else {
+            adapted = aleff_adapter_resume_before_frame(
+                snapshot->adapters,
+                start,
+                pending
+            );
+            pending = nullptr;
+        }
+        if (adapted == nullptr) {
+            pending = PyErr_GetRaisedException();
+            if (pending == nullptr) {
+                PyErr_SetString(
+                    PyExc_RuntimeError,
+                    "async adapter resume failed without an active exception"
+                );
+                pending = PyErr_GetRaisedException();
+            }
+            pending_is_exception = 1;
+        }
+        else {
+            pending = adapted;
+            pending_is_exception = 0;
+        }
+    }
 
     for (int i = start; i < snapshot->num_frames; i++) {
         _aleff_frame_copy_t *src = &snapshot->frames[i];
@@ -1944,6 +1989,14 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
             result = _evalframe(tstate, frame, 0);
         }
         tstate->datastack_top = saved_datastack_top;
+
+        if (i + 1 < snapshot->num_frames) {
+            result = aleff_adapter_resume_before_frame(
+                snapshot->adapters,
+                i + 1,
+                result
+            );
+        }
 
         if (result == nullptr) {
             if (i + 1 >= snapshot->num_frames) {
