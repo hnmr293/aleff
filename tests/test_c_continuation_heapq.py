@@ -11,7 +11,7 @@ import sys
 import sysconfig
 import threading
 import time
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 import pytest
 
@@ -23,6 +23,14 @@ Run = Callable[[Choose], Any]
 Case = Callable[[], None]
 Outcome = tuple[str, Any]
 _CASES: dict[str, Case] = {}
+
+
+class _HeapLockState(TypedDict):
+    comparisons: int
+    second_entered: bool
+    attempting: bool
+    finished: bool
+    finished_during_comparison: bool | None
 
 
 def _case(name: str) -> Callable[[Case], Case]:
@@ -223,7 +231,12 @@ def _heapify_comparison_callback_size_mutation_multishot() -> None:
     ]:
         nonlocal suspension_count
         suspension_count += 1
-        comparisons = []
+        comparisons: list[
+            tuple[
+                tuple[Outcome, tuple[int, ...]],
+                tuple[Outcome, tuple[int, ...]],
+            ]
+        ] = []
         for decision in decisions:
             actual = cast(tuple[Outcome, tuple[int, ...]], k(decision))
             expected = _heapify_size_mutation_run(lambda decision=decision: decision)
@@ -275,7 +288,11 @@ def _heappushpop_size_mutation_run(
     heap = [Item(3), Item(2)] if is_max else [Item(1), Item(2)]
     try:
         if is_max:
-            result = heapq.heappushpop_max(heap, Item(1))
+            heappushpop_max = cast(
+                Callable[[list[Item], Item], Item],
+                getattr(heapq, "heappushpop_max"),
+            )
+            result = heappushpop_max(heap, Item(1))
         else:
             result = heapq.heappushpop(heap, Item(3))
     except Exception as exc:
@@ -352,19 +369,33 @@ def _max_heap_run(name: str, choose: Choose) -> tuple[Any, tuple[int, ...]]:
 
     if name == "heapify_max":
         heap = [Item(1), Item(3), Item(2)]
-        result = heapq.heapify_max(heap)
+        heapify_max = cast(Callable[[list[Item]], None], getattr(heapq, "heapify_max"))
+        result = heapify_max(heap)
     elif name == "heappush_max":
         heap = [Item(2)]
-        result = heapq.heappush_max(heap, Item(3))
+        heappush_max = cast(
+            Callable[[list[Item], Item], None],
+            getattr(heapq, "heappush_max"),
+        )
+        result = heappush_max(heap, Item(3))
     elif name == "heappop_max":
         heap = [Item(3), Item(2), Item(1), Item(0)]
-        result = heapq.heappop_max(heap)
+        heappop_max = cast(Callable[[list[Item]], Item], getattr(heapq, "heappop_max"))
+        result = heappop_max(heap)
     elif name == "heappushpop_max":
         heap = [Item(2), Item(1)]
-        result = heapq.heappushpop_max(heap, Item(3))
+        heappushpop_max = cast(
+            Callable[[list[Item], Item], Item],
+            getattr(heapq, "heappushpop_max"),
+        )
+        result = heappushpop_max(heap, Item(3))
     else:
         heap = [Item(3), Item(2), Item(1), Item(0)]
-        result = heapq.heapreplace_max(heap, Item(-1))
+        heapreplace_max = cast(
+            Callable[[list[Item], Item], Item],
+            getattr(heapq, "heapreplace_max"),
+        )
+        result = heapreplace_max(heap, Item(-1))
 
     result_value = None if result is None else result.value
     return result_value, _heap_values(heap)
@@ -386,7 +417,7 @@ if sysconfig.get_config_var("Py_GIL_DISABLED"):
     def _heapify_resume_holds_heap_lock() -> None:
         choose = effect("heapq-resume-lock-choice")
         handler = create_handler(choose)
-        state = {
+        state: _HeapLockState = {
             "comparisons": 0,
             "second_entered": False,
             "attempting": False,
@@ -482,7 +513,7 @@ def _heappush_async_multishot() -> None:
 
         @handler.on(choose)
         async def resume(k: Any) -> list[Outcome]:
-            outcomes = []
+            outcomes: list[Outcome] = []
             for decision in (True, False, "raise", True):
                 try:
                     result = await k(decision)

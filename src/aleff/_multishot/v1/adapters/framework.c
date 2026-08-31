@@ -4,6 +4,12 @@
 #include "api.h"
 #include "internal.h"
 
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030d0000
+#  define Py_BUILD_CORE
+#  include <internal/pycore_critical_section.h>
+#  undef Py_BUILD_CORE
+#endif
+
 #if defined(_MSC_VER)
 #  define ALEFF_THREAD_LOCAL __declspec(thread)
 #else
@@ -243,10 +249,56 @@ typedef struct {
     AleffAdapterNode *live_head;
     PyThreadState *owner_thread;
     PyFrameObject *owner_frame;
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030d0000
+    uintptr_t critical_section;
+    int critical_section_restored;
+#endif
     int restored;
 } AleffAdapterToken;
 
 static const char adapter_token_name[] = "aleff.continuation_adapter_token";
+
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030d0000
+static void
+adapter_token_suspend_critical_section(AleffAdapterToken *token)
+{
+    PyThreadState *thread = PyThreadState_Get();
+    if (thread->critical_section == 0) {
+        return;
+    }
+    _PyCriticalSection_SuspendAll(thread);
+    token->critical_section = thread->critical_section;
+    thread->critical_section = 0;
+}
+
+static void
+adapter_token_restore_critical_section(AleffAdapterToken *token)
+{
+    if (token->critical_section_restored) {
+        return;
+    }
+    token->critical_section_restored = 1;
+    if (token->critical_section == 0) {
+        return;
+    }
+    PyThreadState *thread = PyThreadState_Get();
+    thread->critical_section = token->critical_section;
+    token->critical_section = 0;
+    _PyCriticalSection_Resume(thread);
+}
+#else
+static void
+adapter_token_suspend_critical_section(AleffAdapterToken *token)
+{
+    (void)token;
+}
+
+static void
+adapter_token_restore_critical_section(AleffAdapterToken *token)
+{
+    (void)token;
+}
+#endif
 
 static void
 adapter_token_destructor(PyObject *capsule)
@@ -302,6 +354,10 @@ aleff_adapter_suspend(void)
         PyMem_Free(token);
         return NULL;
     }
+    /* The active critical-section nodes live on the C stack that the effect
+     * is about to suspend.  Detach them from the shared thread state so the
+     * handler greenlet cannot inherit pointers into that stack. */
+    adapter_token_suspend_critical_section(token);
     return capsule;
 }
 
@@ -320,13 +376,13 @@ aleff_adapter_restore(PyObject *capsule)
         PyErr_SetString(PyExc_RuntimeError, "adapter token belongs to another thread");
         return NULL;
     }
-    PyFrameObject *current_frame = PyThreadState_GetFrame(PyThreadState_Get());
-    int same_owner = current_frame == token->owner_frame;
-    Py_XDECREF(current_frame);
-    if (!same_owner) {
+    if (PyEval_GetFrame() != token->owner_frame) {
         PyErr_SetString(PyExc_RuntimeError, "adapter token belongs to another owner");
         return NULL;
     }
+    /* Restore the C-stack lock chain before any later validation can raise:
+     * the caller will unwind that same C stack if restoration fails. */
+    adapter_token_restore_critical_section(token);
     if (active_adapter != NULL) {
         PyErr_SetString(PyExc_RuntimeError, "another adapter owner is active");
         return NULL;

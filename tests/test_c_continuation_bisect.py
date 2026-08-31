@@ -230,7 +230,12 @@ def _insort_exact_list_comparison_callback_receiver_multishot() -> None:
         ]:
             nonlocal suspension_count
             suspension_count += 1
-            comparisons = []
+            comparisons: list[
+                tuple[
+                    tuple[str, Any, tuple[str, ...]],
+                    tuple[str, Any, tuple[str, ...]],
+                ]
+            ] = []
             for decision in decisions:
                 actual = cast(
                     tuple[str, Any, tuple[str, ...]],
@@ -433,7 +438,7 @@ def _insort_left_async_multishot() -> None:
 
         @handler.on(choose)
         async def resume(k: Any) -> list[Outcome]:
-            outcomes = []
+            outcomes: list[Outcome] = []
             for decision in (True, False, "raise", True):
                 try:
                     result = await k(decision)

@@ -487,9 +487,15 @@ lookup_raw_special(PyObject *object, const char *name)
             continue;
         }
         PyObject *dictionary = PyType_GetDict((PyTypeObject *)base);
-        PyObject *descriptor = PyDict_GetItemString(dictionary, name);
+        if (dictionary == NULL) {
+            return NULL;
+        }
+        PyObject *descriptor = Py_XNewRef(
+            PyDict_GetItemString(dictionary, name)
+        );
+        Py_DECREF(dictionary);
         if (descriptor != NULL) {
-            return Py_NewRef(descriptor);
+            return descriptor;
         }
     }
     return NULL;
