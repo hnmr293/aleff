@@ -94,3 +94,45 @@ print(all(getattr(hashlib, name) is expected_hashlib[name] for name in hashlib_n
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == "RuntimeError binascii.hexlify is not a C function\nTrue\nTrue\n"
+
+
+def test_non_c_pickle_function_rolls_back_installed_buffer_adapters() -> None:
+    result = _run_isolated(
+        r"""
+import _csv
+import _pickle
+import binascii
+import hashlib
+import json
+import marshal
+import re
+import zlib
+
+
+targets = (
+    (hashlib, "sha256"),
+    (binascii, "hexlify"),
+    (zlib, "compress"),
+    (re, "match"),
+    (marshal, "dumps"),
+    (_csv, "reader"),
+    (json, "dumps"),
+)
+expected = {(module, name): getattr(module, name) for module, name in targets}
+replacement = lambda value: value
+_pickle.loads = replacement
+
+try:
+    import aleff
+except RuntimeError as exc:
+    print(type(exc).__name__, str(exc))
+else:
+    print("import succeeded")
+
+print(all(getattr(module, name) is expected[module, name] for module, name in targets))
+print(_pickle.loads is replacement)
+""".strip()
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "RuntimeError _pickle.loads is not a C function\nTrue\nTrue\n"

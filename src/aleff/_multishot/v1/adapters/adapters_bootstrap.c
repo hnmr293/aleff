@@ -1387,14 +1387,14 @@ rollback:
         PyType_Modified(&PyComplex_Type);
         PyType_Modified(&PyUnicode_Type);
         }
-        adapter_compression_rollback();
-        adapter_binascii_rollback();
-        adapter_hashing_rollback();
         adapter_pickle_rollback();
         adapter_json_rollback();
         adapter_csv_rollback();
         adapter_marshal_rollback();
         adapter_regex_rollback();
+        adapter_compression_rollback();
+        adapter_binascii_rollback();
+        adapter_hashing_rollback();
         adapter_codecs_rollback();
         adapter_io_text_rollback();
         adapter_io_buffered_rollback();
