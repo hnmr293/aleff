@@ -534,7 +534,9 @@ _aleff_frame_num_slots(PyCodeObject *code)
 /* A memoryview is mutable in an important sense: releasing one view releases
  * the view object itself, even while another frame snapshot still refers to
  * it.  PickleBuffer's save path keeps such a view in a with-statement local,
- * so multi-shot frame copies need an independent view per restoration. */
+ * so multi-shot frame copies need an independent view per restoration.
+ * Return 1 when a new reference was transferred into the slot, 0 when the
+ * slot was unchanged, and -1 on error. */
 static int
 _aleff_clone_memoryview_slot(_aleff_frame_t *frame, int index)
 {
@@ -547,7 +549,7 @@ _aleff_clone_memoryview_slot(_aleff_frame_t *frame, int index)
         return -1;
     }
     ALEFF_LOCALSPLUS_SET(frame, index, copy);
-    return 0;
+    return 1;
 }
 
 /* ========================================================================
@@ -659,6 +661,7 @@ copy_single_frame(_aleff_frame_t *src, int active_stack_depth, int send_target_o
         PyErr_NoMemory();
         return result;
     }
+    int owned_slots = 0;
 
     /* Bitwise copy first */
     memcpy(dst, src, frame_size);
@@ -738,12 +741,14 @@ copy_single_frame(_aleff_frame_t *src, int active_stack_depth, int send_target_o
         ? stacktop
         : code->co_nlocalsplus;
     for (int i = 0; i < valid_slots; i++) {
-        if (_aleff_clone_memoryview_slot(dst, i) < 0) {
+        int cloned = _aleff_clone_memoryview_slot(dst, i);
+        if (cloned < 0) {
             goto frame_header_error;
         }
-        if (ALEFF_LOCALSPLUS_GET(dst, i) == ALEFF_LOCALSPLUS_GET(src, i)) {
+        if (!cloned) {
             ALEFF_LOCALSPLUS_RETAIN(dst, i);
         }
+        owned_slots++;
     }
     for (int i = valid_slots; i < num_slots; i++) {
         ALEFF_LOCALSPLUS_SET(dst, i, nullptr);
@@ -754,6 +759,9 @@ copy_single_frame(_aleff_frame_t *src, int active_stack_depth, int send_target_o
     return result;
 
 frame_header_error:
+    for (int i = 0; i < owned_slots; i++) {
+        ALEFF_LOCALSPLUS_RELEASE(dst, i);
+    }
     ALEFF_STACKREF_RELEASE(dst->f_executable);
     ALEFF_STACKREF_RELEASE(dst->f_funcobj);
     Py_XDECREF(dst->f_globals);
@@ -1510,16 +1518,31 @@ push_frame_to_datastack(
 
     /* Source is from a snapshot where stale slots are already nullified.
      * Normalize object entries to independently owned stackrefs. */
+    int owned_slots = 0;
     for (int i = 0; i < num_slots; i++) {
-        if (_aleff_clone_memoryview_slot(dst, i) < 0) {
-            return nullptr;
+        int cloned = _aleff_clone_memoryview_slot(dst, i);
+        if (cloned < 0) {
+            goto frame_restore_error;
         }
-        if (ALEFF_LOCALSPLUS_GET(dst, i) == ALEFF_LOCALSPLUS_GET(src, i)) {
+        if (!cloned) {
             ALEFF_LOCALSPLUS_DUP(dst, i);
         }
+        owned_slots++;
     }
 
     return dst;
+
+frame_restore_error:
+    for (int i = 0; i < owned_slots; i++) {
+        ALEFF_LOCALSPLUS_RELEASE(dst, i);
+    }
+    ALEFF_STACKREF_RELEASE(dst->f_executable);
+    ALEFF_STACKREF_RELEASE(dst->f_funcobj);
+    Py_XDECREF(dst->f_globals);
+    Py_XDECREF(dst->f_builtins);
+    Py_XDECREF(dst->f_locals);
+    tstate->datastack_top -= nslots;
+    return nullptr;
 }
 
 /* Build a real generator-family owner around a copied suspended frame.
@@ -1585,11 +1608,15 @@ generator_owner_from_frame_copy(
     dst->previous = nullptr;
     dst->owner = FRAME_OWNED_BY_FRAME_OBJECT;
     for (int i = 0; i < src_copy->num_slots; i++) {
-        if (_aleff_clone_memoryview_slot(dst, i) < 0) {
+        int cloned = _aleff_clone_memoryview_slot(dst, i);
+        if (cloned < 0) {
+            for (int j = i; j < src_copy->num_slots; j++) {
+                ALEFF_LOCALSPLUS_SET(dst, j, nullptr);
+            }
             Py_DECREF(py_frame);
             return nullptr;
         }
-        if (ALEFF_LOCALSPLUS_GET(dst, i) == ALEFF_LOCALSPLUS_GET(src, i)) {
+        if (!cloned) {
             ALEFF_LOCALSPLUS_DUP(dst, i);
         }
     }

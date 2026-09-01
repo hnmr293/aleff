@@ -318,6 +318,31 @@ class TestSnapshotFromFrame:
 
 
 class TestSnapshotFramesErrors:
+    def test_released_memoryview_clone_failure_releases_prior_local_references(self):
+        import gc
+
+        class Sentinel:
+            pass
+
+        sentinel = Sentinel()
+        released_view = memoryview(b"released")
+        released_view.release()
+
+        def capture(current_sentinel: Sentinel, current_view: memoryview) -> None:
+            assert current_sentinel is sentinel
+            assert current_view is released_view
+            snapshot_frames(1)
+
+        gc.collect()
+        references_before = sys.getrefcount(sentinel)
+
+        for _ in range(3):
+            with pytest.raises(ValueError, match="released memoryview"):
+                capture(sentinel, released_view)
+
+        gc.collect()
+        assert sys.getrefcount(sentinel) == references_before
+
     def test_depth_zero_raises(self):
         """depth=0 means no frames — should raise."""
         with pytest.raises(RuntimeError):
