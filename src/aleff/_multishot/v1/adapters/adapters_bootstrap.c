@@ -1,13 +1,32 @@
 #include "builtins.h"
+#include "bisect.h"
+#include "binascii.h"
+#include "codecs.h"
+#include "compression.h"
 #include "containers.h"
+#include "csv.h"
+#include "datetime.h"
 #include "functools.h"
+#include "heapq.h"
+#include "hashing.h"
+#include "io.h"
+#include "io_buffered.h"
+#include "io_text.h"
 #include "iterators.h"
 #include "itertools.h"
+#include "json.h"
 #include "mappings.h"
+#include "marshal.h"
+#include "numeric.h"
+#include "numeric_iterators.h"
 #include "operator.h"
+#include "pickle.h"
 #include "protocols.h"
+#include "regex.h"
 #include "sets.h"
+#include "struct.h"
 #include "text.h"
+#include "zoneinfo.h"
 
 static PyMethodDef sum_method = {
     .ml_name = "sum",
@@ -548,6 +567,27 @@ aleff_adapter_install(void)
     PyObject *pre_itertools = NULL;
     PyObject *pre_operator = NULL;
     PyObject *pre_functools = NULL;
+    PyObject *pre_bisect = NULL;
+    PyObject *pre_heapq = NULL;
+    PyObject *pre_re = NULL;
+    PyObject *pre_marshal = NULL;
+    PyObject *pre_csv = NULL;
+    PyObject *pre_json = NULL;
+    PyObject *pre_pickle = NULL;
+    PyObject *pre_math = NULL;
+    PyObject *pre_cmath = NULL;
+    PyObject *pre_struct = NULL;
+    PyObject *pre_datetime = NULL;
+    PyObject *pre_zoneinfo = NULL;
+    PyObject *pre_io = NULL;
+    PyObject *pre_codecs = NULL;
+    PyObject *pre_hashlib = NULL;
+    PyObject *pre_hmac = NULL;
+    PyObject *pre_binascii = NULL;
+    PyObject *pre_zlib = NULL;
+    PyObject *pre_bz2 = NULL;
+    PyObject *pre_lzma = NULL;
+    PyObject *pre_zstd = NULL;
     if (adapters_installed) {
         return 0;
     }
@@ -622,7 +662,40 @@ aleff_adapter_install(void)
     pre_itertools = PyImport_ImportModule("itertools");
     pre_operator = PyImport_ImportModule("operator");
     pre_functools = PyImport_ImportModule("functools");
-    if (pre_itertools == NULL || pre_operator == NULL || pre_functools == NULL) {
+    pre_bisect = PyImport_ImportModule("bisect");
+    pre_heapq = PyImport_ImportModule("heapq");
+    pre_re = PyImport_ImportModule("re");
+    pre_marshal = PyImport_ImportModule("marshal");
+    pre_csv = PyImport_ImportModule("_csv");
+    pre_json = PyImport_ImportModule("json");
+    pre_pickle = PyImport_ImportModule("pickle");
+    pre_math = PyImport_ImportModule("math");
+    pre_cmath = PyImport_ImportModule("cmath");
+    pre_struct = PyImport_ImportModule("struct");
+    pre_datetime = PyImport_ImportModule("datetime");
+    pre_zoneinfo = PyImport_ImportModule("zoneinfo");
+    pre_io = PyImport_ImportModule("io");
+    pre_codecs = PyImport_ImportModule("codecs");
+    pre_hashlib = PyImport_ImportModule("hashlib");
+    pre_hmac = PyImport_ImportModule("hmac");
+    pre_binascii = PyImport_ImportModule("binascii");
+    pre_zlib = PyImport_ImportModule("zlib");
+    pre_bz2 = PyImport_ImportModule("bz2");
+    pre_lzma = PyImport_ImportModule("lzma");
+#if PY_VERSION_HEX >= 0x030e0000
+    pre_zstd = PyImport_ImportModule("compression.zstd");
+    if (pre_zstd == NULL && PyErr_ExceptionMatches(PyExc_ModuleNotFoundError)) {
+        PyErr_Clear();
+    }
+#endif
+    if (pre_itertools == NULL || pre_operator == NULL || pre_functools == NULL ||
+        pre_bisect == NULL || pre_heapq == NULL || pre_re == NULL ||
+        pre_marshal == NULL || pre_csv == NULL || pre_json == NULL ||
+        pre_pickle == NULL || pre_math == NULL || pre_cmath == NULL ||
+        pre_struct == NULL || pre_datetime == NULL ||
+        pre_zoneinfo == NULL || pre_io == NULL || pre_codecs == NULL ||
+        pre_hashlib == NULL || pre_hmac == NULL || pre_binascii == NULL ||
+        pre_zlib == NULL || pre_bz2 == NULL || pre_lzma == NULL) {
         goto rollback;
     }
     BACKUP_MODULE(pre_itertools, "tee");
@@ -834,6 +907,15 @@ aleff_adapter_install(void)
     }
     tuple_iterator_type = Py_TYPE(tuple_iterator);
     Py_DECREF(tuple_iterator);
+
+    PyObject *empty_list = PyList_New(0);
+    PyObject *list_iterator = empty_list == NULL ? NULL : PyObject_GetIter(empty_list);
+    Py_XDECREF(empty_list);
+    if (list_iterator == NULL) {
+        goto rollback;
+    }
+    list_iterator_type = Py_TYPE(list_iterator);
+    Py_DECREF(list_iterator);
 
     PyObject *zip_type_object = PyDict_GetItemString(builtins, "zip");
     if (
@@ -1135,10 +1217,70 @@ aleff_adapter_install(void)
     if (functools_status < 0) {
         goto rollback;
     }
+    if (adapter_bisect_install(pre_bisect) < 0) {
+        goto rollback;
+    }
+    if (adapter_heapq_install(pre_heapq) < 0) {
+        goto rollback;
+    }
+    if (adapter_numeric_install(pre_math, pre_cmath) < 0 ||
+        adapter_numeric_iterators_install(pre_math) < 0 ||
+        adapter_struct_install(pre_struct) < 0 ||
+        adapter_datetime_install(pre_datetime) < 0 ||
+        adapter_zoneinfo_install(pre_zoneinfo) < 0 ||
+        adapter_io_install(pre_io) < 0 ||
+        adapter_io_buffered_install(pre_io) < 0 ||
+        adapter_io_text_install(pre_io) < 0 ||
+        adapter_codecs_install(pre_codecs) < 0) {
+        goto rollback;
+    }
+    if (adapter_hashing_install(pre_hashlib, pre_hmac) < 0 ||
+        adapter_binascii_install(pre_binascii) < 0 ||
+        adapter_compression_install(
+            pre_zlib, pre_bz2, pre_lzma, pre_zstd
+        ) < 0) {
+        goto rollback;
+    }
+    if (adapter_regex_install(pre_re) < 0) {
+        goto rollback;
+    }
+    if (adapter_marshal_install(pre_marshal) < 0) {
+        goto rollback;
+    }
+    if (adapter_csv_install(pre_csv) < 0) {
+        goto rollback;
+    }
+    if (adapter_json_install(pre_json) < 0) {
+        goto rollback;
+    }
+    if (adapter_pickle_install(pre_pickle) < 0) {
+        goto rollback;
+    }
     adapters_installed = 1;
     Py_XDECREF(pre_itertools);
     Py_XDECREF(pre_operator);
     Py_XDECREF(pre_functools);
+    Py_XDECREF(pre_bisect);
+    Py_XDECREF(pre_heapq);
+    Py_XDECREF(pre_re);
+    Py_XDECREF(pre_marshal);
+    Py_XDECREF(pre_csv);
+    Py_XDECREF(pre_json);
+    Py_XDECREF(pre_pickle);
+    Py_XDECREF(pre_math);
+    Py_XDECREF(pre_cmath);
+    Py_XDECREF(pre_struct);
+    Py_XDECREF(pre_datetime);
+    Py_XDECREF(pre_zoneinfo);
+    Py_XDECREF(pre_io);
+    Py_XDECREF(pre_codecs);
+    Py_XDECREF(pre_hashlib);
+    Py_XDECREF(pre_hmac);
+    Py_XDECREF(pre_binascii);
+    Py_XDECREF(pre_zlib);
+    Py_XDECREF(pre_bz2);
+    Py_XDECREF(pre_lzma);
+    Py_XDECREF(pre_zstd);
     free_install_backup(&backup);
     return 0;
 
@@ -1245,8 +1387,27 @@ rollback:
         PyType_Modified(&PyComplex_Type);
         PyType_Modified(&PyUnicode_Type);
         }
-        adapter_itertools_rollback();
+        adapter_pickle_rollback();
+        adapter_json_rollback();
+        adapter_csv_rollback();
+        adapter_marshal_rollback();
+        adapter_regex_rollback();
+        adapter_compression_rollback();
+        adapter_binascii_rollback();
+        adapter_hashing_rollback();
+        adapter_codecs_rollback();
+        adapter_io_text_rollback();
+        adapter_io_buffered_rollback();
+        adapter_io_rollback();
+        adapter_zoneinfo_rollback();
+        adapter_datetime_rollback();
+        adapter_struct_rollback();
+        adapter_numeric_iterators_rollback();
+        adapter_numeric_rollback();
+        adapter_heapq_rollback();
+        adapter_bisect_rollback();
         adapter_functools_rollback();
+        adapter_itertools_rollback();
         restore_install_backup(&backup);
 
         Py_CLEAR(original_input);
@@ -1266,6 +1427,27 @@ rollback:
         Py_XDECREF(pre_itertools);
         Py_XDECREF(pre_operator);
         Py_XDECREF(pre_functools);
+        Py_XDECREF(pre_bisect);
+        Py_XDECREF(pre_heapq);
+        Py_XDECREF(pre_re);
+        Py_XDECREF(pre_marshal);
+        Py_XDECREF(pre_csv);
+        Py_XDECREF(pre_json);
+        Py_XDECREF(pre_pickle);
+        Py_XDECREF(pre_math);
+        Py_XDECREF(pre_cmath);
+        Py_XDECREF(pre_struct);
+        Py_XDECREF(pre_datetime);
+        Py_XDECREF(pre_zoneinfo);
+        Py_XDECREF(pre_io);
+        Py_XDECREF(pre_codecs);
+        Py_XDECREF(pre_hashlib);
+        Py_XDECREF(pre_hmac);
+        Py_XDECREF(pre_binascii);
+        Py_XDECREF(pre_zlib);
+        Py_XDECREF(pre_bz2);
+        Py_XDECREF(pre_lzma);
+        Py_XDECREF(pre_zstd);
         free_install_backup(&backup);
         PyErr_Restore(error_type, error_value, error_traceback);
     }

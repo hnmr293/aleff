@@ -266,4 +266,7 @@ uv run pyright
 
 ## License
 
-Apache-2.0
+aleff's original code is licensed under Apache-2.0. Portions of the CPython
+integration and continuation adapters are derived from CPython and remain
+subject to PSF-2.0. See [LICENSE](LICENSE), [NOTICE](NOTICE), and
+[LICENSES/CPython.txt](LICENSES/CPython.txt).

@@ -47,6 +47,7 @@ extern newfunc original_filter_new;
 extern vectorcallfunc original_filter_vectorcall;
 extern newfunc original_zip_new;
 extern PyTypeObject *tuple_iterator_type;
+extern PyTypeObject *list_iterator_type;
 extern newfunc original_enumerate_new;
 extern vectorcallfunc original_enumerate_vectorcall;
 extern newfunc original_reversed_new;

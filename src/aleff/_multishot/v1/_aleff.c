@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include "adapters/api.h"
+#include "adapters/pickle.h"
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
@@ -530,6 +531,27 @@ _aleff_frame_num_slots(PyCodeObject *code)
     return code->co_nlocalsplus + code->co_stacksize;
 }
 
+/* A memoryview is mutable in an important sense: releasing one view releases
+ * the view object itself, even while another frame snapshot still refers to
+ * it.  PickleBuffer's save path keeps such a view in a with-statement local,
+ * so multi-shot frame copies need an independent view per restoration.
+ * Return 1 when a new reference was transferred into the slot, 0 when the
+ * slot was unchanged, and -1 on error. */
+static int
+_aleff_clone_memoryview_slot(_aleff_frame_t *frame, int index)
+{
+    PyObject *object = ALEFF_LOCALSPLUS_GET(frame, index);
+    if (object == nullptr || !PyMemoryView_Check(object)) {
+        return 0;
+    }
+    PyObject *copy = PyMemoryView_FromObject(object);
+    if (copy == nullptr) {
+        return -1;
+    }
+    ALEFF_LOCALSPLUS_SET(frame, index, copy);
+    return 1;
+}
+
 /* ========================================================================
  * FrameSnapshot: stores a deep copy of a frame chain
  * ======================================================================== */
@@ -639,6 +661,7 @@ copy_single_frame(_aleff_frame_t *src, int active_stack_depth, int send_target_o
         PyErr_NoMemory();
         return result;
     }
+    int owned_slots = 0;
 
     /* Bitwise copy first */
     memcpy(dst, src, frame_size);
@@ -718,7 +741,14 @@ copy_single_frame(_aleff_frame_t *src, int active_stack_depth, int send_target_o
         ? stacktop
         : code->co_nlocalsplus;
     for (int i = 0; i < valid_slots; i++) {
-        ALEFF_LOCALSPLUS_RETAIN(dst, i);
+        int cloned = _aleff_clone_memoryview_slot(dst, i);
+        if (cloned < 0) {
+            goto frame_header_error;
+        }
+        if (!cloned) {
+            ALEFF_LOCALSPLUS_RETAIN(dst, i);
+        }
+        owned_slots++;
     }
     for (int i = valid_slots; i < num_slots; i++) {
         ALEFF_LOCALSPLUS_SET(dst, i, nullptr);
@@ -729,6 +759,9 @@ copy_single_frame(_aleff_frame_t *src, int active_stack_depth, int send_target_o
     return result;
 
 frame_header_error:
+    for (int i = 0; i < owned_slots; i++) {
+        ALEFF_LOCALSPLUS_RELEASE(dst, i);
+    }
     ALEFF_STACKREF_RELEASE(dst->f_executable);
     ALEFF_STACKREF_RELEASE(dst->f_funcobj);
     Py_XDECREF(dst->f_globals);
@@ -1023,8 +1056,12 @@ prepare_resume_frame(
         ALEFF_PREV_INSTR(frame) += CALL_TOTAL_SIZE - 1;
 #endif
     }
-#if PY_VERSION_HEX >= 0x030d0000
-    else if (base_opcode == CALL_FUNCTION_EX || base_opcode == CALL_KW) {
+#if defined(CALL_FUNCTION_EX) || defined(CALL_KW)
+    else if (base_opcode == CALL_FUNCTION_EX
+#ifdef CALL_KW
+        || base_opcode == CALL_KW
+#endif
+    ) {
         /* Also calls, just not spelled CALL: f(*args) / f(**kwargs) compile to
          * CALL_FUNCTION_EX, and a keyword call compiles to CALL_KW.  A frame
          * suspended here must resume past the opcode, or it re-executes the
@@ -1046,9 +1083,27 @@ prepare_resume_frame(
          * unsupported case; treat it as any other escaping call. */
         if (source != nullptr && source->active_stack_depth >= 0) {
             uint8_t oparg = (*ALEFF_PREV_INSTR(frame) >> 8) & 0xFF;
-            int call_items = base_opcode == CALL_KW
-                ? oparg + 3
-                : 3 + (oparg & 1);
+            int call_items;
+#ifdef CALL_KW
+            if (base_opcode == CALL_KW) {
+                call_items = oparg + 3;
+            }
+            else {
+#  if PY_VERSION_HEX >= 0x030e0000
+                /* CALL_FUNCTION_EX always consumes callable, self/null,
+                 * positional args, and keyword args on Python 3.14+. */
+                call_items = 4;
+#  else
+                call_items = 3 + (oparg & 1);
+#  endif
+            }
+#else
+#  if PY_VERSION_HEX >= 0x030e0000
+            call_items = 4;
+#  else
+            call_items = 3 + (oparg & 1);
+#  endif
+#endif
             int entry_top = value_stack_base + source->active_stack_depth;
             int new_top = entry_top - call_items;
             if (new_top < value_stack_base || entry_top > source->num_slots) {
@@ -1171,6 +1226,77 @@ prepare_resume_frame(
 }
 
 static void
+_aleff_pickle_complete_default_reduce(
+    _aleff_frame_t *frame,
+    PyObject **value,
+    const PyCodeObject *completed_code
+)
+{
+    if (completed_code == nullptr ||
+        !PyUnicode_Check(completed_code->co_name) ||
+        PyUnicode_CompareWithASCIIString(completed_code->co_name, "__getstate__") != 0) {
+        return;
+    }
+    PyCodeObject *code = _aleff_frame_get_code(frame);
+    if (!PyUnicode_Check(code->co_name) ||
+        PyUnicode_CompareWithASCIIString(code->co_name, "save") != 0) {
+        return;
+    }
+
+    int self_index = -1;
+    int object_index = -1;
+    int reduce_index = -1;
+    PyObject *varnames = PyObject_GetAttrString((PyObject *)code, "co_varnames");
+    if (varnames == nullptr) {
+        return;
+    }
+    for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(varnames); index++) {
+        PyObject *name = PyTuple_GET_ITEM(varnames, index);
+        if (PyUnicode_CompareWithASCIIString(name, "self") == 0) {
+            self_index = (int)index;
+        }
+        else if (PyUnicode_CompareWithASCIIString(name, "obj") == 0) {
+            object_index = (int)index;
+        }
+        else if (PyUnicode_CompareWithASCIIString(name, "reduce") == 0) {
+            reduce_index = (int)index;
+        }
+    }
+    Py_DECREF(varnames);
+    if (self_index < 0 || object_index < 0 || reduce_index < 0) {
+        return;
+    }
+    PyObject *worker = ALEFF_LOCALSPLUS_GET(frame, self_index);
+    PyObject *object = ALEFF_LOCALSPLUS_GET(frame, object_index);
+    PyObject *reduce = ALEFF_LOCALSPLUS_GET(frame, reduce_index);
+    if (worker == nullptr || object == nullptr || reduce == nullptr) {
+        return;
+    }
+    PyObject *owner = PyObject_GetAttrString(reduce, "__self__");
+    PyObject *name = PyObject_GetAttrString(reduce, "__name__");
+    int is_default = owner == object && name != nullptr &&
+        PyUnicode_Check(name) &&
+        PyUnicode_CompareWithASCIIString(name, "__reduce_ex__") == 0;
+    Py_XDECREF(owner);
+    Py_XDECREF(name);
+    if (!is_default) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear();
+        }
+        return;
+    }
+    PyObject *completed = adapter_pickle_complete_default_reduce(
+        worker,
+        object,
+        *value
+    );
+    if (completed == nullptr) {
+        return;
+    }
+    *value = completed;
+}
+
+static void
 inject_resume_value(
     _aleff_frame_t *frame,
     PyObject *value,
@@ -1283,6 +1409,11 @@ inject_resume_value(
         ALEFF_LOCALSPLUS_SET_NEW(frame, result_slot, truth_value);
         Py_DECREF(truth_value);
         _aleff_frame_set_stacktop(frame, result_slot + 1);
+        return;
+    }
+
+    _aleff_pickle_complete_default_reduce(frame, &value, completed_code);
+    if (PyErr_Occurred()) {
         return;
     }
 
@@ -1400,11 +1531,31 @@ push_frame_to_datastack(
 
     /* Source is from a snapshot where stale slots are already nullified.
      * Normalize object entries to independently owned stackrefs. */
+    int owned_slots = 0;
     for (int i = 0; i < num_slots; i++) {
-        ALEFF_LOCALSPLUS_DUP(dst, i);
+        int cloned = _aleff_clone_memoryview_slot(dst, i);
+        if (cloned < 0) {
+            goto frame_restore_error;
+        }
+        if (!cloned) {
+            ALEFF_LOCALSPLUS_DUP(dst, i);
+        }
+        owned_slots++;
     }
 
     return dst;
+
+frame_restore_error:
+    for (int i = 0; i < owned_slots; i++) {
+        ALEFF_LOCALSPLUS_RELEASE(dst, i);
+    }
+    ALEFF_STACKREF_RELEASE(dst->f_executable);
+    ALEFF_STACKREF_RELEASE(dst->f_funcobj);
+    Py_XDECREF(dst->f_globals);
+    Py_XDECREF(dst->f_builtins);
+    Py_XDECREF(dst->f_locals);
+    tstate->datastack_top -= nslots;
+    return nullptr;
 }
 
 /* Build a real generator-family owner around a copied suspended frame.
@@ -1470,7 +1621,17 @@ generator_owner_from_frame_copy(
     dst->previous = nullptr;
     dst->owner = FRAME_OWNED_BY_FRAME_OBJECT;
     for (int i = 0; i < src_copy->num_slots; i++) {
-        ALEFF_LOCALSPLUS_DUP(dst, i);
+        int cloned = _aleff_clone_memoryview_slot(dst, i);
+        if (cloned < 0) {
+            for (int j = i; j < src_copy->num_slots; j++) {
+                ALEFF_LOCALSPLUS_SET(dst, j, nullptr);
+            }
+            Py_DECREF(py_frame);
+            return nullptr;
+        }
+        if (!cloned) {
+            ALEFF_LOCALSPLUS_DUP(dst, i);
+        }
     }
 
     /* coro.send(outcome) supplies the value that resumes this frame.  A value
@@ -1656,6 +1817,11 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
     /* Outermost frame's previous = nullptr (eval will set it to entry_frame) */
     frames_on_stack[num - 1]->previous = nullptr;
 
+    if (aleff_adapter_snapshot_prepare(snapshot->adapters) < 0) {
+        tstate->datastack_top = saved_datastack_top;
+        return nullptr;
+    }
+
     /* Inject the resume value into the innermost frame */
     inject_resume_value(
         frames_on_stack[0],
@@ -1691,6 +1857,14 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
 
         result = _evalframe(tstate, frame, throwflag);
         throwflag = 0;
+        if (result != nullptr) {
+            PyObject *normalized = adapter_pickle_normalize_result(
+                snapshot->adapters,
+                result
+            );
+            Py_DECREF(result);
+            result = normalized;
+        }
 
         if (i + 1 < num) {
             PyCodeObject *completed_code = _aleff_frame_get_code(
@@ -1841,6 +2015,10 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
         PyErr_SetString(PyExc_TypeError, "replacements must be a dict or None");
         return nullptr;
     }
+    if (start == 1 &&
+        aleff_adapter_snapshot_prepare(snapshot->adapters) < 0) {
+        return nullptr;
+    }
 
     PyObject *pending = Py_NewRef(outcome);
     const PyCodeObject *pending_code =
@@ -1857,6 +2035,42 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
     };
     tstate->exc_info = &restored_exc_state;
     PyObject *return_value = nullptr;
+
+    if (from_coroutine && start < snapshot->num_frames) {
+        PyObject *adapted;
+        if (pending_is_exception) {
+            PyErr_SetRaisedException(pending);
+            pending = nullptr;
+            adapted = aleff_adapter_resume_before_frame(
+                snapshot->adapters,
+                start,
+                nullptr
+            );
+        }
+        else {
+            adapted = aleff_adapter_resume_before_frame(
+                snapshot->adapters,
+                start,
+                pending
+            );
+            pending = nullptr;
+        }
+        if (adapted == nullptr) {
+            pending = PyErr_GetRaisedException();
+            if (pending == nullptr) {
+                PyErr_SetString(
+                    PyExc_RuntimeError,
+                    "async adapter resume failed without an active exception"
+                );
+                pending = PyErr_GetRaisedException();
+            }
+            pending_is_exception = 1;
+        }
+        else {
+            pending = adapted;
+            pending_is_exception = 0;
+        }
+    }
 
     for (int i = start; i < snapshot->num_frames; i++) {
         _aleff_frame_copy_t *src = &snapshot->frames[i];
@@ -1943,7 +2157,23 @@ _aleff_restore_async_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
             }
             result = _evalframe(tstate, frame, 0);
         }
+        if (result != nullptr) {
+            PyObject *normalized = adapter_pickle_normalize_result(
+                snapshot->adapters,
+                result
+            );
+            Py_DECREF(result);
+            result = normalized;
+        }
         tstate->datastack_top = saved_datastack_top;
+
+        if (i + 1 < snapshot->num_frames) {
+            result = aleff_adapter_resume_before_frame(
+                snapshot->adapters,
+                i + 1,
+                result
+            );
+        }
 
         if (result == nullptr) {
             if (i + 1 >= snapshot->num_frames) {

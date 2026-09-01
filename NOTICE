@@ -1,0 +1,45 @@
+aleff
+Copyright 2026 hnmr
+
+CPython-derived components
+==========================
+
+Portions of the following paths are derived from CPython 3.12, 3.13, and
+3.14 source code:
+
+- src/aleff/_multishot/v1/_aleff.c
+- src/aleff/_multishot/v1/adapters/
+
+The original implementation work did not record exact CPython commit IDs.
+The following immutable release tags identify the reference source trees for
+the supported version families:
+
+- https://github.com/python/cpython/tree/v3.12.0
+- https://github.com/python/cpython/tree/v3.13.0
+- https://github.com/python/cpython/tree/v3.14.0
+
+Those portions are licensed under the Python Software Foundation License
+Version 2. The complete CPython license is provided in
+LICENSES/CPython.txt.
+
+Copyright (c) 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
+2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023 Python Software Foundation;
+All Rights Reserved
+
+Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved
+
+Copyright (c) 2001 Python Software Foundation; All Rights Reserved
+
+Summary of changes made to CPython
+----------------------------------
+
+- CPython interpreter-frame and native-object layouts are mirrored where
+  the public C API does not expose the state required for continuation
+  capture and restoration.
+- Selected built-in, object-protocol, container, iterator, itertools,
+  operator, and functools operations are converted into resumable continuation
+  state machines.
+- Adapter state can be copied and restored for multi-shot continuation
+  invocations, with version-specific handling for CPython 3.12 through 3.14.
+- The resulting code is integrated into aleff's extension module and is not
+  a replacement distribution of the CPython interpreter or standard library.

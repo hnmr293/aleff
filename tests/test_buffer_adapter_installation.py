@@ -1,0 +1,178 @@
+"""Installation contracts for buffer-consumer continuation adapters."""
+
+from pathlib import Path
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run_isolated(source: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", source],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_missing_module_metadata_aborts_install_and_rolls_back() -> None:
+    result = _run_isolated(
+        r"""
+import hashlib
+
+
+class ModuleLookupError(Exception):
+    pass
+
+
+class MissingModuleCallable:
+    def __init__(self, original):
+        self.original = original
+
+    def __call__(self, *args, **kwargs):
+        return self.original(*args, **kwargs)
+
+    def __getattribute__(self, name):
+        if name == "__module__":
+            raise ModuleLookupError("missing __module__")
+        return object.__getattribute__(self, name)
+
+
+names = ("new", "md5", "sha1", "sha224", "sha256")
+expected = {name: getattr(hashlib, name) for name in names}
+replacement = MissingModuleCallable(hashlib.sha256)
+hashlib.sha256 = replacement
+expected["sha256"] = replacement
+
+try:
+    import aleff
+except ModuleLookupError as exc:
+    print(type(exc).__name__, str(exc))
+else:
+    print("import succeeded")
+
+print(all(getattr(hashlib, name) is expected[name] for name in names))
+""".strip()
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ModuleLookupError missing __module__\nTrue\n"
+
+
+def test_non_c_binascii_function_aborts_install_and_rolls_back() -> None:
+    result = _run_isolated(
+        r"""
+import binascii
+import hashlib
+
+
+binascii_names = (
+    "a2b_base64", "a2b_hex", "a2b_qp", "a2b_uu",
+    "b2a_base64", "b2a_hex", "b2a_qp", "b2a_uu",
+    "crc32", "crc_hqx", "hexlify", "unhexlify",
+)
+hashlib_names = ("new", "md5", "sha1", "sha256")
+expected_binascii = {name: getattr(binascii, name) for name in binascii_names}
+expected_hashlib = {name: getattr(hashlib, name) for name in hashlib_names}
+replacement = lambda value: value
+binascii.hexlify = replacement
+expected_binascii["hexlify"] = replacement
+
+try:
+    import aleff
+except RuntimeError as exc:
+    print(type(exc).__name__, str(exc))
+else:
+    print("import succeeded")
+
+print(all(getattr(binascii, name) is expected_binascii[name] for name in binascii_names))
+print(all(getattr(hashlib, name) is expected_hashlib[name] for name in hashlib_names))
+""".strip()
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "RuntimeError binascii.hexlify is not a C function\nTrue\nTrue\n"
+
+
+def test_non_c_pickle_function_rolls_back_installed_buffer_adapters() -> None:
+    result = _run_isolated(
+        r"""
+import _csv
+import _pickle
+import binascii
+import hashlib
+import json
+import marshal
+import re
+import zlib
+
+
+targets = (
+    (hashlib, "sha256"),
+    (binascii, "hexlify"),
+    (zlib, "compress"),
+    (re, "match"),
+    (marshal, "dumps"),
+    (_csv, "reader"),
+    (json, "dumps"),
+)
+expected = {(module, name): getattr(module, name) for module, name in targets}
+replacement = lambda value: value
+_pickle.loads = replacement
+
+try:
+    import aleff
+except RuntimeError as exc:
+    print(type(exc).__name__, str(exc))
+else:
+    print("import succeeded")
+
+print(all(getattr(module, name) is expected[module, name] for module, name in targets))
+print(_pickle.loads is replacement)
+""".strip()
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "RuntimeError _pickle.loads is not a C function\nTrue\nTrue\n"
+
+
+def test_pickle_rollback_preserves_error_when_restoration_fails() -> None:
+    result = _run_isolated(
+        r"""
+import _pickle
+import pickle
+import sys
+from types import ModuleType
+
+
+class RollbackWriteError(Exception):
+    pass
+
+
+class ReadOnlyPickleAccelerator(ModuleType):
+    def __getattr__(self, name):
+        return getattr(_pickle, name)
+
+    def __setattr__(self, name, value):
+        raise RollbackWriteError(name)
+
+
+accelerator = ReadOnlyPickleAccelerator("_pickle")
+object.__setattr__(accelerator, "loads", lambda value: value)
+sys.modules["_pickle"] = accelerator
+
+try:
+    import aleff
+except RuntimeError as exc:
+    print(type(exc).__name__, str(exc))
+else:
+    print("import succeeded")
+
+print(accelerator.loads(b"unchanged"))
+""".strip()
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ("RuntimeError _pickle.loads is not a C function\nb'unchanged'\n")

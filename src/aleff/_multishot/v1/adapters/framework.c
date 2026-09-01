@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "api.h"
+#include "critical_sections.h"
 #include "internal.h"
 
 #if defined(_MSC_VER)
@@ -243,6 +244,7 @@ typedef struct {
     AleffAdapterNode *live_head;
     PyThreadState *owner_thread;
     PyFrameObject *owner_frame;
+    AleffCriticalSectionState critical_sections;
     int restored;
 } AleffAdapterToken;
 
@@ -302,6 +304,11 @@ aleff_adapter_suspend(void)
         PyMem_Free(token);
         return NULL;
     }
+    /* Only adapter callbacks keep their C frame suspended until this token is
+     * restored.  A generic caller (notably asyncio) may unwind first. */
+    if (token->live_head != NULL) {
+        aleff_critical_sections_suspend(&token->critical_sections);
+    }
     return capsule;
 }
 
@@ -320,13 +327,11 @@ aleff_adapter_restore(PyObject *capsule)
         PyErr_SetString(PyExc_RuntimeError, "adapter token belongs to another thread");
         return NULL;
     }
-    PyFrameObject *current_frame = PyThreadState_GetFrame(PyThreadState_Get());
-    int same_owner = current_frame == token->owner_frame;
-    Py_XDECREF(current_frame);
-    if (!same_owner) {
+    if (PyEval_GetFrame() != token->owner_frame) {
         PyErr_SetString(PyExc_RuntimeError, "adapter token belongs to another owner");
         return NULL;
     }
+    aleff_critical_sections_restore(&token->critical_sections);
     if (active_adapter != NULL) {
         PyErr_SetString(PyExc_RuntimeError, "another adapter owner is active");
         return NULL;
@@ -367,6 +372,26 @@ aleff_adapter_snapshot_from_token(PyObject *capsule)
     return adapter_snapshot_clone(token->snapshot);
 }
 
+int
+aleff_adapter_snapshot_prepare(AleffAdapterSnapshot *snapshot)
+{
+    if (snapshot == NULL) {
+        return 0;
+    }
+    for (Py_ssize_t i = 0; i < snapshot->count; i++) {
+        snapshot->items[i].prepared = 0;
+    }
+    for (Py_ssize_t i = 0; i < snapshot->count; i++) {
+        AleffAdapterSnapshotItem *item = &snapshot->items[i];
+        if (item->vtable->prepare_resume != NULL &&
+            item->vtable->prepare_resume(item->state) < 0) {
+            return -1;
+        }
+        item->prepared = 1;
+    }
+    return 0;
+}
+
 PyObject *
 aleff_adapter_resume_before_frame(
     AleffAdapterSnapshot *snapshot,
@@ -381,18 +406,6 @@ aleff_adapter_resume_before_frame(
     PyObject *pending_exception = NULL;
     if (current == NULL && PyErr_Occurred()) {
         pending_exception = PyErr_GetRaisedException();
-    }
-    for (Py_ssize_t i = 0; i < snapshot->count; i++) {
-        AleffAdapterSnapshotItem *item = &snapshot->items[i];
-        if (item->prepared || item->vtable->prepare_resume == NULL) {
-            continue;
-        }
-        if (item->vtable->prepare_resume(item->state) < 0) {
-            Py_XDECREF(current);
-            Py_XDECREF(pending_exception);
-            return NULL;
-        }
-        item->prepared = 1;
     }
     if (pending_exception != NULL) {
         PyErr_SetRaisedException(pending_exception);
