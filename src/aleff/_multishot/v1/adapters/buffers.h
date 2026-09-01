@@ -11,8 +11,16 @@ typedef struct {
     int make_bytearray;
 } AleffBufferArgument;
 
-PyObject *adapter_buffer_call(
+PyObject *adapter_buffer_function(
     PyObject *callable,
+    PyObject *args,
+    PyObject *kwargs,
+    const AleffBufferArgument *arguments,
+    Py_ssize_t argument_count
+);
+
+PyObject *adapter_buffer_method(
+    PyObject *descriptor,
     PyObject *receiver,
     PyObject *args,
     PyObject *kwargs,

@@ -6,16 +6,37 @@ typedef enum {
     BUFFER_STAGE_RELEASE,
 } BufferStage;
 
+typedef enum {
+    BUFFER_TARGET_FUNCTION,
+    BUFFER_TARGET_METHOD,
+    BUFFER_TARGET_CONSTRUCTOR,
+} BufferTargetKind;
+
 typedef struct {
-    PyObject *callable;
-    PyObject *receiver;
+    BufferTargetKind kind;
+    union {
+        struct {
+            PyObject *callable;
+        } function;
+        struct {
+            PyObject *descriptor;
+            PyObject *receiver;
+        } method;
+        struct {
+            newfunc constructor;
+            PyTypeObject *type;
+        } constructor;
+    } value;
+} BufferTarget;
+
+typedef struct {
+    BufferTarget target;
     PyObject *args;
     PyObject *kwargs;
     PyObject *owners;
     PyObject *views;
     PyObject *result;
     PyObject *exception;
-    newfunc constructor;
     AleffBufferArgument *arguments;
     Py_ssize_t argument_count;
     Py_ssize_t argument_index;
@@ -26,6 +47,66 @@ typedef struct {
 } BufferState;
 
 static const AleffAdapterVTable buffer_vtable;
+
+static int
+buffer_target_validate(const BufferTarget *target)
+{
+    switch (target->kind) {
+        case BUFFER_TARGET_FUNCTION:
+            if (target->value.function.callable != NULL) {
+                return 0;
+            }
+            break;
+        case BUFFER_TARGET_METHOD:
+            if (target->value.method.descriptor != NULL &&
+                target->value.method.receiver != NULL) {
+                return 0;
+            }
+            break;
+        case BUFFER_TARGET_CONSTRUCTOR:
+            if (target->value.constructor.constructor != NULL &&
+                target->value.constructor.type != NULL) {
+                return 0;
+            }
+            break;
+    }
+    PyErr_SetString(PyExc_RuntimeError, "invalid buffer adapter target");
+    return -1;
+}
+
+static void
+buffer_target_incref(BufferTarget *target)
+{
+    switch (target->kind) {
+        case BUFFER_TARGET_FUNCTION:
+            Py_INCREF(target->value.function.callable);
+            break;
+        case BUFFER_TARGET_METHOD:
+            Py_INCREF(target->value.method.descriptor);
+            Py_INCREF(target->value.method.receiver);
+            break;
+        case BUFFER_TARGET_CONSTRUCTOR:
+            Py_INCREF(target->value.constructor.type);
+            break;
+    }
+}
+
+static void
+buffer_target_clear(BufferTarget *target)
+{
+    switch (target->kind) {
+        case BUFFER_TARGET_FUNCTION:
+            Py_DECREF(target->value.function.callable);
+            break;
+        case BUFFER_TARGET_METHOD:
+            Py_DECREF(target->value.method.descriptor);
+            Py_DECREF(target->value.method.receiver);
+            break;
+        case BUFFER_TARGET_CONSTRUCTOR:
+            Py_DECREF(target->value.constructor.type);
+            break;
+    }
+}
 
 static PyObject *
 buffer_copy_args(PyObject *source)
@@ -77,8 +158,7 @@ buffer_copy_arguments(
 static void
 buffer_clear_state(BufferState *state)
 {
-    Py_XDECREF(state->callable);
-    Py_XDECREF(state->receiver);
+    buffer_target_clear(&state->target);
     Py_XDECREF(state->args);
     Py_XDECREF(state->kwargs);
     Py_XDECREF(state->owners);
@@ -99,8 +179,7 @@ buffer_copy_state(const void *raw_state)
     }
     *copy = *source;
     copy->arguments = NULL;
-    copy->callable = Py_XNewRef(source->callable);
-    copy->receiver = Py_XNewRef(source->receiver);
+    buffer_target_incref(&copy->target);
     copy->args = buffer_copy_args(source->args);
     copy->kwargs = source->kwargs == NULL ? NULL : PyDict_Copy(source->kwargs);
     copy->owners = PyList_GetSlice(source->owners, 0, PyList_GET_SIZE(source->owners));
@@ -226,47 +305,50 @@ replace_buffer_argument(
 
 static PyObject *
 buffer_call_target(
-    PyObject *callable,
-    PyObject *receiver,
-    newfunc constructor,
+    const BufferTarget *target,
     PyObject *args,
     PyObject *kwargs
 )
 {
-    if (constructor != NULL) {
-        return constructor(
-            (PyTypeObject *)receiver,
-            args,
-            kwargs
-        );
-    }
-    if (receiver == NULL) {
-        return PyObject_Call(callable, args, kwargs);
-    }
-    descrgetfunc get = Py_TYPE(callable)->tp_descr_get;
-    PyObject *bound = get == NULL
-        ? NULL
-        : get(callable, receiver, (PyObject *)Py_TYPE(receiver));
-    if (bound == NULL) {
-        if (get == NULL) {
-            PyErr_SetString(PyExc_RuntimeError, "buffer adapter method is not a descriptor");
+    switch (target->kind) {
+        case BUFFER_TARGET_FUNCTION:
+            return PyObject_Call(
+                target->value.function.callable, args, kwargs
+            );
+        case BUFFER_TARGET_METHOD: {
+            PyObject *descriptor = target->value.method.descriptor;
+            PyObject *receiver = target->value.method.receiver;
+            descrgetfunc get = Py_TYPE(descriptor)->tp_descr_get;
+            PyObject *bound = get == NULL
+                ? NULL
+                : get(descriptor, receiver, (PyObject *)Py_TYPE(receiver));
+            if (bound == NULL) {
+                if (get == NULL) {
+                    PyErr_SetString(
+                        PyExc_RuntimeError,
+                        "buffer adapter method is not a descriptor"
+                    );
+                }
+                return NULL;
+            }
+            PyObject *result = PyObject_Call(bound, args, kwargs);
+            Py_DECREF(bound);
+            return result;
         }
-        return NULL;
+        case BUFFER_TARGET_CONSTRUCTOR:
+            return target->value.constructor.constructor(
+                target->value.constructor.type, args, kwargs
+            );
     }
-    PyObject *result = PyObject_Call(bound, args, kwargs);
-    Py_DECREF(bound);
-    return result;
+    PyErr_SetString(PyExc_RuntimeError, "unknown buffer adapter target");
+    return NULL;
 }
 
 static PyObject *
 call_original(BufferState *state)
 {
     return buffer_call_target(
-        state->callable,
-        state->receiver,
-        state->constructor,
-        state->args,
-        state->kwargs
+        &state->target, state->args, state->kwargs
     );
 }
 
@@ -488,31 +570,28 @@ buffer_needs_adapter(
 
 static PyObject *
 buffer_adapter_dispatch(
-    PyObject *callable,
-    PyObject *receiver,
-    newfunc constructor,
+    const BufferTarget *target,
     PyObject *args,
     PyObject *kwargs,
     const AleffBufferArgument *arguments,
     Py_ssize_t argument_count
 )
 {
+    if (buffer_target_validate(target) < 0) {
+        return NULL;
+    }
     if (!buffer_needs_adapter(args, kwargs, arguments, argument_count)) {
-        return buffer_call_target(
-            callable, receiver, constructor, args, kwargs
-        );
+        return buffer_call_target(target, args, kwargs);
     }
 
     BufferState state = {
-        .callable = Py_XNewRef(callable),
-        .receiver = Py_XNewRef(receiver),
+        .target = *target,
         .args = buffer_copy_args(args),
         .kwargs = kwargs == NULL ? NULL : PyDict_Copy(kwargs),
         .owners = buffer_new_slots(argument_count),
         .views = buffer_new_slots(argument_count),
         .result = NULL,
         .exception = NULL,
-        .constructor = constructor,
         .arguments = buffer_copy_arguments(arguments, argument_count),
         .argument_count = argument_count,
         .argument_index = 0,
@@ -521,6 +600,7 @@ buffer_adapter_dispatch(
         .release_index = -1,
         .stage = BUFFER_STAGE_ACQUIRE,
     };
+    buffer_target_incref(&state.target);
     if (state.args == NULL || (kwargs != NULL && state.kwargs == NULL) ||
         state.owners == NULL || state.views == NULL ||
         (argument_count != 0 && state.arguments == NULL)) {
@@ -539,8 +619,26 @@ buffer_adapter_dispatch(
 }
 
 PyObject *
-adapter_buffer_call(
+adapter_buffer_function(
     PyObject *callable,
+    PyObject *args,
+    PyObject *kwargs,
+    const AleffBufferArgument *arguments,
+    Py_ssize_t argument_count
+)
+{
+    BufferTarget target = {
+        .kind = BUFFER_TARGET_FUNCTION,
+        .value.function = {.callable = callable},
+    };
+    return buffer_adapter_dispatch(
+        &target, args, kwargs, arguments, argument_count
+    );
+}
+
+PyObject *
+adapter_buffer_method(
+    PyObject *descriptor,
     PyObject *receiver,
     PyObject *args,
     PyObject *kwargs,
@@ -548,8 +646,15 @@ adapter_buffer_call(
     Py_ssize_t argument_count
 )
 {
+    BufferTarget target = {
+        .kind = BUFFER_TARGET_METHOD,
+        .value.method = {
+            .descriptor = descriptor,
+            .receiver = receiver,
+        },
+    };
     return buffer_adapter_dispatch(
-        callable, receiver, NULL, args, kwargs, arguments, argument_count
+        &target, args, kwargs, arguments, argument_count
     );
 }
 
@@ -563,8 +668,14 @@ adapter_buffer_new(
     Py_ssize_t argument_count
 )
 {
+    BufferTarget target = {
+        .kind = BUFFER_TARGET_CONSTRUCTOR,
+        .value.constructor = {
+            .constructor = constructor,
+            .type = type,
+        },
+    };
     return buffer_adapter_dispatch(
-        NULL, (PyObject *)type, constructor, args, kwargs,
-        arguments, argument_count
+        &target, args, kwargs, arguments, argument_count
     );
 }

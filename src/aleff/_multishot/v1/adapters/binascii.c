@@ -27,8 +27,8 @@ binascii_call(Py_ssize_t index, PyObject *args, PyObject *kwargs)
         .keyword = argument_names[index],
         .flags = PyBUF_SIMPLE,
     };
-    return adapter_buffer_call(
-        originals[index], NULL, args, kwargs, &argument, 1
+    return adapter_buffer_function(
+        originals[index], args, kwargs, &argument, 1
     );
 }
 

@@ -91,8 +91,8 @@ hash_call(Py_ssize_t index, PyObject *args, PyObject *kwargs)
         ? hash_new_arguments : hash_data_arguments;
     Py_ssize_t argument_count = index == 0
         ? ARRAY_SIZE(hash_new_arguments) : ARRAY_SIZE(hash_data_arguments);
-    return adapter_buffer_call(
-        hash_originals[index], NULL, args, kwargs,
+    return adapter_buffer_function(
+        hash_originals[index], args, kwargs,
         arguments, argument_count
     );
 }
@@ -129,8 +129,8 @@ static PyCFunction hash_wrappers[] = {
 static PyObject *
 hmac_call(Py_ssize_t index, PyObject *args, PyObject *kwargs)
 {
-    return adapter_buffer_call(
-        hmac_originals[index], NULL, args, kwargs,
+    return adapter_buffer_function(
+        hmac_originals[index], args, kwargs,
         hmac_arguments, ARRAY_SIZE(hmac_arguments)
     );
 }
@@ -152,7 +152,7 @@ hash_update_wrapper(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     for (Py_ssize_t index = 0; index < hash_type_count; index++) {
         if (PyObject_TypeCheck(self, hash_types[index])) {
-            return adapter_buffer_call(
+            return adapter_buffer_method(
                 hash_update_originals[index], self, args, kwargs,
                 hash_update_arguments, ARRAY_SIZE(hash_update_arguments)
             );
@@ -213,20 +213,23 @@ install_hash_update(PyObject *hash_object)
     }
     PyObject *dict = PyType_GetDict(type);
     Py_ssize_t index = hash_type_count;
-    hash_types[index] = type;
-    hash_update_originals[index] = Py_NewRef(original);
+    PyObject *owned_original = Py_NewRef(original);
     hash_update_methods[index] = *((PyMethodDescrObject *)original)->d_method;
     hash_update_methods[index].ml_meth = _PyCFunction_CAST(hash_update_wrapper);
     hash_update_methods[index].ml_flags = METH_VARARGS | METH_KEYWORDS;
     PyObject *replacement = PyDescr_NewMethod(type, &hash_update_methods[index]);
     if (replacement == NULL) {
+        Py_DECREF(owned_original);
         return -1;
     }
     int status = PyDict_SetItemString(dict, "update", replacement);
     Py_DECREF(replacement);
     if (status < 0) {
+        Py_DECREF(owned_original);
         return -1;
     }
+    hash_types[index] = type;
+    hash_update_originals[index] = owned_original;
     PyType_Modified(type);
     hash_type_count++;
     return 0;

@@ -42,8 +42,8 @@ zlib_call(Py_ssize_t index, PyObject *args, PyObject *kwargs)
         .keyword = NULL,
         .flags = PyBUF_SIMPLE,
     };
-    return adapter_buffer_call(
-        zlib_originals[index], NULL, args, kwargs, &argument, 1
+    return adapter_buffer_function(
+        zlib_originals[index], args, kwargs, &argument, 1
     );
 }
 
@@ -76,7 +76,7 @@ stream_function_call(
         .keyword = "data",
         .flags = PyBUF_SIMPLE,
     };
-    return adapter_buffer_call(original, NULL, args, kwargs, &argument, 1);
+    return adapter_buffer_function(original, args, kwargs, &argument, 1);
 }
 
 static PyObject *
@@ -131,7 +131,7 @@ compression_method_wrapper(PyObject *self, PyObject *args, PyObject *kwargs)
                 .keyword = method->keyword,
                 .flags = PyBUF_SIMPLE,
             };
-            return adapter_buffer_call(
+            return adapter_buffer_method(
                 method->original, self, args, kwargs, &argument, 1
             );
         }
@@ -148,8 +148,8 @@ zstd_frame_wrapper(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
         .keyword = "frame_buffer",
         .flags = PyBUF_SIMPLE,
     };
-    return adapter_buffer_call(
-        zstd_frame_original, NULL, args, kwargs, &argument, 1
+    return adapter_buffer_function(
+        zstd_frame_original, args, kwargs, &argument, 1
     );
 }
 
@@ -176,21 +176,24 @@ install_compression_method(
         return -1;
     }
     CompressionMethod *entry = &compression_methods[compression_method_count];
-    entry->type = type;
-    entry->original = Py_NewRef(original);
+    PyObject *owned_original = Py_NewRef(original);
     entry->method = *((PyMethodDescrObject *)original)->d_method;
     entry->method.ml_meth = _PyCFunction_CAST(compression_method_wrapper);
     entry->method.ml_flags = METH_VARARGS | METH_KEYWORDS;
-    entry->keyword = keyword;
     PyObject *replacement = PyDescr_NewMethod(type, &entry->method);
     if (replacement == NULL) {
+        Py_DECREF(owned_original);
         return -1;
     }
     int status = PyDict_SetItemString(dict, name, replacement);
     Py_DECREF(replacement);
     if (status < 0) {
+        Py_DECREF(owned_original);
         return -1;
     }
+    entry->type = type;
+    entry->original = owned_original;
+    entry->keyword = keyword;
     compression_method_count++;
     PyType_Modified(type);
     return 0;
