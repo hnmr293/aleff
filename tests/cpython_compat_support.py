@@ -18,6 +18,7 @@ def _run_isolated(source: str, timeout: float) -> subprocess.CompletedProcess[st
         [sys.executable, "-c", source],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=timeout,
         check=False,
         env=environment,

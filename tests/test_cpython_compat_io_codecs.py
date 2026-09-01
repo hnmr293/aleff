@@ -25,11 +25,11 @@ def test_io_open_opener_and_iobase_methods_match_cpython() -> None:
             calls = []
 
             def opener(opener_path, flags):
-                calls.append((os.path.basename(opener_path), flags & os.O_ACCMODE))
+                calls.append(os.path.basename(opener_path))
                 return os.open(opener_path, flags)
 
             with io.open(path, "rb", opener=opener) as stream:
-                print("io.open", stream.read(), len(calls), calls[0][0])
+                print("io.open", stream.read(), len(calls), calls[0])
 
         class Lines(io.IOBase):
             def __init__(self, values):
