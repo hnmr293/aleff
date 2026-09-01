@@ -80,9 +80,7 @@ def _resume_against_fresh(
         for decision in decisions:
             expected = _outcome(lambda decision=decision: fresh(decision))
             actual = _outcome(lambda decision=decision: k(decision))
-            assert actual == expected, (
-                f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
-            )
+            assert actual == expected, f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
             outcomes.append(actual)
         return outcomes
 
@@ -400,9 +398,7 @@ def _persistent_dump_operation(callback: Choose) -> bytes:
 
     _with_callback(
         reset_stream,
-        lambda: _PersistentPickler(stream, protocol=4).dump(
-            _PersistentPayload("wire")
-        ),
+        lambda: _PersistentPickler(stream, protocol=4).dump(_PersistentPayload("wire")),
     )
     return stream.getvalue()
 
@@ -663,13 +659,9 @@ def _dumps_reduce_ex_async_multishot() -> None:
         async def resume(k: Any) -> list[Outcome]:
             outcomes: list[Outcome] = []
             for decision in ("async-a", "async-b", "raise", "async-a"):
-                expected = _outcome(
-                    lambda decision=decision: _reduce_operation("dumps", lambda: decision)
-                )
+                expected = _outcome(lambda decision=decision: _reduce_operation("dumps", lambda: decision))
                 actual = await _async_outcome(k(decision))
-                assert actual == expected, (
-                    f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
-                )
+                assert actual == expected, f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
                 outcomes.append(actual)
             return outcomes
 

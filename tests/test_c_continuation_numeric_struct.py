@@ -75,9 +75,7 @@ def _resume_against_fresh(
                 reset()
             actual = _outcome(lambda decision=decision: k(decision))
             expected = _outcome(lambda decision=decision: fresh(decision))
-            assert actual == expected, (
-                f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
-            )
+            assert actual == expected, f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
             outcomes.append(actual)
         return outcomes
 
@@ -338,9 +336,7 @@ def _math_special_passthrough_case(name: str) -> None:
 
 
 for _name in _MATH_SPECIAL_CALLS:
-    _case(
-        f"math_{_name}_special_result_passthrough_multishot", requires_math=_name
-    )(
+    _case(f"math_{_name}_special_result_passthrough_multishot", requires_math=_name)(
         lambda name=_name: _math_special_passthrough_case(name)
     )
 
@@ -433,9 +429,7 @@ def _cmath_fallback_case(protocol: str) -> None:
 
 
 for _protocol in ("float", "index"):
-    _case(f"cmath_{_protocol}_fallback_multishot")(
-        lambda protocol=_protocol: _cmath_fallback_case(protocol)
-    )
+    _case(f"cmath_{_protocol}_fallback_multishot")(lambda protocol=_protocol: _cmath_fallback_case(protocol))
 
 
 def _iterator_math_case(name: str) -> None:
@@ -498,9 +492,7 @@ def _iterator_math_case(name: str) -> None:
 
 
 for _name in _MATH_ITERATOR_NAMES:
-    _case(f"math_{_name}_iterator_state_multishot", requires_math=_name)(
-        lambda name=_name: _iterator_math_case(name)
-    )
+    _case(f"math_{_name}_iterator_state_multishot", requires_math=_name)(lambda name=_name: _iterator_math_case(name))
 
 
 def _numeric_iterator_callback_case(name: str) -> None:
@@ -894,12 +886,8 @@ def _set_native_iterator_snapshot_case(frozen: bool, scenario: str) -> None:
 
 for _frozen in (False, True):
     for _scenario in ("normal", "exhausted"):
-        _case(
-            f"{'frozenset' if _frozen else 'set'}_iterator_{_scenario}_multishot"
-        )(
-            lambda frozen=_frozen, scenario=_scenario: _set_native_iterator_snapshot_case(
-                frozen, scenario
-            )
+        _case(f"{'frozenset' if _frozen else 'set'}_iterator_{_scenario}_multishot")(
+            lambda frozen=_frozen, scenario=_scenario: _set_native_iterator_snapshot_case(frozen, scenario)
         )
 
 for _scenario in ("size-change", "sticky"):
@@ -955,9 +943,7 @@ def _struct_pack_case(api: str) -> None:
 
 
 for _api in ("pack", "pack_into", "Struct.pack", "Struct.pack_into"):
-    _case(f"{_api.replace('.', '_')}_numeric_conversion_multishot")(
-        lambda api=_api: _struct_pack_case(api)
-    )
+    _case(f"{_api.replace('.', '_')}_numeric_conversion_multishot")(lambda api=_api: _struct_pack_case(api))
 
 
 def _numeric_keyword_case(module_name: str, keyword: str) -> None:
@@ -1118,12 +1104,8 @@ def _math_index_subclass_warning_case(name: str) -> None:
         outcomes: list[Outcome] = []
         for decision in decisions:
             actual = _outcome(lambda decision=decision: capture(lambda: k(decision)))
-            expected = _outcome(
-                lambda decision=decision: capture(lambda: call(lambda: decision))
-            )
-            assert actual == expected, (
-                f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
-            )
+            expected = _outcome(lambda decision=decision: capture(lambda: call(lambda: decision)))
+            assert actual == expected, f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
             outcomes.append(actual)
         return outcomes
 
@@ -1139,9 +1121,7 @@ for _name in ("sin", "fsum", "dist"):
     _case(
         f"math_{_name}_index_subclass_warning_multishot",
         requires_math=_name,
-    )(
-        lambda name=_name: _math_index_subclass_warning_case(name)
-    )
+    )(lambda name=_name: _math_index_subclass_warning_case(name))
 
 
 def _math_long_float_type_name_case(name: str) -> None:
@@ -1173,9 +1153,7 @@ for _name in ("sin", "fsum"):
     _case(
         f"math_{_name}_long_float_type_name_multishot",
         requires_math=_name,
-    )(
-        lambda name=_name: _math_long_float_type_name_case(name)
-    )
+    )(lambda name=_name: _math_long_float_type_name_case(name))
 
 
 def _math_rounding_fallback_case(name: str, protocol: str) -> None:
@@ -1367,9 +1345,7 @@ def _cmath_later_argument_case(name: str) -> None:
 
 
 for _name in ("isclose", "log", "rect"):
-    _case(f"cmath_{_name}_argument_2_callback_multishot")(
-        lambda name=_name: _cmath_later_argument_case(name)
-    )
+    _case(f"cmath_{_name}_argument_2_callback_multishot")(lambda name=_name: _cmath_later_argument_case(name))
 
 
 @_case("math_prod_start_callback_multishot", requires_math="prod")
@@ -1825,9 +1801,7 @@ for _api in ("pack", "pack_into", "Struct.pack", "Struct.pack_into"):
         lambda api=_api: _struct_pack_fallback_case(api, "?", "len")
     )
     for _format in ("f", "d"):
-        _case(
-            f"struct_{_api.replace('.', '_')}_{_format}_index_fallback_multishot"
-        )(
+        _case(f"struct_{_api.replace('.', '_')}_{_format}_index_fallback_multishot")(
             lambda api=_api, format_string=_format: _struct_pack_fallback_case(
                 api,
                 format_string,
@@ -1837,12 +1811,8 @@ for _api in ("pack", "pack_into", "Struct.pack", "Struct.pack_into"):
     if sys.version_info >= (3, 14):
         for _format in ("F", "D"):
             for _protocol in ("float", "index"):
-                _case(
-                    f"struct_{_api.replace('.', '_')}_{_format}_{_protocol}_fallback_multishot"
-                )(
-                    lambda api=_api,
-                    format_string=_format,
-                    protocol=_protocol: _struct_pack_fallback_case(
+                _case(f"struct_{_api.replace('.', '_')}_{_format}_{_protocol}_fallback_multishot")(
+                    lambda api=_api, format_string=_format, protocol=_protocol: _struct_pack_fallback_case(
                         api, format_string, protocol
                     )
                 )
@@ -1994,6 +1964,7 @@ def _assert_struct_callback_not_called(
 @_case("struct_bytearray_and_whitespace_preserve_following_callback")
 def _struct_bytearray_and_whitespace_preserve_following_callback() -> None:
     for format_string in ("1s i", "1p\v\fi"):
+
         def call(choose: Choose, format_string: str = format_string) -> Any:
             return struct.pack(
                 format_string,
@@ -2166,9 +2137,7 @@ def _struct_effectful_release_buffer_case(api: str) -> None:
             actual = _outcome(lambda decision=decision: k(decision))
             expected = _outcome(lambda decision=decision: call(lambda: decision))
             current[:] = [suspended_owner]
-            assert actual == expected, (
-                f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
-            )
+            assert actual == expected, f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
             if actual[0] == "return":
                 assert actual[1][2] == 1
             outcomes.append(actual)

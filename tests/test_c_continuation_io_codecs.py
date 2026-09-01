@@ -108,9 +108,7 @@ def _resume_repeated_callback_against_fresh(
                 current_decision = decision
                 expected = _outcome(lambda decision=decision: fresh(decision))
                 actual = _outcome(lambda decision=decision: k(decision))
-                assert actual == expected, (
-                    f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
-                )
+                assert actual == expected, f"decision {decision!r}: actual={actual!r}, expected={expected!r}"
                 outcomes.append(actual)
         finally:
             branching = False
@@ -267,12 +265,8 @@ def _iobase_iter_checks_effectful_closed_truth_value() -> None:
     streams: list[_ClosedPropertyIO] = []
     try:
         outcomes = _resume_against_fresh(
-            lambda choose: _iobase_iter_closed_case(
-                lambda: choose(), truth_callback=True, keepalive=streams
-            ),
-            lambda decision: _iobase_iter_closed_case(
-                lambda: decision, truth_callback=True, keepalive=streams
-            ),
+            lambda choose: _iobase_iter_closed_case(lambda: choose(), truth_callback=True, keepalive=streams),
+            lambda decision: _iobase_iter_closed_case(lambda: decision, truth_callback=True, keepalive=streams),
             (False, "raise", True, False),
             "iobase-iter-closed-truth",
         )
@@ -633,9 +627,7 @@ def _buffered_reader_all_read_methods_invoke_readinto() -> None:
 
 @_case("error", "buffered_reader_read_restores_raw_readinto_errors")
 def _buffered_reader_read_restores_raw_readinto_errors() -> None:
-    outcomes = _buffer_outcomes(
-        "reader", "read", "readinto", ("raise", 1, "raise"), "buffer-reader-read-error"
-    )
+    outcomes = _buffer_outcomes("reader", "read", "readinto", ("raise", 1, "raise"), "buffer-reader-read-error")
     assert outcomes == [
         ("raise", ("ExpectedCallbackError", "raw readinto callback failed")),
         ("return", (b"R", (("readinto", 1),))),
@@ -706,9 +698,7 @@ def _buffered_random_seek_tell_and_read_write_callbacks() -> None:
 
 @_case("error", "buffered_random_compound_phases_restore_after_raw_errors")
 def _buffered_random_compound_phases_restore_after_raw_errors() -> None:
-    read_outcomes = _buffer_outcomes(
-        "random", "read", "seek", ("raise", 0, "raise"), "buffer-random-read-seek-error"
-    )
+    read_outcomes = _buffer_outcomes("random", "read", "seek", ("raise", 0, "raise"), "buffer-random-read-seek-error")
     assert read_outcomes == [
         ("raise", ("ExpectedCallbackError", "raw seek callback failed")),
         ("return", (b"R", (("seek", 0), ("readinto", 1)))),
@@ -727,9 +717,7 @@ def _buffered_random_compound_phases_restore_after_raw_errors() -> None:
 
 @_case("corner", "buffered_rw_pair_write_flush_phase_isolated_per_shot")
 def _buffered_rw_pair_write_flush_phase_isolated_per_shot() -> None:
-    outcomes = _buffer_outcomes(
-        "rwpair", "flush", "write", ("raise", 1, "raise"), "buffer-rwpair-flush-write-error"
-    )
+    outcomes = _buffer_outcomes("rwpair", "flush", "write", ("raise", 1, "raise"), "buffer-rwpair-flush-write-error")
     assert outcomes == [
         ("raise", ("ExpectedCallbackError", "raw write callback failed")),
         ("return", (None, (("write", 1),))),
@@ -786,9 +774,7 @@ def _buffered_close_restores_raw_close_errors() -> None:
             writer.armed = True
             return io.BufferedRWPair(reader, writer, 1).close()
 
-        outcomes = _resume_against_fresh(
-            pair_run, pair_fresh, ("raise", None, "raise"), f"buffer-rwpair-{side}-close"
-        )
+        outcomes = _resume_against_fresh(pair_run, pair_fresh, ("raise", None, "raise"), f"buffer-rwpair-{side}-close")
         assert outcomes == [
             ("raise", ("ExpectedCallbackError", "raw close callback failed")),
             ("return", None),

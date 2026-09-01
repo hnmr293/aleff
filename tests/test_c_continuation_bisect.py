@@ -145,9 +145,7 @@ def _key_execution(
     target: list[Any] = [entry]
 
     def key(value: object) -> int:
-        is_effect_value = (phase == "entry" and value is entry) or (
-            phase == "probe" and value is probe
-        )
+        is_effect_value = (phase == "entry" and value is entry) or (phase == "probe" and value is probe)
         if is_effect_value:
             return cast(int, callback())
         return 1
@@ -169,20 +167,12 @@ def _key_case(operation: str, phase: str, decisions: tuple[Any, ...]) -> None:
 
 
 for _operation in _OPERATIONS:
-    _case(f"{_operation}_key_entry_multishot")(
-        lambda operation=_operation: _key_case(operation, "entry", (0, 2, 0))
-    )
-    _case(f"{_operation}_key_exception")(
-        lambda operation=_operation: _key_case(operation, "entry", ("raise", 0))
-    )
+    _case(f"{_operation}_key_entry_multishot")(lambda operation=_operation: _key_case(operation, "entry", (0, 2, 0)))
+    _case(f"{_operation}_key_exception")(lambda operation=_operation: _key_case(operation, "entry", ("raise", 0)))
 
 for _operation in ("insort_left", "insort_right", "insort"):
-    _case(f"{_operation}_key_probe_multishot")(
-        lambda operation=_operation: _key_case(operation, "probe", (0, 2, 0))
-    )
-    _case(f"{_operation}_key_probe_exception")(
-        lambda operation=_operation: _key_case(operation, "probe", ("raise", 0))
-    )
+    _case(f"{_operation}_key_probe_multishot")(lambda operation=_operation: _key_case(operation, "probe", (0, 2, 0)))
+    _case(f"{_operation}_key_probe_exception")(lambda operation=_operation: _key_case(operation, "probe", ("raise", 0)))
 
 
 def _insort_callback_mutates_receiver(
@@ -241,9 +231,7 @@ def _insort_exact_list_comparison_callback_receiver_multishot() -> None:
                     tuple[str, Any, tuple[str, ...]],
                     k(decision),
                 )
-                expected = _insort_callback_mutates_receiver(
-                    operation, lambda decision=decision: decision
-                )
+                expected = _insort_callback_mutates_receiver(operation, lambda decision=decision: decision)
                 comparisons.append((actual, expected))
             return comparisons
 
@@ -254,11 +242,7 @@ def _insort_exact_list_comparison_callback_receiver_multishot() -> None:
                     tuple[str, Any, tuple[str, ...]],
                 ]
             ],
-            handler(
-                lambda: _insort_callback_mutates_receiver(
-                    operation, lambda: choose()
-                )
-            ),
+            handler(lambda: _insort_callback_mutates_receiver(operation, lambda: choose())),
         )
         assert suspension_count == 1
         assert all(actual == expected for actual, expected in comparisons), comparisons
@@ -306,23 +290,17 @@ def _sequence_case(operation: str, site: str, decisions: tuple[Any, ...]) -> Non
 
 
 for _operation in _OPERATIONS:
-    _case(f"{_operation}_len_boundary")(
-        lambda operation=_operation: _sequence_case(operation, "len", (1, 3, 1))
-    )
+    _case(f"{_operation}_len_boundary")(lambda operation=_operation: _sequence_case(operation, "len", (1, 3, 1)))
     _case(f"{_operation}_getitem_boundary")(
         lambda operation=_operation: _sequence_case(operation, "getitem", (0, 2, 0))
     )
-    _case(f"{_operation}_len_exception")(
-        lambda operation=_operation: _sequence_case(operation, "len", ("raise", 3))
-    )
+    _case(f"{_operation}_len_exception")(lambda operation=_operation: _sequence_case(operation, "len", ("raise", 3)))
     _case(f"{_operation}_getitem_exception")(
         lambda operation=_operation: _sequence_case(operation, "getitem", ("raise", 0))
     )
 
 for _operation in ("insort_left", "insort_right", "insort"):
-    _case(f"{_operation}_insert_boundary")(
-        lambda operation=_operation: _sequence_case(operation, "insert", (0, 1, 0))
-    )
+    _case(f"{_operation}_insert_boundary")(lambda operation=_operation: _sequence_case(operation, "insert", (0, 1, 0)))
     _case(f"{_operation}_insert_exception")(
         lambda operation=_operation: _sequence_case(operation, "insert", ("raise", 0))
     )
@@ -354,18 +332,10 @@ def _bound_case(operation: str, site: str, decisions: tuple[Any, ...]) -> None:
 
 
 for _operation in _OPERATIONS:
-    _case(f"{_operation}_lo_index_boundary")(
-        lambda operation=_operation: _bound_case(operation, "lo", (0, 1, 0))
-    )
-    _case(f"{_operation}_hi_index_boundary")(
-        lambda operation=_operation: _bound_case(operation, "hi", (1, 3, 1))
-    )
-    _case(f"{_operation}_lo_index_exception")(
-        lambda operation=_operation: _bound_case(operation, "lo", ("raise", 0))
-    )
-    _case(f"{_operation}_hi_index_exception")(
-        lambda operation=_operation: _bound_case(operation, "hi", ("raise", 3))
-    )
+    _case(f"{_operation}_lo_index_boundary")(lambda operation=_operation: _bound_case(operation, "lo", (0, 1, 0)))
+    _case(f"{_operation}_hi_index_boundary")(lambda operation=_operation: _bound_case(operation, "hi", (1, 3, 1)))
+    _case(f"{_operation}_lo_index_exception")(lambda operation=_operation: _bound_case(operation, "lo", ("raise", 0)))
+    _case(f"{_operation}_hi_index_exception")(lambda operation=_operation: _bound_case(operation, "hi", ("raise", 3)))
 
 
 @_case("ordinary_bounds_empty_and_aliases")

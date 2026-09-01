@@ -325,6 +325,7 @@ def _writer_stop_protocol(
 
 
 for _callback_kind in ("rows_next", "row_next"):
+
     @_case("corner", f"writer_{_callback_kind}_stop_iteration_multishot")
     def _writer_stop_iteration(
         callback_kind: str = _callback_kind,

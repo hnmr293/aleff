@@ -471,6 +471,7 @@ def _version_conversion(operation: str, callback: Callable[[], Any]) -> Any:
     if operation == "dumps":
         return marshal.dumps((1, 2), cast(Any, Version()))
     if operation == "dump":
+
         class Writer:
             def __init__(self) -> None:
                 self.data: bytes | None = None
@@ -486,6 +487,7 @@ def _version_conversion(operation: str, callback: Callable[[], Any]) -> Any:
 
 
 for _operation in ("dump", "dumps"):
+
     @_case(f"{_operation}_version_index_multishot")
     def _version_index_multishot(operation: str = _operation) -> None:
         decisions = (4, 3, "not-an-index", "raise", 4)
@@ -527,6 +529,7 @@ def _allow_code(operation: str, callback: Callable[[], Any]) -> Any:
     if operation == "loads":
         return cast(Any, marshal.loads)(encoded, allow_code=allow).co_filename
     if operation == "dump":
+
         class Writer:
             def __init__(self) -> None:
                 self.data = b""
@@ -542,6 +545,7 @@ def _allow_code(operation: str, callback: Callable[[], Any]) -> Any:
 
 
 if sys.version_info >= (3, 13):
+
     @_case("load_allow_code_multishot")
     def _load_allow_code_multishot() -> None:
         decisions = (True, False, "not-a-bool", "raise", True)
@@ -620,11 +624,7 @@ def _dump_write_async_multishot() -> None:
                     actual: Outcome = ("raise", (type(exc).__name__, str(exc)))
                 else:
                     actual = ("return", value)
-                expected = _outcome(
-                    lambda decision=decision: _dump_write(
-                        lambda: _callback(decision)
-                    )
-                )
+                expected = _outcome(lambda decision=decision: _dump_write(lambda: _callback(decision)))
                 assert actual == expected
                 outcomes.append(actual)
             return outcomes

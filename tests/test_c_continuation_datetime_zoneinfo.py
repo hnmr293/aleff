@@ -292,16 +292,8 @@ def _run_datetime_conversion(target: str, choose: Choose) -> Any:
 def _run_time_target(target: str, choose: Choose) -> Any:
     if target.startswith("datetime.time aware comparison "):
         right_callback = " comparison right " in target
-        left_tz = (
-            _FixedTZ(3)
-            if right_callback
-            else _CallbackTZ(choose, "utcoffset", comparison=True)
-        )
-        right_tz = (
-            _CallbackTZ(choose, "utcoffset", comparison=True)
-            if right_callback
-            else _FixedTZ(2)
-        )
+        left_tz = _FixedTZ(3) if right_callback else _CallbackTZ(choose, "utcoffset", comparison=True)
+        right_tz = _CallbackTZ(choose, "utcoffset", comparison=True) if right_callback else _FixedTZ(2)
         left = time(3, 0, tzinfo=left_tz)
         right = time(4, 0, tzinfo=right_tz)
         operation = target.rsplit(" ", 1)[1]
@@ -351,11 +343,7 @@ def _run_datetime_target(target: str, choose: Choose) -> Any:
                 trigger_occurrence=trigger_occurrence,
             )
         )
-        right_tz = (
-            _CallbackTZ(choose, "utcoffset", comparison=True)
-            if right_callback
-            else _FixedTZ(2)
-        )
+        right_tz = _CallbackTZ(choose, "utcoffset", comparison=True) if right_callback else _FixedTZ(2)
         left = datetime(2000, 1, 2, 3, 0, tzinfo=left_tz)
         right = datetime(2000, 1, 2, 3, 0, tzinfo=right_tz)
         operation = target.rsplit(" ", 1)[1]
@@ -372,16 +360,8 @@ def _run_datetime_target(target: str, choose: Choose) -> Any:
         "datetime.datetime aware subtraction right",
     ):
         right_callback = target.endswith(" right")
-        left_tz = (
-            _FixedTZ(3)
-            if right_callback
-            else _CallbackTZ(choose, "utcoffset", comparison=True)
-        )
-        right_tz = (
-            _CallbackTZ(choose, "utcoffset", comparison=True)
-            if right_callback
-            else _FixedTZ(2)
-        )
+        left_tz = _FixedTZ(3) if right_callback else _CallbackTZ(choose, "utcoffset", comparison=True)
+        right_tz = _CallbackTZ(choose, "utcoffset", comparison=True) if right_callback else _FixedTZ(2)
         left = datetime(2000, 1, 2, 3, 0, tzinfo=left_tz)
         right = datetime(2000, 1, 2, 3, 0, tzinfo=right_tz)
         return left - right

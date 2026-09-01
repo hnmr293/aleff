@@ -147,9 +147,7 @@ for _operation in _OPERATIONS:
         )
     )
     _case(f"{_operation}_str_middle_callback_multishot")(
-        lambda operation=_operation: _substitution_case(
-            operation, "a-a-a", "a", 2, ("<one>", "", "raise", "<one>")
-        )
+        lambda operation=_operation: _substitution_case(operation, "a-a-a", "a", 2, ("<one>", "", "raise", "<one>"))
     )
     _case(f"{_operation}_str_final_callback_multishot")(
         lambda operation=_operation: _substitution_case(
@@ -166,19 +164,13 @@ for _operation in _OPERATIONS:
         )
     )
     _case(f"{_operation}_zero_width_callback_multishot")(
-        lambda operation=_operation: _substitution_case(
-            operation, "ab", "", 2, ("X", "Y", "raise", "X")
-        )
+        lambda operation=_operation: _substitution_case(operation, "ab", "", 2, ("X", "Y", "raise", "X"))
     )
     _case(f"{_operation}_empty_then_nonempty_same_position_multishot")(
-        lambda operation=_operation: _substitution_case(
-            operation, "x", "|x", 2, ("X", "Y", "raise", "X")
-        )
+        lambda operation=_operation: _substitution_case(operation, "x", "|x", 2, ("X", "Y", "raise", "X"))
     )
     _case(f"{_operation}_count_limited_callback_multishot")(
-        lambda operation=_operation: _substitution_case(
-            operation, "a-a-a", "a", 1, ("X", "Y", "raise", "X"), count=2
-        )
+        lambda operation=_operation: _substitution_case(operation, "a-a-a", "a", 1, ("X", "Y", "raise", "X"), count=2)
     )
 
 
