@@ -1,11 +1,14 @@
 #include "builtins.h"
 #include "bisect.h"
+#include "binascii.h"
 #include "codecs.h"
+#include "compression.h"
 #include "containers.h"
 #include "csv.h"
 #include "datetime.h"
 #include "functools.h"
 #include "heapq.h"
+#include "hashing.h"
 #include "io.h"
 #include "io_buffered.h"
 #include "io_text.h"
@@ -578,6 +581,13 @@ aleff_adapter_install(void)
     PyObject *pre_zoneinfo = NULL;
     PyObject *pre_io = NULL;
     PyObject *pre_codecs = NULL;
+    PyObject *pre_hashlib = NULL;
+    PyObject *pre_hmac = NULL;
+    PyObject *pre_binascii = NULL;
+    PyObject *pre_zlib = NULL;
+    PyObject *pre_bz2 = NULL;
+    PyObject *pre_lzma = NULL;
+    PyObject *pre_zstd = NULL;
     if (adapters_installed) {
         return 0;
     }
@@ -666,12 +676,26 @@ aleff_adapter_install(void)
     pre_zoneinfo = PyImport_ImportModule("zoneinfo");
     pre_io = PyImport_ImportModule("io");
     pre_codecs = PyImport_ImportModule("codecs");
+    pre_hashlib = PyImport_ImportModule("hashlib");
+    pre_hmac = PyImport_ImportModule("hmac");
+    pre_binascii = PyImport_ImportModule("binascii");
+    pre_zlib = PyImport_ImportModule("zlib");
+    pre_bz2 = PyImport_ImportModule("bz2");
+    pre_lzma = PyImport_ImportModule("lzma");
+#if PY_VERSION_HEX >= 0x030e0000
+    pre_zstd = PyImport_ImportModule("compression.zstd");
+    if (pre_zstd == NULL && PyErr_ExceptionMatches(PyExc_ModuleNotFoundError)) {
+        PyErr_Clear();
+    }
+#endif
     if (pre_itertools == NULL || pre_operator == NULL || pre_functools == NULL ||
         pre_bisect == NULL || pre_heapq == NULL || pre_re == NULL ||
         pre_marshal == NULL || pre_csv == NULL || pre_json == NULL ||
         pre_pickle == NULL || pre_math == NULL || pre_cmath == NULL ||
         pre_struct == NULL || pre_datetime == NULL ||
-        pre_zoneinfo == NULL || pre_io == NULL || pre_codecs == NULL) {
+        pre_zoneinfo == NULL || pre_io == NULL || pre_codecs == NULL ||
+        pre_hashlib == NULL || pre_hmac == NULL || pre_binascii == NULL ||
+        pre_zlib == NULL || pre_bz2 == NULL || pre_lzma == NULL) {
         goto rollback;
     }
     BACKUP_MODULE(pre_itertools, "tee");
@@ -1210,6 +1234,13 @@ aleff_adapter_install(void)
         adapter_codecs_install(pre_codecs) < 0) {
         goto rollback;
     }
+    if (adapter_hashing_install(pre_hashlib, pre_hmac) < 0 ||
+        adapter_binascii_install(pre_binascii) < 0 ||
+        adapter_compression_install(
+            pre_zlib, pre_bz2, pre_lzma, pre_zstd
+        ) < 0) {
+        goto rollback;
+    }
     if (adapter_regex_install(pre_re) < 0) {
         goto rollback;
     }
@@ -1243,6 +1274,13 @@ aleff_adapter_install(void)
     Py_XDECREF(pre_zoneinfo);
     Py_XDECREF(pre_io);
     Py_XDECREF(pre_codecs);
+    Py_XDECREF(pre_hashlib);
+    Py_XDECREF(pre_hmac);
+    Py_XDECREF(pre_binascii);
+    Py_XDECREF(pre_zlib);
+    Py_XDECREF(pre_bz2);
+    Py_XDECREF(pre_lzma);
+    Py_XDECREF(pre_zstd);
     free_install_backup(&backup);
     return 0;
 
@@ -1349,6 +1387,9 @@ rollback:
         PyType_Modified(&PyComplex_Type);
         PyType_Modified(&PyUnicode_Type);
         }
+        adapter_compression_rollback();
+        adapter_binascii_rollback();
+        adapter_hashing_rollback();
         adapter_pickle_rollback();
         adapter_json_rollback();
         adapter_csv_rollback();
@@ -1400,6 +1441,13 @@ rollback:
         Py_XDECREF(pre_zoneinfo);
         Py_XDECREF(pre_io);
         Py_XDECREF(pre_codecs);
+        Py_XDECREF(pre_hashlib);
+        Py_XDECREF(pre_hmac);
+        Py_XDECREF(pre_binascii);
+        Py_XDECREF(pre_zlib);
+        Py_XDECREF(pre_bz2);
+        Py_XDECREF(pre_lzma);
+        Py_XDECREF(pre_zstd);
         free_install_backup(&backup);
         PyErr_Restore(error_type, error_value, error_traceback);
     }
