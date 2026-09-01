@@ -1,4 +1,4 @@
-#define Py_BUILD_CORE
+#define Py_BUILD_CORE_MODULE
 #include "codecs.h"
 
 #include <string.h>
@@ -9,6 +9,7 @@
  * by Python/codecs.c in the corresponding CPython releases. */
 #include <internal/pycore_interp.h>
 #undef Py_BUILD_CORE
+#undef Py_BUILD_CORE_MODULE
 
 typedef enum {
     CODEC_LOOKUP,
