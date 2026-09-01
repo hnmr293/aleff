@@ -31,6 +31,11 @@ setup(
             sources=[
                 "src/aleff/_multishot/v1/_aleff.c",
                 "src/aleff/_multishot/v1/adapters/bisect.c",
+                "src/aleff/_multishot/v1/adapters/binascii.c",
+                "src/aleff/_multishot/v1/adapters/buffers.c",
+                "src/aleff/_multishot/v1/adapters/compression.c",
+                "src/aleff/_multishot/v1/adapters/hashing.c",
+                "src/aleff/_multishot/v1/adapters/module_functions.c",
                 "src/aleff/_multishot/v1/adapters/critical_sections.c",
                 "src/aleff/_multishot/v1/adapters/framework.c",
                 "src/aleff/_multishot/v1/adapters/heapq.c",
@@ -69,6 +74,11 @@ setup(
             depends=[
                 "src/aleff/_multishot/v1/adapters/api.h",
                 "src/aleff/_multishot/v1/adapters/bisect.h",
+                "src/aleff/_multishot/v1/adapters/binascii.h",
+                "src/aleff/_multishot/v1/adapters/buffers.h",
+                "src/aleff/_multishot/v1/adapters/compression.h",
+                "src/aleff/_multishot/v1/adapters/hashing.h",
+                "src/aleff/_multishot/v1/adapters/module_functions.h",
                 "src/aleff/_multishot/v1/adapters/critical_sections.h",
                 "src/aleff/_multishot/v1/adapters/internal.h",
                 "src/aleff/_multishot/v1/adapters/builtins.h",

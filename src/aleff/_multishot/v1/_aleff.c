@@ -1085,11 +1085,24 @@ prepare_resume_frame(
             uint8_t oparg = (*ALEFF_PREV_INSTR(frame) >> 8) & 0xFF;
             int call_items;
 #ifdef CALL_KW
-            call_items = base_opcode == CALL_KW
-                ? oparg + 3
-                : 3 + (oparg & 1);
+            if (base_opcode == CALL_KW) {
+                call_items = oparg + 3;
+            }
+            else {
+#  if PY_VERSION_HEX >= 0x030e0000
+                /* CALL_FUNCTION_EX always consumes callable, self/null,
+                 * positional args, and keyword args on Python 3.14+. */
+                call_items = 4;
+#  else
+                call_items = 3 + (oparg & 1);
+#  endif
+            }
 #else
+#  if PY_VERSION_HEX >= 0x030e0000
+            call_items = 4;
+#  else
             call_items = 3 + (oparg & 1);
+#  endif
 #endif
             int entry_top = value_stack_base + source->active_stack_depth;
             int new_top = entry_top - call_items;

@@ -74,6 +74,21 @@ def allocator_helper(tmp_path_factory: pytest.TempPathFactory) -> AllocatorHelpe
         ctypes.c_size_t,
     ]
     helper.aleff_test_call_install.restype = ctypes.c_int
+    helper.aleff_test_call_hashing_install.argtypes = [
+        ctypes.c_void_p,
+        ctypes.py_object,
+        ctypes.py_object,
+        ctypes.py_object,
+    ]
+    helper.aleff_test_call_hashing_install.restype = ctypes.c_int
+    helper.aleff_test_call_compression_install.argtypes = [
+        ctypes.c_void_p,
+        ctypes.py_object,
+        ctypes.py_object,
+        ctypes.py_object,
+        ctypes.py_object,
+    ]
+    helper.aleff_test_call_compression_install.restype = ctypes.c_int
     return AllocatorHelper(helper, output)
 
 
@@ -149,3 +164,90 @@ with tempfile.NamedTemporaryFile(suffix=".so") as copied:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "11 1 4"
+
+
+@pytest.mark.parametrize(
+    ("symbol", "modules", "tracked"),
+    [
+        (
+            "aleff_test_call_hashing_install",
+            "import hashlib, hmac",
+            'type(hashlib.md5()).__dict__["update"]',
+        ),
+        (
+            "aleff_test_call_compression_install",
+            "import bz2, lzma, zlib",
+            'type(zlib.compressobj()).__dict__["compress"]',
+        ),
+    ],
+)
+def test_method_install_allocation_failure_does_not_leak_descriptor(
+    allocator_helper: AllocatorHelper,
+    symbol: str,
+    modules: str,
+    tracked: str,
+) -> None:
+    """An uncommitted method adapter must not retain its descriptor."""
+
+    extension_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    if not isinstance(extension_suffix, str):
+        pytest.skip("the extension suffix is unavailable")
+    extension = ROOT / "src/aleff/_multishot/v1" / f"_aleff{extension_suffix}"
+    if not extension.is_file():
+        pytest.skip("the in-place extension is not built")
+
+    script = f"""
+import ctypes
+import os
+import shutil
+import sys
+import tempfile
+
+{modules}
+
+with tempfile.NamedTemporaryFile(suffix=".so") as copied:
+    shutil.copyfile(sys.argv[1], copied.name)
+    library = ctypes.CDLL(copied.name)
+    installer_name = "adapter_" + sys.argv[3].removeprefix("aleff_test_call_")
+    address = ctypes.cast(getattr(library, installer_name), ctypes.c_void_p)
+    helper = ctypes.PyDLL(sys.argv[2])
+    call = getattr(helper, sys.argv[3])
+    if sys.argv[3] == "aleff_test_call_hashing_install":
+        call.argtypes = [
+            ctypes.c_void_p, ctypes.py_object, ctypes.py_object,
+            ctypes.py_object,
+        ]
+        arguments = (address, hashlib, hmac, {tracked})
+    else:
+        call.argtypes = [
+            ctypes.c_void_p, ctypes.py_object, ctypes.py_object,
+            ctypes.py_object, ctypes.py_object,
+        ]
+        arguments = (address, zlib, bz2, lzma, {tracked})
+    call.restype = ctypes.c_int
+    status = call(*arguments)
+os.write(1, str(status).encode("ascii"))
+os._exit(0)
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-X",
+            "faulthandler",
+            "-c",
+            script,
+            str(extension),
+            str(allocator_helper.path),
+            symbol,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    status = int(result.stdout)
+    assert status & 1
+    assert status & 2
+    assert status & 4
+    assert not status & 8
+    assert status & 16

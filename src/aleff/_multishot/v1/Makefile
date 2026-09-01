@@ -12,6 +12,8 @@ endif
 
 TARGET = _aleff$(EXT_SUFFIX)
 ADAPTER_SRC = adapters/framework.c adapters/critical_sections.c \
+	adapters/buffers.c adapters/binascii.c adapters/compression.c adapters/hashing.c \
+	adapters/module_functions.c \
 	adapters/bisect.c adapters/heapq.c adapters/regex.c \
 	adapters/numeric.c adapters/numeric_iterators.c adapters/struct.c \
 	adapters/datetime.c adapters/zoneinfo.c \
@@ -23,6 +25,8 @@ ADAPTER_SRC = adapters/framework.c adapters/critical_sections.c \
 	adapters/sets.c adapters/text.c adapters/operator.c adapters/functools.c \
 	adapters/adapters_bootstrap.c adapters/sort_engine.c
 ADAPTER_HEADERS = adapters/api.h adapters/critical_sections.h \
+	adapters/binascii.h adapters/buffers.h adapters/compression.h adapters/hashing.h \
+	adapters/module_functions.h \
 	adapters/bisect.h adapters/builtins.h adapters/containers.h \
 	adapters/functools.h adapters/internal.h adapters/iterators.h adapters/itertools.h \
 	adapters/heapq.h adapters/mappings.h adapters/marshal.h adapters/marshal_reader.h \
