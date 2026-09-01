@@ -8,6 +8,7 @@ typedef struct AleffAdapterSnapshot AleffAdapterSnapshot;
 AleffAdapterSnapshot *aleff_adapter_snapshot_capture(PyFrameObject *start_frame, int depth);
 AleffAdapterSnapshot *aleff_adapter_snapshot_from_token(PyObject *token);
 void aleff_adapter_snapshot_free(AleffAdapterSnapshot *snapshot);
+int aleff_adapter_snapshot_prepare(AleffAdapterSnapshot *snapshot);
 
 PyObject *aleff_adapter_resume_before_frame(
     AleffAdapterSnapshot *snapshot,

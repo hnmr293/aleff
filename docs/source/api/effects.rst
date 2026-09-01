@@ -11,6 +11,7 @@ Prohibited callback contexts
    following callback contexts:
 
    * audit hooks;
+   * the ``array.array`` constructor or methods of ``array.array`` instances;
    * tracing, profiling, or ``sys.monitoring`` callbacks;
    * signal handlers;
    * weak-reference callbacks;
@@ -19,6 +20,7 @@ Prohibited callback contexts
    * callbacks invoked by ``dict.setdefault``;
    * calls to ``str.format`` or ``str.format_map``;
    * calls to ``itertools.tee`` or iteration through an ``itertools._tee``;
+   * codec error handlers registered with ``codecs.register_error``;
    * ``atexit`` callbacks; or
    * GUI callbacks, event-loop callbacks, or callbacks running on another
      thread.

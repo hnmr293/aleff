@@ -1251,32 +1251,6 @@ typedef struct {
     ZipPhase phase;
 } ZipState;
 
-typedef struct {
-    PyObject_HEAD
-    Py_ssize_t index;
-    PyObject *sequence;
-} AleffTupleIterator;
-
-PyTypeObject *tuple_iterator_type = NULL;
-
-PyObject *
-clone_iterator_for_snapshot(PyObject *iterator)
-{
-    if (Py_IS_TYPE(iterator, tuple_iterator_type)) {
-        AleffTupleIterator *source = (AleffTupleIterator *)iterator;
-        if (source->sequence == NULL) {
-            return Py_NewRef(iterator);
-        }
-        PyObject *copy = PyObject_GetIter(source->sequence);
-        if (copy == NULL) {
-            return NULL;
-        }
-        ((AleffTupleIterator *)copy)->index = source->index;
-        return copy;
-    }
-    return Py_NewRef(iterator);
-}
-
 static PyObject *
 zip_snapshot_iterators(const ZipState *state)
 {
