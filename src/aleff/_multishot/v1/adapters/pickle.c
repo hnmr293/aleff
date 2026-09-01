@@ -2753,10 +2753,12 @@ adapter_pickle_install(PyObject *pickle_module)
     return 0;
 
 error:
+    PyObject *raised = PyErr_GetRaisedException();
     for (int index = 0; index < 4; index++) {
         Py_XDECREF(replacements[index]);
     }
     adapter_pickle_rollback();
+    PyErr_SetRaisedException(raised);
     return -1;
 }
 

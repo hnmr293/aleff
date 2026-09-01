@@ -136,3 +136,43 @@ print(_pickle.loads is replacement)
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == "RuntimeError _pickle.loads is not a C function\nTrue\nTrue\n"
+
+
+def test_pickle_rollback_preserves_error_when_restoration_fails() -> None:
+    result = _run_isolated(
+        r"""
+import _pickle
+import pickle
+import sys
+from types import ModuleType
+
+
+class RollbackWriteError(Exception):
+    pass
+
+
+class ReadOnlyPickleAccelerator(ModuleType):
+    def __getattr__(self, name):
+        return getattr(_pickle, name)
+
+    def __setattr__(self, name, value):
+        raise RollbackWriteError(name)
+
+
+accelerator = ReadOnlyPickleAccelerator("_pickle")
+object.__setattr__(accelerator, "loads", lambda value: value)
+sys.modules["_pickle"] = accelerator
+
+try:
+    import aleff
+except RuntimeError as exc:
+    print(type(exc).__name__, str(exc))
+else:
+    print("import succeeded")
+
+print(accelerator.loads(b"unchanged"))
+""".strip()
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ("RuntimeError _pickle.loads is not a C function\nb'unchanged'\n")
