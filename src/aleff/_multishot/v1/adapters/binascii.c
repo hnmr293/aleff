@@ -1,7 +1,6 @@
 #include "binascii.h"
 #include "buffers.h"
-
-#include <string.h>
+#include "module_functions.h"
 
 #define ARRAY_SIZE(array) ((Py_ssize_t)(sizeof(array) / sizeof(*(array))))
 
@@ -66,31 +65,6 @@ static PyCFunction wrappers[] = {
     _PyCFunction_CAST(binascii_wrapper_11),
 };
 
-static PyObject *
-make_replacement(PyObject *original, Py_ssize_t index)
-{
-    if (!PyCFunction_Check(original)) {
-        PyErr_Format(
-            PyExc_RuntimeError,
-            "binascii.%s is not a C function",
-            function_names[index]
-        );
-        return NULL;
-    }
-    methods[index] = *((PyCFunctionObject *)original)->m_ml;
-    methods[index].ml_meth = wrappers[index];
-    methods[index].ml_flags = METH_VARARGS | METH_KEYWORDS;
-    PyObject *module_name = PyObject_GetAttrString(original, "__module__");
-    if (module_name == NULL) {
-        return NULL;
-    }
-    PyObject *replacement = PyCFunction_NewEx(
-        &methods[index], PyCFunction_GET_SELF(original), module_name
-    );
-    Py_DECREF(module_name);
-    return replacement;
-}
-
 int
 adapter_binascii_install(PyObject *module)
 {
@@ -98,25 +72,18 @@ adapter_binascii_install(PyObject *module)
         return 0;
     }
     installed_module = Py_NewRef(module);
-    for (Py_ssize_t index = 0; index < ARRAY_SIZE(function_names); index++) {
-        originals[index] = PyObject_GetAttrString(module, function_names[index]);
-        if (originals[index] == NULL) {
-            adapter_binascii_rollback();
-            return -1;
-        }
-        PyObject *replacement = make_replacement(originals[index], index);
-        if (replacement == NULL) {
-            adapter_binascii_rollback();
-            return -1;
-        }
-        int status = PyObject_SetAttrString(
-            module, function_names[index], replacement
-        );
-        Py_DECREF(replacement);
-        if (status < 0) {
-            adapter_binascii_rollback();
-            return -1;
-        }
+    if (adapter_module_functions_install(
+            module,
+            "binascii",
+            function_names,
+            originals,
+            methods,
+            wrappers,
+            ARRAY_SIZE(function_names),
+            ALEFF_MODULE_FUNCTION_REQUIRE_C
+        ) < 0) {
+        adapter_binascii_rollback();
+        return -1;
     }
     installed = 1;
     return 0;
@@ -128,6 +95,7 @@ adapter_binascii_rollback(void)
     if (installed_module == NULL) {
         return;
     }
+    PyObject *raised = PyErr_GetRaisedException();
     for (Py_ssize_t index = 0; index < ARRAY_SIZE(function_names); index++) {
         if (originals[index] != NULL) {
             if (PyObject_SetAttrString(
@@ -140,4 +108,5 @@ adapter_binascii_rollback(void)
     }
     Py_CLEAR(installed_module);
     installed = 0;
+    PyErr_SetRaisedException(raised);
 }

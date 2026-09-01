@@ -1,7 +1,6 @@
 #include "buffers.h"
 #include "hashing.h"
-
-#include <string.h>
+#include "module_functions.h"
 
 #define ARRAY_SIZE(array) ((Py_ssize_t)(sizeof(array) / sizeof(*(array))))
 #define NO_POSITION PY_SSIZE_T_MAX
@@ -178,74 +177,6 @@ blake_new_wrapper(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     return NULL;
 }
 
-static PyObject *
-make_function_replacement(
-    PyObject *original,
-    const char *name,
-    PyCFunction wrapper,
-    PyMethodDef *method
-)
-{
-    memset(method, 0, sizeof(*method));
-    method->ml_meth = wrapper;
-    method->ml_flags = METH_VARARGS | METH_KEYWORDS;
-    PyObject *self = NULL;
-    if (PyCFunction_Check(original)) {
-        PyMethodDef *original_method = ((PyCFunctionObject *)original)->m_ml;
-        *method = *original_method;
-        method->ml_meth = wrapper;
-        method->ml_flags = METH_VARARGS | METH_KEYWORDS;
-        self = PyCFunction_GET_SELF(original);
-    }
-    else {
-        method->ml_name = name;
-    }
-    PyObject *module_name = PyObject_GetAttrString(original, "__module__");
-    if (module_name == NULL) {
-        PyErr_Clear();
-        module_name = PyUnicode_FromString("hashlib");
-    }
-    PyObject *bridge = module_name == NULL
-        ? NULL : PyCFunction_NewEx(method, self, module_name);
-    Py_XDECREF(module_name);
-    if (bridge == NULL || !PyFunction_Check(original)) {
-        return bridge;
-    }
-    PyObject *replacement = adapter_wrap_python_callable(original, bridge);
-    Py_DECREF(bridge);
-    return replacement;
-}
-
-static int
-replace_module_functions(
-    PyObject *module,
-    const char *const *names,
-    PyObject **originals,
-    PyMethodDef *methods,
-    PyCFunction *wrappers,
-    Py_ssize_t count
-)
-{
-    for (Py_ssize_t index = 0; index < count; index++) {
-        originals[index] = PyObject_GetAttrString(module, names[index]);
-        if (originals[index] == NULL) {
-            return -1;
-        }
-        PyObject *replacement = make_function_replacement(
-            originals[index], names[index], wrappers[index], &methods[index]
-        );
-        if (replacement == NULL) {
-            return -1;
-        }
-        int status = PyObject_SetAttrString(module, names[index], replacement);
-        Py_DECREF(replacement);
-        if (status < 0) {
-            return -1;
-        }
-    }
-    return 0;
-}
-
 static int
 install_hash_update(PyObject *hash_object)
 {
@@ -366,9 +297,10 @@ adapter_hashing_install(PyObject *hashlib, PyObject *hmac)
         adapter_hashing_rollback();
         return -1;
     }
-    if (replace_module_functions(
-            hashlib, hash_names, hash_originals, hash_methods,
-            hash_wrappers, ARRAY_SIZE(hash_names)
+    if (adapter_module_functions_install(
+            hashlib, "hashlib", hash_names, hash_originals, hash_methods,
+            hash_wrappers, ARRAY_SIZE(hash_names),
+            ALEFF_MODULE_FUNCTION_ALLOW_CALLABLE
         ) < 0) {
         adapter_hashing_rollback();
         return -1;
@@ -377,9 +309,10 @@ adapter_hashing_install(PyObject *hashlib, PyObject *hmac)
         _PyCFunction_CAST(hmac_new_wrapper),
         _PyCFunction_CAST(hmac_digest_wrapper),
     };
-    if (replace_module_functions(
-            hmac, hmac_names, hmac_originals, hmac_methods,
-            hmac_wrappers, ARRAY_SIZE(hmac_names)
+    if (adapter_module_functions_install(
+            hmac, "hmac", hmac_names, hmac_originals, hmac_methods,
+            hmac_wrappers, ARRAY_SIZE(hmac_names),
+            ALEFF_MODULE_FUNCTION_ALLOW_CALLABLE
         ) < 0) {
         adapter_hashing_rollback();
         return -1;
@@ -391,6 +324,7 @@ adapter_hashing_install(PyObject *hashlib, PyObject *hmac)
 void
 adapter_hashing_rollback(void)
 {
+    PyObject *raised = PyErr_GetRaisedException();
     if (hashlib_module != NULL) {
         for (Py_ssize_t index = 0; index < ARRAY_SIZE(hash_names); index++) {
             if (hash_originals[index] != NULL) {
@@ -437,4 +371,5 @@ adapter_hashing_rollback(void)
     Py_CLEAR(hashlib_module);
     Py_CLEAR(hmac_module);
     hashing_installed = 0;
+    PyErr_SetRaisedException(raised);
 }

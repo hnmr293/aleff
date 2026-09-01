@@ -1,5 +1,6 @@
 #include "buffers.h"
 #include "compression.h"
+#include "module_functions.h"
 
 #define ARRAY_SIZE(array) ((Py_ssize_t)(sizeof(array) / sizeof(*(array))))
 
@@ -152,75 +153,6 @@ zstd_frame_wrapper(PyObject *Py_UNUSED(self), PyObject *args, PyObject *kwargs)
     );
 }
 
-static PyObject *
-make_function_replacement(
-    PyObject *original,
-    const char *name,
-    PyCFunction wrapper,
-    PyMethodDef *method
-)
-{
-    if (PyCFunction_Check(original)) {
-        *method = *((PyCFunctionObject *)original)->m_ml;
-    }
-    else {
-        *method = (PyMethodDef){
-            .ml_name = name,
-            .ml_meth = NULL,
-            .ml_flags = 0,
-            .ml_doc = NULL,
-        };
-    }
-    method->ml_meth = wrapper;
-    method->ml_flags = METH_VARARGS | METH_KEYWORDS;
-    PyObject *module_name = PyObject_GetAttrString(original, "__module__");
-    if (module_name == NULL) {
-        return NULL;
-    }
-    PyObject *self = PyCFunction_Check(original)
-        ? PyCFunction_GET_SELF(original) : NULL;
-    PyObject *bridge = PyCFunction_NewEx(method, self, module_name);
-    Py_DECREF(module_name);
-    if (bridge == NULL || !PyFunction_Check(original)) {
-        return bridge;
-    }
-    PyObject *replacement = adapter_wrap_python_callable(original, bridge);
-    Py_DECREF(bridge);
-    return replacement;
-}
-
-static int
-install_module_functions(
-    PyObject *module,
-    const char *const *names,
-    PyObject **originals,
-    PyMethodDef *methods,
-    PyCFunction *wrappers,
-    Py_ssize_t count
-)
-{
-    for (Py_ssize_t index = 0; index < count; index++) {
-        originals[index] = PyObject_GetAttrString(module, names[index]);
-        if (originals[index] == NULL) {
-            return -1;
-        }
-        PyObject *replacement = make_function_replacement(
-            originals[index], names[index], wrappers[index], &methods[index]
-        );
-        if (replacement == NULL) {
-            return -1;
-        }
-        int status = PyObject_SetAttrString(
-            module, names[index], replacement
-        );
-        Py_DECREF(replacement);
-        if (status < 0) {
-            return -1;
-        }
-    }
-    return 0;
-}
-
 static int
 install_compression_method(
     PyObject *type_object,
@@ -314,11 +246,13 @@ install_zstd(PyObject *module)
     if (zstd_frame_original == NULL) {
         return -1;
     }
-    PyObject *replacement = make_function_replacement(
+    PyObject *replacement = adapter_module_function_create(
         zstd_frame_original,
+        "compression.zstd",
         "get_frame_size",
         _PyCFunction_CAST(zstd_frame_wrapper),
-        &zstd_frame_method
+        &zstd_frame_method,
+        ALEFF_MODULE_FUNCTION_ALLOW_CALLABLE
     );
     if (replacement == NULL) {
         return -1;
@@ -354,29 +288,35 @@ adapter_compression_install(
     installed_bz2 = Py_NewRef(bz2_module);
     installed_lzma = Py_NewRef(lzma_module);
     installed_zstd = Py_XNewRef(zstd_module);
-    if (install_module_functions(
+    if (adapter_module_functions_install(
             zlib_module,
+            "zlib",
             zlib_function_names,
             zlib_originals,
             zlib_methods,
             zlib_wrappers,
-            ARRAY_SIZE(zlib_function_names)
+            ARRAY_SIZE(zlib_function_names),
+            ALEFF_MODULE_FUNCTION_ALLOW_CALLABLE
         ) < 0 ||
-        install_module_functions(
+        adapter_module_functions_install(
             bz2_module,
+            "bz2",
             stream_function_names,
             bz2_originals,
             bz2_methods,
             bz2_wrappers,
-            ARRAY_SIZE(stream_function_names)
+            ARRAY_SIZE(stream_function_names),
+            ALEFF_MODULE_FUNCTION_ALLOW_CALLABLE
         ) < 0 ||
-        install_module_functions(
+        adapter_module_functions_install(
             lzma_module,
+            "lzma",
             stream_function_names,
             lzma_originals,
             lzma_methods,
             lzma_wrappers,
-            ARRAY_SIZE(stream_function_names)
+            ARRAY_SIZE(stream_function_names),
+            ALEFF_MODULE_FUNCTION_ALLOW_CALLABLE
         ) < 0 ||
         install_zlib_state_methods(zlib_module) < 0 ||
         install_exported_method(
@@ -402,6 +342,7 @@ adapter_compression_install(
 void
 adapter_compression_rollback(void)
 {
+    PyObject *raised = PyErr_GetRaisedException();
     if (installed_zlib != NULL) {
         for (Py_ssize_t index = 0; index < ARRAY_SIZE(zlib_function_names); index++) {
             if (zlib_originals[index] != NULL) {
@@ -471,4 +412,5 @@ adapter_compression_rollback(void)
     Py_CLEAR(installed_lzma);
     Py_CLEAR(installed_zstd);
     installed = 0;
+    PyErr_SetRaisedException(raised);
 }

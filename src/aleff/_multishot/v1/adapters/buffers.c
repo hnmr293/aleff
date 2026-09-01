@@ -27,44 +27,6 @@ typedef struct {
 
 static const AleffAdapterVTable buffer_vtable;
 
-PyObject *
-adapter_wrap_python_callable(PyObject *original, PyObject *bridge)
-{
-    PyObject *globals = PyDict_New();
-    if (globals == NULL) {
-        return NULL;
-    }
-    PyObject *factory = PyRun_String(
-        "lambda bridge: (lambda *args, **kwargs: bridge(*args, **kwargs))",
-        Py_eval_input,
-        globals,
-        globals
-    );
-    Py_DECREF(globals);
-    if (factory == NULL) {
-        return NULL;
-    }
-    PyObject *wrapper = PyObject_CallOneArg(factory, bridge);
-    Py_DECREF(factory);
-    if (wrapper == NULL) {
-        return NULL;
-    }
-    PyObject *functools = PyImport_ImportModule("functools");
-    PyObject *update_wrapper = functools == NULL
-        ? NULL : PyObject_GetAttrString(functools, "update_wrapper");
-    Py_XDECREF(functools);
-    if (update_wrapper == NULL) {
-        Py_DECREF(wrapper);
-        return NULL;
-    }
-    PyObject *updated = PyObject_CallFunctionObjArgs(
-        update_wrapper, wrapper, original, NULL
-    );
-    Py_DECREF(update_wrapper);
-    Py_DECREF(wrapper);
-    return updated;
-}
-
 static PyObject *
 buffer_copy_args(PyObject *source)
 {
@@ -263,31 +225,49 @@ replace_buffer_argument(
 }
 
 static PyObject *
-call_original(BufferState *state)
+buffer_call_target(
+    PyObject *callable,
+    PyObject *receiver,
+    newfunc constructor,
+    PyObject *args,
+    PyObject *kwargs
+)
 {
-    if (state->constructor != NULL) {
-        return state->constructor(
-            (PyTypeObject *)state->receiver,
-            state->args,
-            state->kwargs
+    if (constructor != NULL) {
+        return constructor(
+            (PyTypeObject *)receiver,
+            args,
+            kwargs
         );
     }
-    if (state->receiver == NULL) {
-        return PyObject_Call(state->callable, state->args, state->kwargs);
+    if (receiver == NULL) {
+        return PyObject_Call(callable, args, kwargs);
     }
-    descrgetfunc get = Py_TYPE(state->callable)->tp_descr_get;
+    descrgetfunc get = Py_TYPE(callable)->tp_descr_get;
     PyObject *bound = get == NULL
         ? NULL
-        : get(state->callable, state->receiver, (PyObject *)Py_TYPE(state->receiver));
+        : get(callable, receiver, (PyObject *)Py_TYPE(receiver));
     if (bound == NULL) {
         if (get == NULL) {
             PyErr_SetString(PyExc_RuntimeError, "buffer adapter method is not a descriptor");
         }
         return NULL;
     }
-    PyObject *result = PyObject_Call(bound, state->args, state->kwargs);
+    PyObject *result = PyObject_Call(bound, args, kwargs);
     Py_DECREF(bound);
     return result;
+}
+
+static PyObject *
+call_original(BufferState *state)
+{
+    return buffer_call_target(
+        state->callable,
+        state->receiver,
+        state->constructor,
+        state->args,
+        state->kwargs
+    );
 }
 
 static PyObject *buffer_continue(BufferState *, PyObject *, int);
@@ -476,18 +456,14 @@ buffer_continue(BufferState *state, PyObject *resumed_value, int is_resumed)
     return buffer_finish(state);
 }
 
-PyObject *
-adapter_buffer_call(
-    PyObject *callable,
-    PyObject *receiver,
+static int
+buffer_needs_adapter(
     PyObject *args,
     PyObject *kwargs,
     const AleffBufferArgument *arguments,
     Py_ssize_t argument_count
 )
 {
-    int needs_adapter = 0;
-    int defer_argument_validation = 0;
     for (Py_ssize_t index = 0; index < argument_count; index++) {
         const AleffBufferArgument *argument = &arguments[index];
         PyObject *positional = argument->position < PyTuple_GET_SIZE(args)
@@ -500,108 +476,36 @@ adapter_buffer_call(
             : PyDict_GetItemString(kwargs, argument->exclusive_keyword);
         if ((positional != NULL && keyword != NULL) ||
             ((positional != NULL || keyword != NULL) && exclusive != NULL)) {
-            defer_argument_validation = 1;
-            break;
+            return 0;
         }
         PyObject *object = positional != NULL ? positional : keyword;
         if (object != NULL && has_python_buffer(object)) {
-            needs_adapter = 1;
-            break;
+            return 1;
         }
     }
-    if (defer_argument_validation || !needs_adapter) {
-        if (receiver == NULL) {
-            return PyObject_Call(callable, args, kwargs);
-        }
-        descrgetfunc get = Py_TYPE(callable)->tp_descr_get;
-        PyObject *bound = get == NULL
-            ? NULL : get(callable, receiver, (PyObject *)Py_TYPE(receiver));
-        if (bound == NULL) {
-            if (get == NULL) {
-                PyErr_SetString(PyExc_RuntimeError, "buffer adapter method is not a descriptor");
-            }
-            return NULL;
-        }
-        PyObject *result = PyObject_Call(bound, args, kwargs);
-        Py_DECREF(bound);
-        return result;
-    }
-
-    BufferState state = {
-        .callable = Py_NewRef(callable),
-        .receiver = Py_XNewRef(receiver),
-        .args = buffer_copy_args(args),
-        .kwargs = kwargs == NULL ? NULL : PyDict_Copy(kwargs),
-        .owners = buffer_new_slots(argument_count),
-        .views = buffer_new_slots(argument_count),
-        .result = NULL,
-        .exception = NULL,
-        .constructor = NULL,
-        .arguments = buffer_copy_arguments(arguments, argument_count),
-        .argument_count = argument_count,
-        .argument_index = 0,
-        .pending_index = -1,
-        .acquired_count = 0,
-        .release_index = -1,
-        .stage = BUFFER_STAGE_ACQUIRE,
-    };
-    if (state.args == NULL || (kwargs != NULL && state.kwargs == NULL) ||
-        state.owners == NULL || state.views == NULL ||
-        (argument_count != 0 && state.arguments == NULL)) {
-        buffer_clear_state(&state);
-        return NULL;
-    }
-    AleffAdapterFrame frame;
-    if (adapter_enter(&frame, &buffer_vtable, &state) < 0) {
-        buffer_clear_state(&state);
-        return NULL;
-    }
-    PyObject *result = buffer_continue(&state, NULL, 0);
-    adapter_leave(&frame);
-    buffer_clear_state(&state);
-    return result;
+    return 0;
 }
 
-PyObject *
-adapter_buffer_new(
+static PyObject *
+buffer_adapter_dispatch(
+    PyObject *callable,
+    PyObject *receiver,
     newfunc constructor,
-    PyTypeObject *type,
     PyObject *args,
     PyObject *kwargs,
     const AleffBufferArgument *arguments,
     Py_ssize_t argument_count
 )
 {
-    int needs_adapter = 0;
-    int defer_argument_validation = 0;
-    for (Py_ssize_t index = 0; index < argument_count; index++) {
-        const AleffBufferArgument *argument = &arguments[index];
-        PyObject *positional = argument->position < PyTuple_GET_SIZE(args)
-            ? PyTuple_GET_ITEM(args, argument->position) : NULL;
-        PyObject *keyword = kwargs == NULL || argument->keyword == NULL
-            ? NULL : PyDict_GetItemString(kwargs, argument->keyword);
-        PyObject *exclusive = kwargs == NULL ||
-            argument->exclusive_keyword == NULL
-            ? NULL
-            : PyDict_GetItemString(kwargs, argument->exclusive_keyword);
-        if ((positional != NULL && keyword != NULL) ||
-            ((positional != NULL || keyword != NULL) && exclusive != NULL)) {
-            defer_argument_validation = 1;
-            break;
-        }
-        PyObject *object = positional != NULL ? positional : keyword;
-        if (object != NULL && has_python_buffer(object)) {
-            needs_adapter = 1;
-            break;
-        }
-    }
-    if (defer_argument_validation || !needs_adapter) {
-        return constructor(type, args, kwargs);
+    if (!buffer_needs_adapter(args, kwargs, arguments, argument_count)) {
+        return buffer_call_target(
+            callable, receiver, constructor, args, kwargs
+        );
     }
 
     BufferState state = {
-        .callable = NULL,
-        .receiver = Py_NewRef((PyObject *)type),
+        .callable = Py_XNewRef(callable),
+        .receiver = Py_XNewRef(receiver),
         .args = buffer_copy_args(args),
         .kwargs = kwargs == NULL ? NULL : PyDict_Copy(kwargs),
         .owners = buffer_new_slots(argument_count),
@@ -632,4 +536,35 @@ adapter_buffer_new(
     adapter_leave(&frame);
     buffer_clear_state(&state);
     return result;
+}
+
+PyObject *
+adapter_buffer_call(
+    PyObject *callable,
+    PyObject *receiver,
+    PyObject *args,
+    PyObject *kwargs,
+    const AleffBufferArgument *arguments,
+    Py_ssize_t argument_count
+)
+{
+    return buffer_adapter_dispatch(
+        callable, receiver, NULL, args, kwargs, arguments, argument_count
+    );
+}
+
+PyObject *
+adapter_buffer_new(
+    newfunc constructor,
+    PyTypeObject *type,
+    PyObject *args,
+    PyObject *kwargs,
+    const AleffBufferArgument *arguments,
+    Py_ssize_t argument_count
+)
+{
+    return buffer_adapter_dispatch(
+        NULL, (PyObject *)type, constructor, args, kwargs,
+        arguments, argument_count
+    );
 }
