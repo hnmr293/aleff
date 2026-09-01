@@ -9,6 +9,10 @@ on:
 jobs:
   lint:
     name: Lint
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.base_ref != 'main' ||
+      github.head_ref != 'dev'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -28,6 +32,10 @@ jobs:
 
   test:
     name: "Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})"
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.base_ref != 'main' ||
+      github.head_ref != 'dev'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
