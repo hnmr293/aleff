@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include "adapters/api.h"
 #include "adapters/pickle.h"
+#include "adapters/unsafe.h"
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
@@ -1822,16 +1823,48 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
         return nullptr;
     }
 
-    /* Inject the resume value into the innermost frame */
-    inject_resume_value(
-        frames_on_stack[0],
-        value,
-        &snapshot->frames[skip],
-        nullptr
+    /* Resume adapters attached to the first restored frame before injecting
+     * its value.  Later frames take the same path inside the evaluation loop. */
+    int throwflag = 0;
+    PyObject *initial = aleff_adapter_resume_before_frame(
+        snapshot->adapters,
+        skip,
+        Py_NewRef(value)
     );
-    if (PyErr_Occurred()) {
-        tstate->datastack_top = saved_datastack_top;
-        return nullptr;
+    if (initial == nullptr) {
+        PyObject *exception = PyErr_GetRaisedException();
+        if (exception == nullptr) {
+            PyErr_SetString(
+                PyExc_RuntimeError,
+                "restored adapter failed without an active exception"
+            );
+            tstate->datastack_top = saved_datastack_top;
+            return nullptr;
+        }
+        if (prepare_resume_frame(
+                frames_on_stack[0],
+                &snapshot->frames[skip],
+                nullptr
+            ) < 0) {
+            Py_DECREF(exception);
+            tstate->datastack_top = saved_datastack_top;
+            return nullptr;
+        }
+        PyErr_SetRaisedException(exception);
+        throwflag = 1;
+    }
+    else {
+        inject_resume_value(
+            frames_on_stack[0],
+            initial,
+            &snapshot->frames[skip],
+            nullptr
+        );
+        Py_DECREF(initial);
+        if (PyErr_Occurred()) {
+            tstate->datastack_top = saved_datastack_top;
+            return nullptr;
+        }
     }
 
     /* Execute frames one at a time, from innermost to outermost.
@@ -1844,7 +1877,6 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
      * next outer frame using inject_resume_value, which handles both
      * inline dispatch and generic CALL stack states. */
     PyObject *result = nullptr;
-    int throwflag = 0;
     _PyErr_StackItem restored_exc_state = {
         .exc_value = Py_XNewRef(snapshot->frames[skip].handled_exception),
         .previous_item = tstate->exc_info,
@@ -2888,6 +2920,7 @@ static PyMethodDef _aleff_methods[] = {
     {"_debug_frame_stacktop", _aleff_debug_frame_stacktop, METH_O, debug_frame_stacktop_doc},
     {"_suspend_adapters", _aleff_suspend_adapters, METH_NOARGS, nullptr},
     {"_restore_adapters", _aleff_restore_adapters, METH_O, nullptr},
+    {"_unsafe_call", aleff_unsafe_call, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr}
 };
 

@@ -1,4 +1,5 @@
 import os
+import platform
 import sys
 import sysconfig
 from setuptools import setup, Extension  # pyright: ignore[reportMissingModuleSource]
@@ -12,67 +13,90 @@ if not os.path.isfile(os.path.join(header_dir, "Python.h")):
         f"Install the development headers, e.g.:  sudo apt install python{v}-dev"
     )
 
+unsafe_backend_enabled = (
+    sys.platform.startswith("linux")
+    and platform.machine() == "x86_64"
+    and sys.version_info[:2] == (3, 12)
+    and not sysconfig.get_config_var("Py_GIL_DISABLED")
+)
+
 
 class BuildExt(build_ext):
     def build_extensions(self):
+        if (
+            self.compiler.compiler_type != "msvc"
+            and unsafe_backend_enabled
+            and ".S" not in self.compiler.src_extensions
+        ):
+            self.compiler.src_extensions.append(".S")
         if self.compiler.compiler_type == "msvc":
             for ext in self.extensions:
                 ext.extra_compile_args = ["/std:c17", "/experimental:c11atomics"]
         else:
             for ext in self.extensions:
                 ext.extra_compile_args = ["-std=c2x"]
+                if unsafe_backend_enabled:
+                    ext.extra_compile_args.append("-fno-omit-frame-pointer")
         build_ext.build_extensions(self)
+
+
+extension_sources = [
+    "src/aleff/_multishot/v1/_aleff.c",
+    "src/aleff/_multishot/v1/adapters/unsafe.c",
+    "src/aleff/_multishot/v1/adapters/bisect.c",
+    "src/aleff/_multishot/v1/adapters/binascii.c",
+    "src/aleff/_multishot/v1/adapters/buffers.c",
+    "src/aleff/_multishot/v1/adapters/compression.c",
+    "src/aleff/_multishot/v1/adapters/hashing.c",
+    "src/aleff/_multishot/v1/adapters/module_functions.c",
+    "src/aleff/_multishot/v1/adapters/critical_sections.c",
+    "src/aleff/_multishot/v1/adapters/framework.c",
+    "src/aleff/_multishot/v1/adapters/heapq.c",
+    "src/aleff/_multishot/v1/adapters/numeric.c",
+    "src/aleff/_multishot/v1/adapters/numeric_iterators.c",
+    "src/aleff/_multishot/v1/adapters/struct.c",
+    "src/aleff/_multishot/v1/adapters/datetime.c",
+    "src/aleff/_multishot/v1/adapters/zoneinfo.c",
+    "src/aleff/_multishot/v1/adapters/io.c",
+    "src/aleff/_multishot/v1/adapters/io_buffered.c",
+    "src/aleff/_multishot/v1/adapters/io_text.c",
+    "src/aleff/_multishot/v1/adapters/codecs.c",
+    "src/aleff/_multishot/v1/adapters/regex.c",
+    "src/aleff/_multishot/v1/adapters/marshal.c",
+    "src/aleff/_multishot/v1/adapters/marshal_reader.c",
+    "src/aleff/_multishot/v1/adapters/marshal_stream.c",
+    "src/aleff/_multishot/v1/adapters/csv.c",
+    "src/aleff/_multishot/v1/adapters/json.c",
+    "src/aleff/_multishot/v1/adapters/json_encoder.c",
+    "src/aleff/_multishot/v1/adapters/json_decoder.c",
+    "src/aleff/_multishot/v1/adapters/pickle.c",
+    "src/aleff/_multishot/v1/adapters/sort_engine.c",
+    "src/aleff/_multishot/v1/adapters/iterators.c",
+    "src/aleff/_multishot/v1/adapters/iterator_snapshots.c",
+    "src/aleff/_multishot/v1/adapters/itertools.c",
+    "src/aleff/_multishot/v1/adapters/builtins.c",
+    "src/aleff/_multishot/v1/adapters/protocols.c",
+    "src/aleff/_multishot/v1/adapters/containers.c",
+    "src/aleff/_multishot/v1/adapters/mappings.c",
+    "src/aleff/_multishot/v1/adapters/sets.c",
+    "src/aleff/_multishot/v1/adapters/text.c",
+    "src/aleff/_multishot/v1/adapters/operator.c",
+    "src/aleff/_multishot/v1/adapters/functools.c",
+    "src/aleff/_multishot/v1/adapters/adapters_bootstrap.c",
+]
+
+if unsafe_backend_enabled:
+    extension_sources.append("src/aleff/_multishot/v1/adapters/unsafe_switch_amd64_sysv.S")
 
 
 setup(
     ext_modules=[
         Extension(
             "aleff._multishot.v1._aleff",
-            sources=[
-                "src/aleff/_multishot/v1/_aleff.c",
-                "src/aleff/_multishot/v1/adapters/bisect.c",
-                "src/aleff/_multishot/v1/adapters/binascii.c",
-                "src/aleff/_multishot/v1/adapters/buffers.c",
-                "src/aleff/_multishot/v1/adapters/compression.c",
-                "src/aleff/_multishot/v1/adapters/hashing.c",
-                "src/aleff/_multishot/v1/adapters/module_functions.c",
-                "src/aleff/_multishot/v1/adapters/critical_sections.c",
-                "src/aleff/_multishot/v1/adapters/framework.c",
-                "src/aleff/_multishot/v1/adapters/heapq.c",
-                "src/aleff/_multishot/v1/adapters/numeric.c",
-                "src/aleff/_multishot/v1/adapters/numeric_iterators.c",
-                "src/aleff/_multishot/v1/adapters/struct.c",
-                "src/aleff/_multishot/v1/adapters/datetime.c",
-                "src/aleff/_multishot/v1/adapters/zoneinfo.c",
-                "src/aleff/_multishot/v1/adapters/io.c",
-                "src/aleff/_multishot/v1/adapters/io_buffered.c",
-                "src/aleff/_multishot/v1/adapters/io_text.c",
-                "src/aleff/_multishot/v1/adapters/codecs.c",
-                "src/aleff/_multishot/v1/adapters/regex.c",
-                "src/aleff/_multishot/v1/adapters/marshal.c",
-                "src/aleff/_multishot/v1/adapters/marshal_reader.c",
-                "src/aleff/_multishot/v1/adapters/marshal_stream.c",
-                "src/aleff/_multishot/v1/adapters/csv.c",
-                "src/aleff/_multishot/v1/adapters/json.c",
-                "src/aleff/_multishot/v1/adapters/json_encoder.c",
-                "src/aleff/_multishot/v1/adapters/json_decoder.c",
-                "src/aleff/_multishot/v1/adapters/pickle.c",
-                "src/aleff/_multishot/v1/adapters/sort_engine.c",
-                "src/aleff/_multishot/v1/adapters/iterators.c",
-                "src/aleff/_multishot/v1/adapters/iterator_snapshots.c",
-                "src/aleff/_multishot/v1/adapters/itertools.c",
-                "src/aleff/_multishot/v1/adapters/builtins.c",
-                "src/aleff/_multishot/v1/adapters/protocols.c",
-                "src/aleff/_multishot/v1/adapters/containers.c",
-                "src/aleff/_multishot/v1/adapters/mappings.c",
-                "src/aleff/_multishot/v1/adapters/sets.c",
-                "src/aleff/_multishot/v1/adapters/text.c",
-                "src/aleff/_multishot/v1/adapters/operator.c",
-                "src/aleff/_multishot/v1/adapters/functools.c",
-                "src/aleff/_multishot/v1/adapters/adapters_bootstrap.c",
-            ],
+            sources=extension_sources,
             depends=[
                 "src/aleff/_multishot/v1/adapters/api.h",
+                "src/aleff/_multishot/v1/adapters/unsafe.h",
                 "src/aleff/_multishot/v1/adapters/bisect.h",
                 "src/aleff/_multishot/v1/adapters/binascii.h",
                 "src/aleff/_multishot/v1/adapters/buffers.h",

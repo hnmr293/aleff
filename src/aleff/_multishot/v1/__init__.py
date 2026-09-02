@@ -38,6 +38,8 @@ from .winds import (
     wind_range,
 )
 
+from .unsafe import aleffy
+
 __all__ = [
     "Effect",
     "EffectNotHandledError",
@@ -55,4 +57,5 @@ __all__ = [
     "wind",
     "wind_range",
     "Ref",
+    "aleffy",
 ]
