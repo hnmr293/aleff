@@ -26,6 +26,9 @@ import pytest
 from aleff import create_handler, effect, wind_range
 
 
+pytestmark = pytest.mark.publish_wheel
+
+
 CaseKind = Literal["normal", "error", "corner"]
 Case = Callable[[], None]
 Choose = Callable[[], Any]

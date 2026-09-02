@@ -12,6 +12,9 @@ from aleff import (
 )
 
 
+pytestmark = pytest.mark.publish_wheel
+
+
 # ---------------------------------------------------------------------------
 # Composing effects from decorated functions
 # ---------------------------------------------------------------------------

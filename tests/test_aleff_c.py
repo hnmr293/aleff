@@ -22,6 +22,9 @@ from aleff._multishot.v1._aleff import (
 )
 
 
+pytestmark = pytest.mark.publish_wheel
+
+
 # ---------------------------------------------------------------------------
 # Module and type availability
 # ---------------------------------------------------------------------------

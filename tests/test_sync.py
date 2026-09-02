@@ -9,6 +9,9 @@ from aleff import (
     EffectNotHandledError,
 )
 
+
+pytestmark = pytest.mark.publish_wheel
+
 # ---------------------------------------------------------------------------
 # effect() factory
 # ---------------------------------------------------------------------------

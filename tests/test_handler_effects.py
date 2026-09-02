@@ -20,6 +20,9 @@ from aleff import (
 )
 
 
+pytestmark = pytest.mark.publish_wheel
+
+
 # ---------------------------------------------------------------------------
 # Sync handler performs outer effect
 # ---------------------------------------------------------------------------

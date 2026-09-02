@@ -22,6 +22,9 @@ from aleff import (
 from aleff._multishot.v1.winds import _get_wind_stack  # pyright: ignore[reportPrivateUsage]
 
 
+pytestmark = pytest.mark.publish_wheel
+
+
 # ---------------------------------------------------------------------------
 # Basic (no effects)
 # ---------------------------------------------------------------------------
