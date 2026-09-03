@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import ctypes
 import os
 from pathlib import Path
@@ -69,19 +70,25 @@ def test_aleffy_rejects_non_callable() -> None:
         aleffy(42)  # pyright: ignore[reportArgumentType]
 
 
-def test_aleffy_rejects_ctypes_function_pointers() -> None:
-    @ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int)
-    def callback(value: int) -> int:
-        return value
-
-    functions = (
-        ctypes.CDLL(None).strlen,
-        ctypes.PyDLL(None).Py_IncRef,
-        callback,
-    )
-    for function in functions:
+@pytest.mark.parametrize("kind", ["cdll", "pydll", "cfuncptr"])
+def test_aleffy_rejects_ctypes_function_pointers(kind: str) -> None:
+    def assert_rejected(function: Callable[..., object]) -> None:
         with pytest.raises(TypeError, match="aleffy does not support ctypes callables"):
             aleffy(function)
+
+    if kind == "cdll":
+        assert_rejected(
+            ctypes.CDLL("kernel32.dll").GetCurrentProcessId if sys.platform == "win32" else ctypes.CDLL(None).strlen
+        )
+    elif kind == "pydll":
+        assert_rejected(ctypes.pythonapi.Py_IncRef)
+    else:
+
+        @ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int)
+        def callback(value: int) -> int:
+            return value
+
+        assert_rejected(callback)
 
 
 @pytest.mark.skipif(
