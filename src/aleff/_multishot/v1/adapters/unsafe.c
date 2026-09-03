@@ -1,11 +1,27 @@
-#define _GNU_SOURCE
+#if defined(__linux__)
+#  define _GNU_SOURCE
+#endif
 
-#include <errno.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
 #include <string.h>
+
+#include "internal.h"
+#include "unsafe.h"
+
+#if defined(__linux__) && defined(__x86_64__) && \
+    !defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030c0000 && \
+    PY_VERSION_HEX < 0x030d0000
+#  define ALEFF_UNSAFE_SUPPORTED 1
+#else
+#  define ALEFF_UNSAFE_SUPPORTED 0
+#endif
+
+#if ALEFF_UNSAFE_SUPPORTED
+
+#include <errno.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -28,19 +44,6 @@
 #else
 #  define ALEFF_UNSAFE_NO_ASAN
 #endif
-
-#include "internal.h"
-#include "unsafe.h"
-
-#if defined(__linux__) && defined(__x86_64__) && \
-    !defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030c0000 && \
-    PY_VERSION_HEX < 0x030d0000
-#  define ALEFF_UNSAFE_SUPPORTED 1
-#else
-#  define ALEFF_UNSAFE_SUPPORTED 0
-#endif
-
-#if ALEFF_UNSAFE_SUPPORTED
 
 #define ALEFF_UNSAFE_ALT_STACK_SIZE (1024U * 1024U)
 
