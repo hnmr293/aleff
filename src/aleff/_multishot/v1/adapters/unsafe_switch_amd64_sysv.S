@@ -46,4 +46,12 @@ aleff_unsafe_run_on_stack:
     ud2
     .size aleff_unsafe_run_on_stack, .-aleff_unsafe_run_on_stack
 
+    .globl aleff_unsafe_stack_copy
+    .type aleff_unsafe_stack_copy, @function
+aleff_unsafe_stack_copy:
+    movq %rdx, %rcx
+    rep movsb
+    ret
+    .size aleff_unsafe_stack_copy, .-aleff_unsafe_stack_copy
+
     .section .note.GNU-stack,"",@progbits

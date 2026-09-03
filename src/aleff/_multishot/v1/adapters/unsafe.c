@@ -1,7 +1,33 @@
+#define _GNU_SOURCE
+
+#include <errno.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+#if defined(__clang__)
+#  if __has_feature(address_sanitizer)
+#    define ALEFF_UNSAFE_ADDRESS_SANITIZER 1
+#  endif
+#elif defined(__GNUC__) && defined(__SANITIZE_ADDRESS__)
+#  define ALEFF_UNSAFE_ADDRESS_SANITIZER 1
+#endif
+
+#ifndef ALEFF_UNSAFE_ADDRESS_SANITIZER
+#  define ALEFF_UNSAFE_ADDRESS_SANITIZER 0
+#endif
+
+#if ALEFF_UNSAFE_ADDRESS_SANITIZER
+#  include <sanitizer/asan_interface.h>
+#  include <sanitizer/common_interface_defs.h>
+#  define ALEFF_UNSAFE_NO_ASAN __attribute__((no_sanitize_address))
+#else
+#  define ALEFF_UNSAFE_NO_ASAN
+#endif
 
 #include "internal.h"
 #include "unsafe.h"
@@ -17,7 +43,6 @@
 #if ALEFF_UNSAFE_SUPPORTED
 
 #define ALEFF_UNSAFE_ALT_STACK_SIZE (1024U * 1024U)
-#define ALEFF_UNSAFE_MAX_SNAPSHOT_SIZE (8U * 1024U * 1024U)
 
 typedef struct {
     uint64_t rbx;
@@ -38,6 +63,9 @@ _Static_assert(offsetof(AleffUnsafeContext, rip) == 56, "context rip offset");
 _Static_assert(offsetof(AleffUnsafeContext, mxcsr) == 64, "context mxcsr offset");
 _Static_assert(offsetof(AleffUnsafeContext, x87_control) == 68, "context x87 offset");
 
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((returns_twice))
+#endif
 int aleff_unsafe_context_save(AleffUnsafeContext *context);
 [[noreturn]] void aleff_unsafe_context_restore(const AleffUnsafeContext *context);
 [[noreturn]] void aleff_unsafe_run_on_stack(
@@ -45,14 +73,22 @@ int aleff_unsafe_context_save(AleffUnsafeContext *context);
     void (*function)(void *),
     void *argument
 );
+void aleff_unsafe_stack_copy(void *destination, const void *source, size_t size);
 
 typedef struct AleffUnsafeCall AleffUnsafeCall;
 typedef struct AleffUnsafeSnapshot AleffUnsafeSnapshot;
+typedef struct AleffUnsafeHookManager AleffUnsafeHookManager;
 
 typedef enum {
     ALEFF_UNSAFE_SOURCE_LIVE = 1,
     ALEFF_UNSAFE_SOURCE_SNAPSHOT = 2,
 } AleffUnsafeSourceKind;
+
+typedef enum {
+    ALEFF_UNSAFE_EVENT_NONE = 0,
+    ALEFF_UNSAFE_EVENT_CALLBACK = 1,
+    ALEFF_UNSAFE_EVENT_COMPLETE = 2,
+} AleffUnsafeEvent;
 
 typedef struct {
     AleffUnsafeSourceKind kind;
@@ -71,24 +107,42 @@ struct AleffUnsafeSnapshot {
     unsigned char *return_stack;
     size_t return_stack_size;
     uintptr_t return_stack_start;
-    unsigned char *alternate_stack;
+    void *alternate_stack_mapping;
+    size_t alternate_stack_mapping_size;
+    void *alternate_stack_bottom;
+    size_t alternate_stack_size;
+    void *alternate_stack_top;
+    _PyCFrame *return_cframe;
+    _PyCFrame bridge_cframe;
 
+    AleffUnsafeEvent event;
+    struct _PyInterpreterFrame *callback_frame;
+    int callback_throwflag;
     PyObject *completed_result;
     PyObject *completed_exception;
 };
 
 struct AleffUnsafeCall {
     _Atomic unsigned int references;
+    AleffUnsafeSource source;
     PyThreadState *owner_thread;
     PyInterpreterState *owner_interpreter;
-    _PyFrameEvalFunction previous_eval;
     AleffUnsafeContext checkpoint;
+    uintptr_t stack_low;
+    uintptr_t stack_high;
     uintptr_t boundary_top;
     int checkpoint_ready;
     int resuming;
     PyObject *resume_value;
     PyObject *resume_exception;
     AleffUnsafeSnapshot *active_snapshot;
+};
+
+struct AleffUnsafeHookManager {
+    PyInterpreterState *interpreter;
+    _PyFrameEvalFunction downstream_eval;
+    Py_ssize_t active_boundaries;
+    AleffUnsafeHookManager *next;
 };
 
 #if defined(_MSC_VER)
@@ -98,6 +152,155 @@ struct AleffUnsafeCall {
 #endif
 
 static ALEFF_THREAD_LOCAL AleffUnsafeCall *active_call = NULL;
+static AleffUnsafeHookManager *hook_managers = NULL;
+
+static void
+unsafe_sanitizer_start_switch(const void *stack_bottom, size_t stack_size)
+{
+#if ALEFF_UNSAFE_ADDRESS_SANITIZER
+    __sanitizer_start_switch_fiber(NULL, stack_bottom, stack_size);
+#else
+    (void)stack_bottom;
+    (void)stack_size;
+#endif
+}
+
+static void
+unsafe_sanitizer_finish_switch(void)
+{
+#if ALEFF_UNSAFE_ADDRESS_SANITIZER
+    __sanitizer_finish_switch_fiber(NULL, NULL, NULL);
+#endif
+}
+
+static void
+unsafe_capture_stack(void *destination, const void *source, size_t size)
+{
+#if ALEFF_UNSAFE_ADDRESS_SANITIZER
+    aleff_unsafe_stack_copy(destination, source, size);
+    __asan_unpoison_memory_region(source, size);
+#else
+    memcpy(destination, source, size);
+#endif
+}
+
+static void
+unsafe_restore_stack(void *destination, const void *source, size_t size)
+{
+#if ALEFF_UNSAFE_ADDRESS_SANITIZER
+    aleff_unsafe_stack_copy(destination, source, size);
+    __asan_unpoison_memory_region(destination, size);
+#else
+    memcpy(destination, source, size);
+#endif
+}
+
+static ALEFF_UNSAFE_NO_ASAN struct _PyInterpreterFrame *
+unsafe_read_current_frame(const _PyCFrame *cframe)
+{
+    return cframe->current_frame;
+}
+
+static int
+unsafe_get_current_frame(
+    const AleffUnsafeCall *call,
+    struct _PyInterpreterFrame **frame
+)
+{
+    const _PyCFrame *cframe = call->owner_thread->cframe;
+    if (cframe != &call->owner_thread->root_cframe) {
+        uintptr_t address = (uintptr_t)cframe;
+        if (address < call->stack_low ||
+            address > call->stack_high ||
+            sizeof(*cframe) > call->stack_high - address) {
+            PyErr_SetString(
+                PyExc_RuntimeError,
+                "aleffy encountered a C frame outside the native thread stack"
+            );
+            return -1;
+        }
+    }
+    *frame = unsafe_read_current_frame(cframe);
+    return 0;
+}
+
+static PyObject *unsafe_eval_frame(
+    PyThreadState *thread,
+    struct _PyInterpreterFrame *frame,
+    int throwflag
+);
+[[noreturn]] static void unsafe_restore_return_stack(void *argument);
+static const AleffAdapterVTable unsafe_vtable;
+
+static AleffUnsafeHookManager *
+unsafe_find_hook_manager(PyInterpreterState *interpreter)
+{
+    for (AleffUnsafeHookManager *manager = hook_managers;
+         manager != NULL;
+         manager = manager->next) {
+        if (manager->interpreter == interpreter) {
+            return manager;
+        }
+    }
+    return NULL;
+}
+
+static int
+unsafe_hook_enter(PyInterpreterState *interpreter)
+{
+    AleffUnsafeHookManager *manager = unsafe_find_hook_manager(interpreter);
+    if (manager != NULL) {
+        if (_PyInterpreterState_GetEvalFrameFunc(interpreter) != unsafe_eval_frame) {
+            PyErr_SetString(
+                PyExc_RuntimeError,
+                "the interpreter eval-frame hook changed while aleffy was active"
+            );
+            return -1;
+        }
+        manager->active_boundaries++;
+        return 0;
+    }
+
+    _PyFrameEvalFunction downstream = _PyInterpreterState_GetEvalFrameFunc(interpreter);
+    if (downstream == unsafe_eval_frame) {
+        PyErr_SetString(PyExc_RuntimeError, "aleffy eval-frame hook state is inconsistent");
+        return -1;
+    }
+    manager = PyMem_Calloc(1, sizeof(*manager));
+    if (manager == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    manager->interpreter = interpreter;
+    manager->downstream_eval = downstream;
+    manager->active_boundaries = 1;
+    manager->next = hook_managers;
+    hook_managers = manager;
+    _PyInterpreterState_SetEvalFrameFunc(interpreter, unsafe_eval_frame);
+    return 0;
+}
+
+static void
+unsafe_hook_leave(PyInterpreterState *interpreter)
+{
+    AleffUnsafeHookManager **link = &hook_managers;
+    while (*link != NULL && (*link)->interpreter != interpreter) {
+        link = &(*link)->next;
+    }
+    AleffUnsafeHookManager *manager = *link;
+    if (manager == NULL) {
+        return;
+    }
+    manager->active_boundaries--;
+    if (manager->active_boundaries != 0) {
+        return;
+    }
+    if (_PyInterpreterState_GetEvalFrameFunc(interpreter) == unsafe_eval_frame) {
+        _PyInterpreterState_SetEvalFrameFunc(interpreter, manager->downstream_eval);
+    }
+    *link = manager->next;
+    PyMem_Free(manager);
+}
 
 static void
 unsafe_zero(void *memory, size_t size)
@@ -128,14 +331,117 @@ unsafe_call_release(AleffUnsafeCall *call)
 }
 
 static int
-unsafe_stack_range(uintptr_t start, uintptr_t end, size_t *size)
+unsafe_get_stack_bounds(AleffUnsafeCall *call)
 {
-    if (start >= end || end - start > ALEFF_UNSAFE_MAX_SNAPSHOT_SIZE) {
+    pthread_attr_t attributes;
+    int error = pthread_getattr_np(pthread_self(), &attributes);
+    if (error != 0) {
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "aleffy could not query the native thread stack: %s",
+            strerror(error)
+        );
+        return -1;
+    }
+    void *stack_address = NULL;
+    size_t stack_size = 0;
+    error = pthread_attr_getstack(&attributes, &stack_address, &stack_size);
+    pthread_attr_destroy(&attributes);
+    if (error != 0) {
+        PyErr_Format(
+            PyExc_RuntimeError,
+            "aleffy could not determine the native thread stack bounds: %s",
+            strerror(error)
+        );
+        return -1;
+    }
+    uintptr_t low = (uintptr_t)stack_address;
+    if (stack_size == 0 || stack_size > UINTPTR_MAX - low) {
+        PyErr_SetString(PyExc_RuntimeError, "aleffy received invalid native thread stack bounds");
+        return -1;
+    }
+    call->stack_low = low;
+    call->stack_high = low + stack_size;
+    return 0;
+}
+
+static int
+unsafe_stack_range(
+    const AleffUnsafeCall *call,
+    uintptr_t start,
+    uintptr_t end,
+    size_t *size
+)
+{
+    if (start < call->stack_low || end > call->stack_high || start >= end) {
         PyErr_SetString(PyExc_RuntimeError, "aleffy encountered an invalid native stack range");
         return -1;
     }
     *size = (size_t)(end - start);
     return 0;
+}
+
+static int
+unsafe_allocate_alternate_stack(AleffUnsafeSnapshot *snapshot)
+{
+    long page_size_value = sysconf(_SC_PAGESIZE);
+    if (page_size_value <= 0) {
+        PyErr_SetString(PyExc_RuntimeError, "aleffy could not determine the system page size");
+        return -1;
+    }
+    size_t page_size = (size_t)page_size_value;
+    size_t usable_size = ALEFF_UNSAFE_ALT_STACK_SIZE;
+    size_t remainder = usable_size % page_size;
+    if (remainder != 0) {
+        usable_size += page_size - remainder;
+    }
+    if (usable_size > SIZE_MAX - 2U * page_size) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    size_t mapping_size = usable_size + 2U * page_size;
+    void *mapping = mmap(
+        NULL,
+        mapping_size,
+        PROT_NONE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0
+    );
+    if (mapping == MAP_FAILED) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    unsigned char *usable = (unsigned char *)mapping + page_size;
+    if (mprotect(usable, usable_size, PROT_READ | PROT_WRITE) < 0) {
+        int saved_errno = errno;
+        munmap(mapping, mapping_size);
+        errno = saved_errno;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    snapshot->alternate_stack_mapping = mapping;
+    snapshot->alternate_stack_mapping_size = mapping_size;
+    snapshot->alternate_stack_bottom = usable;
+    snapshot->alternate_stack_size = usable_size;
+    snapshot->alternate_stack_top = usable + usable_size;
+    return 0;
+}
+
+static void
+unsafe_free_alternate_stack(AleffUnsafeSnapshot *snapshot)
+{
+    if (snapshot->alternate_stack_mapping != NULL) {
+        munmap(
+            snapshot->alternate_stack_mapping,
+            snapshot->alternate_stack_mapping_size
+        );
+    }
+    snapshot->alternate_stack_mapping = NULL;
+    snapshot->alternate_stack_mapping_size = 0;
+    snapshot->alternate_stack_bottom = NULL;
+    snapshot->alternate_stack_size = 0;
+    snapshot->alternate_stack_top = NULL;
 }
 
 static void *
@@ -152,7 +458,8 @@ unsafe_copy_state(const void *state)
     copy->source.call = call;
     unsafe_call_retain(call);
 
-    if (source->kind == ALEFF_UNSAFE_SOURCE_LIVE) {
+    if (source->kind == ALEFF_UNSAFE_SOURCE_LIVE &&
+        !(call->resuming && call->active_snapshot != NULL)) {
         if (!call->checkpoint_ready) {
             PyErr_SetString(PyExc_RuntimeError, "aleffy could not locate the C-to-Python callback boundary");
             goto error;
@@ -161,6 +468,7 @@ unsafe_copy_state(const void *state)
         copy->native_stack_start = (uintptr_t)call->checkpoint.rsp;
         copy->native_stack_end = call->boundary_top;
         if (unsafe_stack_range(
+                call,
                 copy->native_stack_start,
                 copy->native_stack_end,
                 &copy->native_stack_size
@@ -172,14 +480,16 @@ unsafe_copy_state(const void *state)
             PyErr_NoMemory();
             goto error;
         }
-        memcpy(
+        unsafe_capture_stack(
             copy->native_stack,
             (const void *)copy->native_stack_start,
             copy->native_stack_size
         );
     }
     else {
-        const AleffUnsafeSnapshot *snapshot = (const AleffUnsafeSnapshot *)source;
+        const AleffUnsafeSnapshot *snapshot = source->kind == ALEFF_UNSAFE_SOURCE_LIVE
+            ? call->active_snapshot
+            : (const AleffUnsafeSnapshot *)source;
         copy->checkpoint = snapshot->checkpoint;
         copy->native_stack_start = snapshot->native_stack_start;
         copy->native_stack_end = snapshot->native_stack_end;
@@ -215,7 +525,7 @@ unsafe_free_state(void *state)
     }
     PyMem_Free(snapshot->native_stack);
     PyMem_Free(snapshot->return_stack);
-    PyMem_Free(snapshot->alternate_stack);
+    unsafe_free_alternate_stack(snapshot);
     Py_XDECREF(snapshot->completed_result);
     Py_XDECREF(snapshot->completed_exception);
     unsafe_call_release(snapshot->source.call);
@@ -233,7 +543,7 @@ unsafe_prepare_resume(void *state)
         PyErr_SetString(PyExc_RuntimeError, "aleffy continuation belongs to another thread or interpreter");
         return -1;
     }
-    if (call->active_snapshot != NULL) {
+    if (call->active_snapshot == snapshot) {
         PyErr_SetString(PyExc_RuntimeError, "aleffy continuation resume is reentrant");
         return -1;
     }
@@ -246,15 +556,20 @@ static PyObject *unsafe_eval_frame(
     int throwflag
 )
 {
-    AleffUnsafeCall *call = active_call;
-    if (call == NULL) {
+    AleffUnsafeHookManager *manager = unsafe_find_hook_manager(thread->interp);
+    if (manager == NULL) {
         return _PyEval_EvalFrameDefault(thread, frame, throwflag);
     }
+    AleffUnsafeCall *call = active_call;
+    if (call == NULL || call->owner_interpreter != thread->interp) {
+        return manager->downstream_eval(thread, frame, throwflag);
+    }
     if (call->checkpoint_ready) {
-        return call->previous_eval(thread, frame, throwflag);
+        return manager->downstream_eval(thread, frame, throwflag);
     }
     int resumed = aleff_unsafe_context_save(&call->checkpoint);
     if (resumed) {
+        unsafe_sanitizer_finish_switch();
         PyObject *result = call->resume_value;
         PyObject *exception = call->resume_exception;
         call->checkpoint_ready = 0;
@@ -267,7 +582,55 @@ static PyObject *unsafe_eval_frame(
         return result;
     }
     call->checkpoint_ready = 1;
-    PyObject *result = call->previous_eval(thread, frame, throwflag);
+    if (call->resuming) {
+        AleffUnsafeSnapshot *snapshot = call->active_snapshot;
+        if (snapshot == NULL) {
+            call->checkpoint_ready = 0;
+            PyErr_SetString(PyExc_RuntimeError, "aleffy callback bridge is not active");
+            return NULL;
+        }
+
+        uintptr_t native_start = (uintptr_t)call->checkpoint.rsp;
+        size_t native_size;
+        if (unsafe_stack_range(
+                call,
+                native_start,
+                call->boundary_top,
+                &native_size
+            ) < 0) {
+            call->checkpoint_ready = 0;
+            return NULL;
+        }
+        unsigned char *native_stack = PyMem_Malloc(native_size);
+        if (native_stack == NULL) {
+            call->checkpoint_ready = 0;
+            PyErr_NoMemory();
+            return NULL;
+        }
+        unsafe_capture_stack(native_stack, (const void *)native_start, native_size);
+        if (snapshot->native_stack != NULL) {
+            unsafe_zero(snapshot->native_stack, snapshot->native_stack_size);
+        }
+        PyMem_Free(snapshot->native_stack);
+        snapshot->checkpoint = call->checkpoint;
+        snapshot->native_stack = native_stack;
+        snapshot->native_stack_size = native_size;
+        snapshot->native_stack_start = native_start;
+        snapshot->native_stack_end = call->boundary_top;
+        snapshot->callback_frame = frame;
+        snapshot->callback_throwflag = throwflag;
+        snapshot->event = ALEFF_UNSAFE_EVENT_CALLBACK;
+        unsafe_sanitizer_start_switch(
+            snapshot->alternate_stack_bottom,
+            snapshot->alternate_stack_size
+        );
+        aleff_unsafe_run_on_stack(
+            snapshot->alternate_stack_top,
+            unsafe_restore_return_stack,
+            snapshot
+        );
+    }
+    PyObject *result = manager->downstream_eval(thread, frame, throwflag);
     call->checkpoint_ready = 0;
     return result;
 }
@@ -275,18 +638,25 @@ static PyObject *unsafe_eval_frame(
 [[noreturn]] static void
 unsafe_restore_original_stack(void *argument)
 {
+    unsafe_sanitizer_finish_switch();
     AleffUnsafeSnapshot *snapshot = argument;
     if (snapshot->return_stack_size > 0) {
-        memcpy(
+        unsafe_capture_stack(
             snapshot->return_stack,
             (const void *)snapshot->return_stack_start,
             snapshot->return_stack_size
         );
     }
-    memcpy(
+    unsafe_restore_stack(
         (void *)snapshot->native_stack_start,
         snapshot->native_stack,
         snapshot->native_stack_size
+    );
+    AleffUnsafeCall *call = snapshot->source.call;
+    call->owner_thread->cframe = &snapshot->bridge_cframe;
+    unsafe_sanitizer_start_switch(
+        (const void *)call->stack_low,
+        (size_t)(call->stack_high - call->stack_low)
     );
     aleff_unsafe_context_restore(&snapshot->checkpoint);
 }
@@ -294,14 +664,21 @@ unsafe_restore_original_stack(void *argument)
 [[noreturn]] static void
 unsafe_restore_return_stack(void *argument)
 {
+    unsafe_sanitizer_finish_switch();
     AleffUnsafeSnapshot *snapshot = argument;
     if (snapshot->return_stack_size > 0) {
-        memcpy(
+        unsafe_restore_stack(
             (void *)snapshot->return_stack_start,
             snapshot->return_stack,
             snapshot->return_stack_size
         );
     }
+    AleffUnsafeCall *call = snapshot->source.call;
+    call->owner_thread->cframe = snapshot->return_cframe;
+    unsafe_sanitizer_start_switch(
+        (const void *)call->stack_low,
+        (size_t)(call->stack_high - call->stack_low)
+    );
     aleff_unsafe_context_restore(&snapshot->return_context);
 }
 
@@ -315,9 +692,75 @@ unsafe_complete_restored_call(AleffUnsafeCall *call, PyObject *result)
     else {
         snapshot->completed_result = result;
     }
+    snapshot->event = ALEFF_UNSAFE_EVENT_COMPLETE;
+    unsafe_sanitizer_start_switch(
+        snapshot->alternate_stack_bottom,
+        snapshot->alternate_stack_size
+    );
     aleff_unsafe_run_on_stack(
-        snapshot->alternate_stack + ALEFF_UNSAFE_ALT_STACK_SIZE,
+        snapshot->alternate_stack_top,
         unsafe_restore_return_stack,
+        snapshot
+    );
+}
+
+static int
+unsafe_switch_to_native(AleffUnsafeSnapshot *snapshot)
+{
+    AleffUnsafeCall *call = snapshot->source.call;
+    int resumed = aleff_unsafe_context_save(&snapshot->return_context);
+    if (resumed) {
+        unsafe_sanitizer_finish_switch();
+        PyMem_Free(snapshot->return_stack);
+        snapshot->return_stack = NULL;
+        snapshot->return_stack_size = 0;
+        unsafe_free_alternate_stack(snapshot);
+        return 0;
+    }
+
+    uintptr_t return_start = (uintptr_t)snapshot->return_context.rsp;
+    snapshot->return_stack_start = return_start;
+    if (return_start < snapshot->native_stack_end) {
+        if (unsafe_stack_range(
+                call,
+                return_start,
+                snapshot->native_stack_end,
+                &snapshot->return_stack_size
+            ) < 0) {
+            return -1;
+        }
+        snapshot->return_stack = PyMem_Malloc(snapshot->return_stack_size);
+        if (snapshot->return_stack == NULL) {
+            snapshot->return_stack_size = 0;
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
+    if (unsafe_allocate_alternate_stack(snapshot) < 0) {
+        PyMem_Free(snapshot->return_stack);
+        snapshot->return_stack = NULL;
+        snapshot->return_stack_size = 0;
+        return -1;
+    }
+
+    PyThreadState *thread = call->owner_thread;
+    snapshot->return_cframe = thread->cframe;
+    if (unsafe_get_current_frame(call, &snapshot->bridge_cframe.current_frame) < 0) {
+        PyMem_Free(snapshot->return_stack);
+        snapshot->return_stack = NULL;
+        snapshot->return_stack_size = 0;
+        unsafe_free_alternate_stack(snapshot);
+        return -1;
+    }
+    snapshot->bridge_cframe.previous = &thread->root_cframe;
+    snapshot->event = ALEFF_UNSAFE_EVENT_NONE;
+    unsafe_sanitizer_start_switch(
+        snapshot->alternate_stack_bottom,
+        snapshot->alternate_stack_size
+    );
+    aleff_unsafe_run_on_stack(
+        snapshot->alternate_stack_top,
+        unsafe_restore_original_stack,
         snapshot
     );
 }
@@ -327,26 +770,15 @@ unsafe_resume(const void *state, PyObject *value)
 {
     AleffUnsafeSnapshot *snapshot = (AleffUnsafeSnapshot *)state;
     AleffUnsafeCall *call = snapshot->source.call;
-    int resumed = aleff_unsafe_context_save(&snapshot->return_context);
-    if (resumed) {
-        PyObject *result = snapshot->completed_result;
-        PyObject *exception = snapshot->completed_exception;
-        snapshot->completed_result = NULL;
-        snapshot->completed_exception = NULL;
-        call->active_snapshot = NULL;
-        call->resuming = 0;
-        PyMem_Free(snapshot->return_stack);
-        snapshot->return_stack = NULL;
-        snapshot->return_stack_size = 0;
-        PyMem_Free(snapshot->alternate_stack);
-        snapshot->alternate_stack = NULL;
-        if (exception != NULL) {
-            PyErr_SetRaisedException(exception);
-            return NULL;
-        }
-        return result;
-    }
+    AleffUnsafeCall *previous_call = active_call;
+    AleffUnsafeSnapshot *previous_snapshot = call->active_snapshot;
+    int hook_entered = 0;
 
+    if (unsafe_hook_enter(call->owner_interpreter) < 0) {
+        return NULL;
+    }
+    hook_entered = 1;
+    active_call = call;
     call->active_snapshot = snapshot;
     call->resuming = 1;
     if (value == NULL) {
@@ -356,44 +788,91 @@ unsafe_resume(const void *state, PyObject *value)
         call->resume_value = Py_NewRef(value);
     }
 
-    uintptr_t return_start = (uintptr_t)snapshot->return_context.rsp;
-    snapshot->return_stack_start = return_start;
-    if (return_start < snapshot->native_stack_end) {
-        if (unsafe_stack_range(
-                return_start,
-                snapshot->native_stack_end,
-                &snapshot->return_stack_size
-            ) < 0) {
+    while (1) {
+        if (unsafe_switch_to_native(snapshot) < 0) {
             goto error;
         }
-        snapshot->return_stack = PyMem_Malloc(snapshot->return_stack_size);
-        if (snapshot->return_stack == NULL) {
-            PyErr_NoMemory();
+        if (snapshot->event == ALEFF_UNSAFE_EVENT_COMPLETE) {
+            break;
+        }
+        if (snapshot->event != ALEFF_UNSAFE_EVENT_CALLBACK ||
+            snapshot->callback_frame == NULL) {
+            PyErr_SetString(PyExc_RuntimeError, "aleffy callback bridge returned an invalid event");
             goto error;
         }
-    }
-    snapshot->alternate_stack = PyMem_Malloc(ALEFF_UNSAFE_ALT_STACK_SIZE);
-    if (snapshot->alternate_stack == NULL) {
-        PyErr_NoMemory();
-        goto error;
+
+        struct _PyInterpreterFrame *callback_frame = snapshot->callback_frame;
+        int callback_throwflag = snapshot->callback_throwflag;
+        snapshot->callback_frame = NULL;
+        snapshot->callback_throwflag = 0;
+        PyObject *callback_result;
+        AleffUnsafeHookManager *manager = unsafe_find_hook_manager(
+            call->owner_interpreter
+        );
+        if (manager == NULL) {
+            PyErr_SetString(PyExc_RuntimeError, "aleffy eval-frame hook is not active");
+            callback_result = NULL;
+        }
+        else {
+            AleffAdapterFrame adapter_frame;
+            if (adapter_enter(
+                    &adapter_frame,
+                    &unsafe_vtable,
+                    &call->source
+                ) < 0) {
+                callback_result = NULL;
+            }
+            else {
+                callback_result = manager->downstream_eval(
+                    call->owner_thread,
+                    callback_frame,
+                    callback_throwflag
+                );
+                adapter_leave(&adapter_frame);
+            }
+        }
+        if (callback_result == NULL) {
+            call->resume_exception = PyErr_GetRaisedException();
+            if (call->resume_exception == NULL) {
+                PyErr_SetString(
+                    PyExc_RuntimeError,
+                    "aleffy callback failed without an active exception"
+                );
+                call->resume_exception = PyErr_GetRaisedException();
+            }
+        }
+        else {
+            call->resume_value = callback_result;
+        }
     }
 
-    aleff_unsafe_run_on_stack(
-        snapshot->alternate_stack + ALEFF_UNSAFE_ALT_STACK_SIZE,
-        unsafe_restore_original_stack,
-        snapshot
-    );
+    PyObject *result = snapshot->completed_result;
+    PyObject *exception = snapshot->completed_exception;
+    snapshot->completed_result = NULL;
+    snapshot->completed_exception = NULL;
+    call->active_snapshot = previous_snapshot;
+    call->resuming = previous_snapshot != NULL;
+    active_call = previous_call;
+    unsafe_hook_leave(call->owner_interpreter);
+    if (exception != NULL) {
+        PyErr_SetRaisedException(exception);
+        return NULL;
+    }
+    return result;
 
 error:
-    call->active_snapshot = NULL;
-    call->resuming = 0;
+    active_call = previous_call;
+    if (hook_entered) {
+        unsafe_hook_leave(call->owner_interpreter);
+    }
+    call->active_snapshot = previous_snapshot;
+    call->resuming = previous_snapshot != NULL;
     Py_CLEAR(call->resume_value);
     Py_CLEAR(call->resume_exception);
     PyMem_Free(snapshot->return_stack);
     snapshot->return_stack = NULL;
     snapshot->return_stack_size = 0;
-    PyMem_Free(snapshot->alternate_stack);
-    snapshot->alternate_stack = NULL;
+    unsafe_free_alternate_stack(snapshot);
     return NULL;
 }
 
@@ -416,47 +895,51 @@ aleff_unsafe_call(PyObject *Py_UNUSED(self), PyObject *args)
     if (!PyArg_ParseTuple(args, "OOO:_unsafe_call", &callable, &call_args, &kwargs)) {
         return NULL;
     }
-    if (active_call != NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "nested aleffy calls are not supported by the feasibility spike");
-        return NULL;
-    }
-
     AleffUnsafeCall *call = PyMem_Calloc(1, sizeof(*call));
     if (call == NULL) {
         return PyErr_NoMemory();
     }
     atomic_init(&call->references, 1);
+    call->source.kind = ALEFF_UNSAFE_SOURCE_LIVE;
+    call->source.call = call;
     call->owner_thread = PyThreadState_Get();
     call->owner_interpreter = PyThreadState_GetInterpreter(call->owner_thread);
+    if (unsafe_get_stack_bounds(call) < 0) {
+        unsafe_call_release(call);
+        return NULL;
+    }
 #if defined(__GNUC__) || defined(__clang__)
     call->boundary_top = (uintptr_t)__builtin_frame_address(0) + 2U * sizeof(void *);
 #else
 #  error "aleffy feasibility spike requires a compiler with __builtin_frame_address"
 #endif
-
-    AleffUnsafeSource source = {
-        .kind = ALEFF_UNSAFE_SOURCE_LIVE,
-        .call = call,
-    };
-    AleffAdapterFrame adapter_frame;
-    if (adapter_enter(&adapter_frame, &unsafe_vtable, &source) < 0) {
+    if (call->boundary_top < call->stack_low || call->boundary_top > call->stack_high) {
+        PyErr_SetString(PyExc_RuntimeError, "aleffy boundary is outside the native thread stack");
         unsafe_call_release(call);
         return NULL;
     }
 
-    call->previous_eval = _PyInterpreterState_GetEvalFrameFunc(call->owner_interpreter);
+    AleffAdapterFrame adapter_frame;
+    if (adapter_enter(&adapter_frame, &unsafe_vtable, &call->source) < 0) {
+        unsafe_call_release(call);
+        return NULL;
+    }
+
+    if (unsafe_hook_enter(call->owner_interpreter) < 0) {
+        adapter_leave(&adapter_frame);
+        unsafe_call_release(call);
+        return NULL;
+    }
+    AleffUnsafeCall *previous_call = active_call;
     active_call = call;
-    _PyInterpreterState_SetEvalFrameFunc(call->owner_interpreter, unsafe_eval_frame);
     PyObject *result = PyObject_Call(callable, call_args, kwargs);
 
     if (call->resuming) {
         unsafe_complete_restored_call(call, result);
     }
 
-    if (_PyInterpreterState_GetEvalFrameFunc(call->owner_interpreter) == unsafe_eval_frame) {
-        _PyInterpreterState_SetEvalFrameFunc(call->owner_interpreter, call->previous_eval);
-    }
-    active_call = NULL;
+    active_call = previous_call;
+    unsafe_hook_leave(call->owner_interpreter);
     adapter_leave(&adapter_frame);
     unsafe_call_release(call);
     return result;

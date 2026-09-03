@@ -1,6 +1,35 @@
 Effects & Handlers
 ==================
 
+Unsafe C-extension boundary
+---------------------------
+
+.. autofunction:: aleff._multishot.v1.unsafe.aleffy
+
+``aleffy(func)`` explicitly opts a callable into native stack capture. It is
+intended for calls into regular CPython C extensions when an effect may be
+performed by a Python callback. The C prefix before the effect is not replayed;
+each continuation resumes from the captured native instruction and stack
+position.
+
+.. warning::
+
+   This API copies native stack bytes. It cannot discover or clone ownership
+   represented by pointers in C local variables. At every effect point, the
+   caller must ensure that the captured C suffix is safe to execute once for
+   every multi-shot branch. In particular, it must not carry unique owned
+   Python references, allocations, file descriptors, library handles, or locks
+   that multiple branches would release, mutate, or unlock.
+
+   Direct and indirect calls through ``ctypes`` are unsupported. Passing a
+   ``ctypes`` function pointer directly to ``aleffy`` raises ``TypeError``;
+   indirect calls made by a wrapper cannot be detected reliably and must not
+   perform effects.
+
+   Capture and resume must occur in the same OS thread and interpreter, and
+   resumes must be sequential. The current implementation is available only on
+   Linux x86-64 with GIL-enabled CPython 3.12.
+
 Prohibited callback contexts
 ----------------------------
 
