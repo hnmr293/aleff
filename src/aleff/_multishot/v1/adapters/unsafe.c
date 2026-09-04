@@ -12,7 +12,7 @@
 
 #if defined(__linux__) && defined(__x86_64__) && \
     !defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030c0000 && \
-    PY_VERSION_HEX < 0x030e0000
+    PY_VERSION_HEX < 0x030f0000
 #  define ALEFF_UNSAFE_SUPPORTED 1
 #else
 #  define ALEFF_UNSAFE_SUPPORTED 0
@@ -973,7 +973,7 @@ aleff_unsafe_call(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(args))
 {
     PyErr_SetString(
         PyExc_NotImplementedError,
-        "aleffy feasibility spike requires Linux x86-64 with GIL-enabled CPython 3.12 or 3.13"
+        "aleffy feasibility spike requires Linux x86-64 with GIL-enabled CPython 3.12 through 3.14"
     );
     return NULL;
 }

@@ -39,7 +39,7 @@ ADAPTER_HEADERS = adapters/api.h adapters/critical_sections.h adapters/unsafe.h 
 UNAME_M := $(shell uname -m)
 UNSAFE_ASM =
 ifeq ($(UNAME_S)-$(UNAME_M),Linux-x86_64)
-  ifeq ($(shell $(PYTHON) -c "import sys; print(sys.version_info[:2] in {(3, 12), (3, 13)})"),True)
+  ifeq ($(shell $(PYTHON) -c "import sys, sysconfig; print(sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)} and not sysconfig.get_config_var('Py_GIL_DISABLED'))"),True)
     UNSAFE_ASM = adapters/unsafe_switch_amd64_sysv.S
     CFLAGS += -fno-omit-frame-pointer
     DEBUG_CFLAGS += -fno-omit-frame-pointer

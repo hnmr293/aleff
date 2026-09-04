@@ -22,8 +22,10 @@ HELPER_SOURCE = Path(__file__).with_name("c_aleffy_helper.c")
 def aleffy_helper(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if not sys.platform.startswith("linux") or os.uname().machine != "x86_64":
         pytest.skip("the aleffy feasibility spike supports Linux x86-64 only")
-    if sys.version_info[:2] not in {(3, 12), (3, 13)}:
-        pytest.skip("the aleffy feasibility spike supports CPython 3.12 and 3.13 only")
+    if sys.version_info[:2] not in {(3, 12), (3, 13), (3, 14)}:
+        pytest.skip("the aleffy feasibility spike supports CPython 3.12 through 3.14 only")
+    if sysconfig.get_config_var("Py_GIL_DISABLED"):
+        pytest.skip("the aleffy feasibility spike requires GIL-enabled CPython")
     compiler = shutil.which(os.environ.get("CC", "cc"))
     include = sysconfig.get_path("include")
     if compiler is None or not (Path(include) / "Python.h").is_file():
@@ -94,14 +96,14 @@ def test_aleffy_rejects_ctypes_function_pointers(kind: str) -> None:
 @pytest.mark.skipif(
     sys.platform.startswith("linux")
     and os.uname().machine == "x86_64"
-    and sys.version_info[:2] in {(3, 12), (3, 13)}
+    and sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)}
     and not sysconfig.get_config_var("Py_GIL_DISABLED"),
     reason="the current interpreter supports the aleffy feasibility spike",
 )
 def test_aleffy_rejects_unsupported_build() -> None:
     with pytest.raises(
         NotImplementedError,
-        match=("aleffy feasibility spike requires Linux x86-64 with GIL-enabled CPython 3.12 or 3.13"),
+        match=("aleffy feasibility spike requires Linux x86-64 with GIL-enabled CPython 3.12 through 3.14"),
     ):
         aleffy(abs)(-1)
 

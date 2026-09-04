@@ -199,8 +199,8 @@ Because handlers use greenlets (not exceptions), the control flow is:
 Multi-shot continuations are implemented via a CPython C extension (`aleff._multishot.v1._aleff`) that snapshots and restores interpreter frame chains.
 
 `aleffy()` additionally provides an experimental unsafe boundary for regular
-CPython C extensions. Its current backend requires GIL-enabled CPython 3.12 or
-3.13 on Linux x86-64. It does not support `ctypes` callables, and C resources held
+CPython C extensions. Its current backend requires GIL-enabled CPython 3.12
+through 3.14 on Linux x86-64. It does not support `ctypes` callables, and C resources held
 across an effect must be safe for every multi-shot branch. See the
 [Effects & Handlers documentation](https://hnmr293.github.io/aleff/api/effects.html#unsafe-c-extension-boundary)
 for the complete contract.

@@ -28,7 +28,7 @@ position.
 
    Capture and resume must occur in the same OS thread and interpreter, and
    resumes must be sequential. The current implementation is available only on
-   Linux x86-64 with GIL-enabled CPython 3.12 or 3.13.
+   Linux x86-64 with GIL-enabled CPython 3.12 through 3.14.
 
 Prohibited callback contexts
 ----------------------------
