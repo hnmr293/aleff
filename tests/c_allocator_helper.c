@@ -328,6 +328,63 @@ aleff_test_call_install_registry_failure(
         (acquired ? 16 : 0);
 }
 
+int
+aleff_test_call_managed_install_failure(
+    void *initialize_pointer,
+    void *register_pointer,
+    void *predicate_pointer,
+    PyObject *module,
+    PyObject *seed,
+    PyObject *original_dir,
+    PyObject *dir_key
+)
+{
+    typedef int (*initialize_function)(PyObject *);
+    typedef int (*register_function)(PyObject *);
+    typedef int (*predicate_function)(PyObject *);
+    _Static_assert(
+        sizeof(initialize_function) == sizeof(void *) &&
+        sizeof(register_function) == sizeof(void *) &&
+        sizeof(predicate_function) == sizeof(void *),
+        "function pointers must fit in void * for this test"
+    );
+    initialize_function initialize;
+    register_function register_callable;
+    predicate_function is_registered;
+    memcpy(&initialize, &initialize_pointer, sizeof(initialize));
+    memcpy(&register_callable, &register_pointer, sizeof(register_callable));
+    memcpy(&is_registered, &predicate_pointer, sizeof(is_registered));
+
+    if (register_callable(seed) < 0) {
+        return 512;
+    }
+
+    PyObject *builtins = PyEval_GetBuiltins();
+    test_allocator_install(PYMEM_DOMAIN_MEM);
+    fail_allocation_once = 1;
+    int result = initialize(module);
+    int had_error = PyErr_Occurred() != NULL;
+    int is_memory_error = PyErr_ExceptionMatches(PyExc_MemoryError);
+    PyObject *current_dir = PyDict_GetItemWithError(builtins, dir_key);
+    int mutated = current_dir != original_dir;
+    PyErr_Clear();
+    aleff_test_allocator_restore();
+
+    int registered_after_failure = is_registered(seed);
+    int retry = initialize(module);
+    int retry_error = PyErr_Occurred() != NULL;
+    PyErr_Clear();
+    PyObject *managed = PyObject_GetAttrString(module, "restore_continuation");
+    int managed_registered_after_retry = managed != NULL && is_registered(managed);
+    Py_XDECREF(managed);
+    PyErr_Clear();
+
+    return (result < 0 ? 1 : 0) | (had_error ? 2 : 0) |
+        (is_memory_error ? 4 : 0) | (mutated ? 8 : 0) |
+        (registered_after_failure ? 16 : 0) | (retry < 0 ? 32 : 0) |
+        (retry_error ? 64 : 0) | (!managed_registered_after_retry ? 128 : 0);
+}
+
 void
 aleff_test_allocator_restore(void)
 {

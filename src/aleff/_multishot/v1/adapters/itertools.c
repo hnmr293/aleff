@@ -1,4 +1,5 @@
 #include "internal.h"
+#include "api.h"
 #include "iterators.h"
 #include "itertools.h"
 #include <stdbool.h>
@@ -3206,6 +3207,10 @@ adapter_itertools_install(PyObject *itertools)
                 ? adapter_repeat_new
                 : adapter_itertools_new;
             PyType_Modified(type);
+        }
+        if (aleff_adapter_register_callable(object) < 0) {
+            Py_DECREF(object);
+            return -1;
         }
         Py_DECREF(object);
     }

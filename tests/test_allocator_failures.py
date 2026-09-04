@@ -278,6 +278,63 @@ with tempfile.NamedTemporaryFile(suffix=".so") as copied:
     assert result.stdout.strip() == "27 1 4"
 
 
+def test_managed_registration_failure_precedes_install_and_permits_retry(
+    allocator_helper: AllocatorHelper,
+) -> None:
+    """Managed-callable failure must precede mutations and clear registry state."""
+
+    extension_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    if not isinstance(extension_suffix, str):
+        pytest.skip("the extension suffix is unavailable")
+    extension = ROOT / "src/aleff/_multishot/v1" / f"_aleff{extension_suffix}"
+    if not extension.is_file():
+        pytest.skip("the in-place extension is not built")
+
+    script = """
+import builtins
+import ctypes
+import shutil
+import sys
+import tempfile
+import types
+
+module = types.SimpleNamespace(
+    restore_continuation=len,
+    restore_async_continuation=abs,
+    _unsafe_call=hash,
+)
+with tempfile.NamedTemporaryFile(suffix=".so") as copied:
+    shutil.copyfile(sys.argv[1], copied.name)
+    library = ctypes.CDLL(copied.name)
+    helper = ctypes.PyDLL(sys.argv[2])
+    call = helper.aleff_test_call_managed_install_failure
+    call.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.py_object, ctypes.py_object, ctypes.py_object, ctypes.py_object,
+    ]
+    call.restype = ctypes.c_int
+    status = call(
+        ctypes.cast(library.aleff_initialize_adapters, ctypes.c_void_p),
+        ctypes.cast(library.aleff_adapter_register_callable, ctypes.c_void_p),
+        ctypes.cast(library.aleff_adapter_callable_is_registered, ctypes.c_void_p),
+        module,
+        round,
+        builtins.dir,
+        "dir",
+    )
+print(status)
+"""
+    result = subprocess.run(
+        [sys.executable, "-X", "faulthandler", "-c", script, str(extension), str(allocator_helper.path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "7"
+
+
 @pytest.mark.parametrize(
     ("symbol", "modules", "tracked"),
     [

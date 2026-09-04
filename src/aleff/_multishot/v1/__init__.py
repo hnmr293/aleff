@@ -40,6 +40,13 @@ from .winds import (
 
 from .unsafe import aleffy
 
+from .monitoring import (
+    UnsupportedCContinuationWarning,
+    c_boundary_warnings_enabled,
+    disable_c_boundary_warnings,
+    enable_c_boundary_warnings,
+)
+
 __all__ = [
     "Effect",
     "EffectNotHandledError",
@@ -58,4 +65,8 @@ __all__ = [
     "wind_range",
     "Ref",
     "aleffy",
+    "UnsupportedCContinuationWarning",
+    "c_boundary_warnings_enabled",
+    "disable_c_boundary_warnings",
+    "enable_c_boundary_warnings",
 ]

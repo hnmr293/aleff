@@ -397,6 +397,240 @@ assert helper.aleff_test_aleffy_after_count() == 4
     assert result.returncode == 0, result.stderr
 
 
+def test_monitoring_warns_only_for_an_unsupported_c_boundary_active_at_snapshot(
+    aleffy_helper: Path,
+) -> None:
+    result = _run_isolated(
+        aleffy_helper,
+        """
+import time
+import warnings
+import aleffy_test_helper as helper
+from aleff import UnsupportedCContinuationWarning, create_handler, effect
+
+suspend = effect("suspend")
+handler = create_handler(suspend)
+
+@handler.on(suspend)
+def handle(_resume):
+    return "handled"
+
+def callback():
+    time.time()
+    return suspend()
+
+def caller():
+    return helper.aleff_test_aleffy_call(callback)
+
+for _ in range(20_000):
+    helper.aleff_test_aleffy_call(lambda: 1)
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always", UnsupportedCContinuationWarning)
+    assert handler(caller) == "handled"
+
+assert len(caught) == 1, caught
+warning = caught[0]
+assert warning.category is UnsupportedCContinuationWarning
+assert warning.filename == "<string>"
+assert warning.lineno == caller.__code__.co_firstlineno + 1
+assert "aleffy_test_helper.aleff_test_aleffy_call" in str(warning.message)
+assert "aleffy()" in str(warning.message)
+""",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_monitoring_treats_aleffy_as_an_explicitly_managed_boundary(
+    aleffy_helper: Path,
+) -> None:
+    result = _run_isolated(
+        aleffy_helper,
+        """
+import warnings
+import aleffy_test_helper as helper
+from aleff import UnsupportedCContinuationWarning, aleffy, create_handler, effect
+
+choose = effect("choose")
+handler = create_handler(choose)
+
+@handler.on(choose)
+def choose_twice(k):
+    return [k(1), k(2)]
+
+wrapped = aleffy(helper.aleff_test_aleffy_call)
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always", UnsupportedCContinuationWarning)
+    assert handler(lambda: wrapped(choose)) == [701, 702]
+
+assert caught == [], caught
+""",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_monitoring_relays_the_original_boundary_to_an_async_handler(
+    aleffy_helper: Path,
+) -> None:
+    result = _run_isolated(
+        aleffy_helper,
+        """
+import asyncio
+import warnings
+import aleffy_test_helper as helper
+from aleff import UnsupportedCContinuationWarning, create_async_handler, create_handler, effect
+
+suspend = effect("suspend")
+outer = create_async_handler(suspend)
+inner = create_handler()
+
+@outer.on(suspend)
+def handle(_resume):
+    return "handled"
+
+def caller():
+    return inner(lambda: helper.aleff_test_aleffy_call(suspend))
+
+async def main():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        assert await outer(caller) == "handled"
+    assert len(caught) == 1, caught
+    assert "aleffy_test_helper.aleff_test_aleffy_call" in str(caught[0].message)
+
+asyncio.run(main())
+""",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_monitoring_covers_an_unsupported_boundary_in_wind_reentry(
+    aleffy_helper: Path,
+) -> None:
+    result = _run_isolated(
+        aleffy_helper,
+        """
+import warnings
+import aleffy_test_helper as helper
+from aleff import UnsupportedCContinuationWarning, create_handler, effect, wind
+
+choose = effect("choose")
+during_before = effect("during-before")
+handler = create_handler(choose, during_before)
+entries = 0
+
+@handler.on(choose)
+def resume_once(k):
+    k(None)
+    return k(None)
+
+@handler.on(during_before)
+def stop(_resume):
+    return "stopped"
+
+def before():
+    global entries
+    entries += 1
+    if entries > 1:
+        return helper.aleff_test_aleffy_call(during_before)
+    return None
+
+def caller():
+    with wind(before):
+        return choose()
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always", UnsupportedCContinuationWarning)
+    assert handler(caller) == "stopped"
+
+assert len(caught) == 1, caught
+assert caught[0].lineno == before.__code__.co_firstlineno + 4
+""",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_monitoring_generation_discards_boundaries_seen_before_reenable(
+    aleffy_helper: Path,
+) -> None:
+    result = _run_isolated(
+        aleffy_helper,
+        """
+import warnings
+import aleffy_test_helper as helper
+from aleff import (
+    UnsupportedCContinuationWarning,
+    create_handler,
+    disable_c_boundary_warnings,
+    effect,
+    enable_c_boundary_warnings,
+)
+
+suspend = effect("suspend")
+handler = create_handler(suspend)
+
+@handler.on(suspend)
+def handle(_resume):
+    return "handled"
+
+def reset_monitoring_then_suspend():
+    disable_c_boundary_warnings()
+    enable_c_boundary_warnings()
+    return suspend()
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always", UnsupportedCContinuationWarning)
+    assert handler(lambda: helper.aleff_test_aleffy_call(reset_monitoring_then_suspend)) == "handled"
+    assert handler(lambda: helper.aleff_test_aleffy_call(suspend)) == "handled"
+
+assert len(caught) == 1, caught
+""",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_monitoring_warning_as_error_aborts_and_cleans_nested_boundaries(
+    aleffy_helper: Path,
+) -> None:
+    result = _run_isolated(
+        aleffy_helper,
+        """
+import warnings
+import aleffy_test_helper as helper
+from aleff import UnsupportedCContinuationWarning, create_handler, effect
+
+suspend = effect("suspend")
+handler = create_handler(suspend)
+
+@handler.on(suspend)
+def handle(_resume):
+    return "handled"
+
+def recurse(depth):
+    if depth:
+        return helper.aleff_test_aleffy_call(lambda: recurse(depth - 1))
+    return suspend()
+
+with warnings.catch_warnings():
+    warnings.simplefilter("error", UnsupportedCContinuationWarning)
+    try:
+        handler(lambda: recurse(3))
+    except UnsupportedCContinuationWarning:
+        pass
+    else:
+        raise AssertionError("warning did not become an error")
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always", UnsupportedCContinuationWarning)
+    helper.aleff_test_aleffy_call(lambda: 1)
+    assert handler(suspend) == "handled"
+
+assert caught == [], caught
+""",
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_aleffy_propagates_exception_from_callback_after_native_resume(
     aleffy_helper: Path,
 ) -> None:
