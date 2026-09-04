@@ -31,6 +31,7 @@ print(h(lambda: [choose("A", "B") + choose("C", "D")]))
 - **Introspection** — `effects(fn)` and `unhandled_effects(fn, h)` for querying and validating effect coverage
 - **Typed** — effect parameters and return types are checked by type checkers (pyright)
 - **No macros, no code generation** — pure Python library built on [greenlet](https://github.com/python-greenlet/greenlet) and a small CPython C extension
+- **Unsafe C-extension boundary** — `aleffy()` can opt compatible C-extension calls into exact-point native continuation capture on supported builds
 
 ## Requirements
 
@@ -196,6 +197,13 @@ Because handlers use greenlets (not exceptions), the control flow is:
 - **Non-stack-cutting** — code after `resume` in the handler runs after the continuation completes, enabling reverse-order execution (useful for backpropagation, transactions, etc.)
 
 Multi-shot continuations are implemented via a CPython C extension (`aleff._multishot.v1._aleff`) that snapshots and restores interpreter frame chains.
+
+`aleffy()` additionally provides an experimental unsafe boundary for regular
+CPython C extensions. Its current backend requires GIL-enabled CPython 3.12
+through 3.14 on Linux x86-64. It does not support `ctypes` callables, and C resources held
+across an effect must be safe for every multi-shot branch. See the
+[Effects & Handlers documentation](https://hnmr293.github.io/aleff/api/effects.html#unsafe-c-extension-boundary)
+for the complete contract.
 
 ### Package structure
 

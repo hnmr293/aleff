@@ -25,6 +25,8 @@ int adapter_enter(
 );
 void adapter_leave(AleffAdapterFrame *frame);
 void *adapter_find_state(const AleffAdapterVTable *vtable);
+int aleff_adapter_defer_node_frees_enter(void);
+void aleff_adapter_defer_node_frees_leave(void);
 
 PyObject *lookup_raw_special(PyObject *object, const char *name);
 PyObject *clone_iterator_for_snapshot(PyObject *iterator);

@@ -35,6 +35,8 @@ struct AleffAdapterSnapshot {
 };
 
 static ALEFF_THREAD_LOCAL AleffAdapterNode *active_adapter = NULL;
+static ALEFF_THREAD_LOCAL AleffAdapterNode *deferred_adapter_nodes = NULL;
+static ALEFF_THREAD_LOCAL unsigned int adapter_node_free_defer_depth = 0;
 
 static void
 adapter_node_retain(AleffAdapterNode *node)
@@ -42,6 +44,24 @@ adapter_node_retain(AleffAdapterNode *node)
     if (node != NULL) {
         atomic_fetch_add_explicit(&node->references, 1, memory_order_relaxed);
     }
+}
+
+static void
+adapter_node_destroy(AleffAdapterNode *node)
+{
+    Py_XDECREF(node->outer_frame);
+    PyMem_Free(node);
+}
+
+static void
+adapter_node_retire(AleffAdapterNode *node)
+{
+    if (adapter_node_free_defer_depth == 0) {
+        adapter_node_destroy(node);
+        return;
+    }
+    node->previous = deferred_adapter_nodes;
+    deferred_adapter_nodes = node;
 }
 
 static void
@@ -53,9 +73,38 @@ adapter_node_release(AleffAdapterNode *node)
         memory_order_acq_rel
     ) == 1) {
         AleffAdapterNode *previous = node->previous;
-        Py_XDECREF(node->outer_frame);
-        PyMem_Free(node);
+        adapter_node_retire(node);
         node = previous;
+    }
+}
+
+int
+aleff_adapter_defer_node_frees_enter(void)
+{
+    if (adapter_node_free_defer_depth == UINT_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "adapter node free deferral depth overflowed");
+        return -1;
+    }
+    adapter_node_free_defer_depth++;
+    return 0;
+}
+
+void
+aleff_adapter_defer_node_frees_leave(void)
+{
+    if (adapter_node_free_defer_depth == 0) {
+        Py_FatalError("adapter node free deferral depth underflowed");
+    }
+    adapter_node_free_defer_depth--;
+    if (adapter_node_free_defer_depth != 0) {
+        return;
+    }
+    AleffAdapterNode *node = deferred_adapter_nodes;
+    deferred_adapter_nodes = NULL;
+    while (node != NULL) {
+        AleffAdapterNode *next = node->previous;
+        adapter_node_destroy(node);
+        node = next;
     }
 }
 

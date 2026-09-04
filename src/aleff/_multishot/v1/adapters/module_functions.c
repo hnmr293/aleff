@@ -1,5 +1,52 @@
 #include "module_functions.h"
 
+static PyCFunction *registered_wrappers = NULL;
+static Py_ssize_t registered_wrapper_count = 0;
+static Py_ssize_t registered_wrapper_capacity = 0;
+
+static int
+adapter_module_function_register(PyCFunction wrapper)
+{
+    for (Py_ssize_t index = 0; index < registered_wrapper_count; index++) {
+        if (registered_wrappers[index] == wrapper) {
+            return 0;
+        }
+    }
+    if (registered_wrapper_count == registered_wrapper_capacity) {
+        Py_ssize_t capacity = registered_wrapper_capacity == 0
+            ? 16
+            : registered_wrapper_capacity * 2;
+        if (capacity < registered_wrapper_capacity) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        PyCFunction *wrappers = PyMem_Realloc(
+            registered_wrappers,
+            (size_t)capacity * sizeof(*wrappers)
+        );
+        if (wrappers == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        registered_wrappers = wrappers;
+        registered_wrapper_capacity = capacity;
+    }
+    registered_wrappers[registered_wrapper_count] = wrapper;
+    registered_wrapper_count++;
+    return 0;
+}
+
+int
+adapter_module_function_is_registered(PyCFunction wrapper)
+{
+    for (Py_ssize_t index = 0; index < registered_wrapper_count; index++) {
+        if (registered_wrappers[index] == wrapper) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static PyObject *
 wrap_python_callable(PyObject *original, PyObject *bridge)
 {
@@ -116,6 +163,10 @@ adapter_module_functions_install(
             kind
         );
         if (replacement == NULL) {
+            return -1;
+        }
+        if (adapter_module_function_register(wrappers[index]) < 0) {
+            Py_DECREF(replacement);
             return -1;
         }
         int status = PyObject_SetAttrString(
