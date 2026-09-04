@@ -2896,6 +2896,12 @@ _aleff_debug_frame_stacktop(_ALEFF_UNUSED PyObject *self, PyObject *arg)
     return PyLong_FromLong(_aleff_frame_stacktop(iframe));
 }
 
+static PyObject *
+_aleff_has_continuation_adapter(_ALEFF_UNUSED PyObject *self, PyObject *arg)
+{
+    return PyBool_FromLong(aleff_adapter_has_callable(arg));
+}
+
 /* ========================================================================
  * Module definition
  * ======================================================================== */
@@ -2920,6 +2926,7 @@ static PyMethodDef _aleff_methods[] = {
     {"_debug_frame_stacktop", _aleff_debug_frame_stacktop, METH_O, debug_frame_stacktop_doc},
     {"_suspend_adapters", _aleff_suspend_adapters, METH_NOARGS, nullptr},
     {"_restore_adapters", _aleff_restore_adapters, METH_O, nullptr},
+    {"_has_continuation_adapter", _aleff_has_continuation_adapter, METH_O, nullptr},
     {"_unsafe_call", aleff_unsafe_call, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr}
 };

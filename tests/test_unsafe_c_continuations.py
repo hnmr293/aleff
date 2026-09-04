@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from collections.abc import Callable
 import ctypes
 import os
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+from typing import cast
 
 import pytest
 
@@ -18,14 +20,66 @@ ROOT = Path(__file__).resolve().parents[1]
 HELPER_SOURCE = Path(__file__).with_name("c_aleffy_helper.c")
 
 
+def _callable(value: object) -> Callable[..., object]:
+    return cast(Callable[..., object], value)
+
+
+ADAPTER_BACKED_CALLABLES: tuple[Callable[..., object], ...] = (
+    _callable(list),
+    _callable(tuple),
+    _callable(dict),
+    _callable(set),
+    _callable(frozenset),
+    _callable(bytes),
+    _callable(bytearray),
+    _callable(bool),
+    _callable(int),
+    _callable(float),
+    _callable(complex),
+    _callable(str),
+    _callable(map),
+    _callable(filter),
+    _callable(zip),
+    _callable(enumerate),
+    _callable(reversed),
+    _callable(builtins.sum),
+    _callable(builtins.all),
+    _callable(builtins.any),
+    _callable(builtins.next),
+    _callable(builtins.len),
+    _callable(builtins.repr),
+    _callable(builtins.format),
+    _callable(builtins.hash),
+    _callable(builtins.ascii),
+    _callable(builtins.getattr),
+    _callable(builtins.setattr),
+    _callable(builtins.delattr),
+    _callable(builtins.isinstance),
+    _callable(builtins.issubclass),
+    _callable(builtins.sorted),
+    _callable(builtins.min),
+    _callable(builtins.max),
+    _callable(builtins.bin),
+    _callable(builtins.oct),
+    _callable(builtins.hex),
+    _callable(getattr(list, "extend")),
+    _callable(getattr(list, "count")),
+    _callable(getattr(list, "sort")),
+    _callable(getattr(list, "index")),
+    _callable(getattr(list, "remove")),
+    _callable(getattr(tuple, "count")),
+    _callable(getattr(tuple, "index")),
+    _callable(getattr(dict, "get")),
+    _callable(getattr(dict, "pop")),
+)
+
+
 @pytest.fixture(scope="session")
 def aleffy_helper(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if not sys.platform.startswith("linux") or os.uname().machine != "x86_64":
         pytest.skip("the aleffy feasibility spike supports Linux x86-64 only")
     if sys.version_info[:2] not in {(3, 12), (3, 13), (3, 14)}:
         pytest.skip("the aleffy feasibility spike supports CPython 3.12 through 3.14 only")
-    if sysconfig.get_config_var("Py_GIL_DISABLED"):
-        pytest.skip("the aleffy feasibility spike requires GIL-enabled CPython")
     compiler = shutil.which(os.environ.get("CC", "cc"))
     include = sysconfig.get_path("include")
     if compiler is None or not (Path(include) / "Python.h").is_file():
@@ -93,17 +147,50 @@ def test_aleffy_rejects_ctypes_function_pointers(kind: str) -> None:
         assert_rejected(callback)
 
 
+@pytest.mark.parametrize(
+    "func",
+    ADAPTER_BACKED_CALLABLES,
+)
+def test_aleffy_returns_adapter_backed_callable_unchanged(func: Callable[..., object]) -> None:
+    assert aleffy(func) is func
+
+
+def test_aleffy_list_uses_existing_multishot_adapter() -> None:
+    from aleff import create_handler, effect
+
+    choose = effect("choose")
+    handler = create_handler(choose)
+
+    @handler.on(choose)
+    def choose_twice(k: Callable[[int], list[int]]) -> list[list[int]]:
+        return [k(11), k(29)]
+
+    assert handler(lambda: aleffy(list)(map(lambda _: choose(), [0]))) == [[11], [29]]
+
+
+def test_aleffy_dict_uses_existing_multishot_adapter() -> None:
+    from aleff import create_handler, effect
+
+    choose = effect("choose")
+    handler = create_handler(choose)
+
+    @handler.on(choose)
+    def choose_twice(k: Callable[[tuple[str, int]], dict[str, int]]) -> list[dict[str, int]]:
+        return [k(("first", 11)), k(("second", 29))]
+
+    assert handler(lambda: aleffy(dict)(map(lambda _: choose(), [0]))) == [{"first": 11}, {"second": 29}]
+
+
 @pytest.mark.skipif(
     sys.platform.startswith("linux")
     and os.uname().machine == "x86_64"
-    and sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)}
-    and not sysconfig.get_config_var("Py_GIL_DISABLED"),
+    and sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)},
     reason="the current interpreter supports the aleffy feasibility spike",
 )
 def test_aleffy_rejects_unsupported_build() -> None:
     with pytest.raises(
         NotImplementedError,
-        match=("aleffy feasibility spike requires Linux x86-64 with GIL-enabled CPython 3.12 through 3.14"),
+        match=("aleffy feasibility spike requires Linux x86-64 with CPython 3.12 through 3.14"),
     ):
         aleffy(abs)(-1)
 
@@ -128,7 +215,7 @@ def test_aleffy_forwards_positional_and_keyword_arguments(aleffy_helper: Path) -
 from aleff import aleffy
 
 assert aleffy(pow)(2, 5) == 32
-assert aleffy(dict)(answer=42) == {"answer": 42}
+assert aleffy(lambda *, answer: {"answer": answer})(answer=42) == {"answer": 42}
 """,
     )
     assert result.returncode == 0, result.stderr

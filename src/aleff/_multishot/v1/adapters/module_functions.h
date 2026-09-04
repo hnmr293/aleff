@@ -27,5 +27,6 @@ int adapter_module_functions_install(
     Py_ssize_t count,
     AleffModuleFunctionKind kind
 );
+int adapter_module_function_is_registered(PyCFunction wrapper);
 
 #endif

@@ -248,5 +248,12 @@ static struct PyModuleDef aleff_test_module = {
 PyMODINIT_FUNC
 PyInit_aleffy_test_helper(void)
 {
-    return PyModule_Create(&aleff_test_module);
+    PyObject *module = PyModule_Create(&aleff_test_module);
+    if (module == NULL) {
+        return NULL;
+    }
+#ifdef Py_GIL_DISABLED
+    PyUnstable_Module_SetGIL(module, Py_MOD_GIL_NOT_USED);
+#endif
+    return module;
 }

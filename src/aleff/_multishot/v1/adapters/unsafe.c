@@ -11,7 +11,7 @@
 #include "unsafe.h"
 
 #if defined(__linux__) && defined(__x86_64__) && \
-    !defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030c0000 && \
+    PY_VERSION_HEX >= 0x030c0000 && \
     PY_VERSION_HEX < 0x030f0000
 #  define ALEFF_UNSAFE_SUPPORTED 1
 #else
@@ -335,6 +335,7 @@ unsafe_call_release(AleffUnsafeCall *call)
     }
     Py_XDECREF(call->resume_value);
     Py_XDECREF(call->resume_exception);
+    aleff_adapter_defer_node_frees_leave();
     unsafe_zero(call, sizeof(*call));
     PyMem_Free(call);
 }
@@ -921,6 +922,10 @@ aleff_unsafe_call(PyObject *Py_UNUSED(self), PyObject *args)
         return PyErr_NoMemory();
     }
     atomic_init(&call->references, 1);
+    if (aleff_adapter_defer_node_frees_enter() < 0) {
+        PyMem_Free(call);
+        return NULL;
+    }
     call->source.kind = ALEFF_UNSAFE_SOURCE_LIVE;
     call->source.call = call;
     call->owner_thread = PyThreadState_Get();
@@ -973,7 +978,7 @@ aleff_unsafe_call(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(args))
 {
     PyErr_SetString(
         PyExc_NotImplementedError,
-        "aleffy feasibility spike requires Linux x86-64 with GIL-enabled CPython 3.12 through 3.14"
+        "aleffy feasibility spike requires Linux x86-64 with CPython 3.12 through 3.14"
     );
     return NULL;
 }

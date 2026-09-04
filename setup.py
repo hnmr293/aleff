@@ -17,7 +17,6 @@ unsafe_backend_enabled = (
     sys.platform.startswith("linux")
     and platform.machine() == "x86_64"
     and sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)}
-    and not sysconfig.get_config_var("Py_GIL_DISABLED")
 )
 
 

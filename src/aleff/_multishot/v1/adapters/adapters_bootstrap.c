@@ -17,6 +17,7 @@
 #include "json.h"
 #include "mappings.h"
 #include "marshal.h"
+#include "module_functions.h"
 #include "numeric.h"
 #include "numeric_iterators.h"
 #include "operator.h"
@@ -331,6 +332,137 @@ static PyMethodDef max_method = {
     .ml_flags = METH_VARARGS | METH_KEYWORDS,
     .ml_doc = "Return the largest item in an iterable or of two or more arguments.",
 };
+
+static int
+adapter_method_has_callable(PyMethodDef *method)
+{
+    if (method == NULL) {
+        return 0;
+    }
+    PyCFunction function = method->ml_meth;
+    if (adapter_module_function_is_registered(function)) {
+        return 1;
+    }
+    return
+        function == sum_method.ml_meth ||
+        function == reduce_method.ml_meth ||
+        function == bin_method.ml_meth ||
+        function == oct_method.ml_meth ||
+        function == hex_method.ml_meth ||
+        function == sorted_method.ml_meth ||
+        function == dir_method.ml_meth ||
+        function == isinstance_method.ml_meth ||
+        function == issubclass_method.ml_meth ||
+        function == setattr_method.ml_meth ||
+        function == delattr_method.ml_meth ||
+        function == all_method.ml_meth ||
+        function == any_method.ml_meth ||
+        function == next_method.ml_meth ||
+        function == len_method.ml_meth ||
+        function == repr_method.ml_meth ||
+        function == format_method.ml_meth ||
+        function == hash_method.ml_meth ||
+        function == ascii_method.ml_meth ||
+        function == hasattr_method.ml_meth ||
+        function == getattr_method.ml_meth ||
+        function == input_method.ml_meth ||
+        function == anext_method.ml_meth ||
+        function == open_method.ml_meth ||
+        function == import_method.ml_meth ||
+        function == build_class_method.ml_meth ||
+        function == print_method.ml_meth ||
+        function == min_method.ml_meth ||
+        function == max_method.ml_meth ||
+        function == list_extend_method.ml_meth ||
+        function == list_count_method.ml_meth ||
+        function == list_sort_method.ml_meth ||
+        function == list_index_method.ml_meth ||
+        function == list_remove_method.ml_meth ||
+        function == tuple_count_method.ml_meth ||
+        function == tuple_index_method.ml_meth ||
+        function == dict_get_method.ml_meth ||
+        function == dict_pop_method.ml_meth ||
+        function == chain_from_iterable_method.ml_meth ||
+        function == containers_dict_fromkeys_method.ml_meth ||
+        function == containers_dict_update_method.ml_meth ||
+        function == containers_dict_getitem_method.ml_meth ||
+        function == containers_dict_setitem_method.ml_meth ||
+        function == containers_dict_delitem_method.ml_meth ||
+        function == containers_dict_contains_method.ml_meth ||
+        function == containers_dict_eq_method.ml_meth ||
+        function == containers_dict_ne_method.ml_meth ||
+        function == containers_set_update_method.ml_meth ||
+        function == containers_set_intersection_update_method.ml_meth ||
+        function == containers_set_difference_update_method.ml_meth ||
+        function == containers_set_symmetric_difference_method.ml_meth ||
+        function == containers_set_union_method.ml_meth ||
+        function == containers_set_intersection_method.ml_meth ||
+        function == containers_set_difference_method.ml_meth ||
+        function == containers_set_isdisjoint_method.ml_meth ||
+        function == containers_set_issubset_method.ml_meth ||
+        function == containers_set_issuperset_method.ml_meth ||
+        function == containers_frozenset_union_method.ml_meth ||
+        function == containers_frozenset_intersection_method.ml_meth ||
+        function == containers_frozenset_difference_method.ml_meth ||
+        function == containers_frozenset_symmetric_difference_method.ml_meth ||
+        function == containers_frozenset_isdisjoint_method.ml_meth ||
+        function == containers_frozenset_issubset_method.ml_meth ||
+        function == containers_frozenset_issuperset_method.ml_meth ||
+        function == containers_str_encode_method.ml_meth ||
+        function == containers_bytes_decode_method.ml_meth ||
+        function == containers_bytearray_decode_method.ml_meth ||
+        function == containers_str_join_method.ml_meth ||
+        function == containers_bytes_join_method.ml_meth ||
+        function == containers_bytearray_join_method.ml_meth;
+}
+
+int
+aleff_adapter_has_callable(PyObject *callable)
+{
+    if (PyType_Check(callable)) {
+        PyTypeObject *type = (PyTypeObject *)callable;
+        return
+            type->tp_init == adapter_list_init ||
+            type->tp_init == adapter_dict_init ||
+            type->tp_init == adapter_set_init ||
+            type->tp_init == adapter_bytearray_init ||
+            type->tp_new == adapter_tuple_new ||
+            type->tp_new == adapter_frozenset_new ||
+            type->tp_new == adapter_bytes_new ||
+            type->tp_new == adapter_map_new ||
+            type->tp_new == adapter_zip_new ||
+            type->tp_new == adapter_enumerate_new ||
+            type->tp_new == adapter_reversed_new ||
+            type->tp_new == adapter_filter_new ||
+            type->tp_new == adapter_batched_new ||
+            type->tp_vectorcall == adapter_type_vectorcall ||
+            type->tp_vectorcall == adapter_list_vectorcall ||
+            type->tp_vectorcall == adapter_tuple_vectorcall ||
+            type->tp_vectorcall == adapter_dict_vectorcall ||
+            type->tp_vectorcall == adapter_set_vectorcall ||
+            type->tp_vectorcall == adapter_frozenset_vectorcall ||
+            type->tp_vectorcall == adapter_core_type_vectorcall ||
+            type->tp_vectorcall == adapter_map_vectorcall ||
+            type->tp_vectorcall == adapter_enumerate_vectorcall ||
+            type->tp_vectorcall == adapter_reversed_vectorcall ||
+            type->tp_vectorcall == adapter_filter_vectorcall ||
+            type->tp_iternext == adapter_map_next ||
+            type->tp_iternext == adapter_filter_next ||
+            type->tp_iternext == adapter_zip_next ||
+            type->tp_iternext == adapter_enumerate_next ||
+            type->tp_iternext == adapter_reversed_next ||
+            type->tp_iternext == adapter_chain_next ||
+            type->tp_iternext == adapter_accumulate_next;
+    }
+    if (PyCFunction_Check(callable)) {
+        return adapter_method_has_callable(((PyCFunctionObject *)callable)->m_ml);
+    }
+    if (Py_IS_TYPE(callable, &PyMethodDescr_Type) ||
+        Py_IS_TYPE(callable, &PyClassMethodDescr_Type)) {
+        return adapter_method_has_callable(((PyMethodDescrObject *)callable)->d_method);
+    }
+    return 0;
+}
 
 static int adapters_installed = 0;
 
