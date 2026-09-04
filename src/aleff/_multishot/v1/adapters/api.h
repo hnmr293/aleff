@@ -17,6 +17,11 @@ PyObject *aleff_adapter_resume_before_frame(
 );
 
 int aleff_adapter_install(void);
+int aleff_adapter_register_callable(PyObject *callable);
+int aleff_adapter_register_c_function(PyCFunction function);
+int aleff_adapter_callable_is_registered(PyObject *callable);
+int aleff_adapter_c_function_is_registered(PyCFunction function);
+void aleff_adapter_clear_registered_callables(void);
 int aleff_adapter_has_callable(PyObject *callable);
 PyObject *aleff_adapter_suspend(void);
 PyObject *aleff_adapter_restore(PyObject *token);
