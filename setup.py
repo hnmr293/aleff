@@ -1,5 +1,7 @@
 import os
 import platform
+import shutil
+import subprocess
 import sys
 import sysconfig
 from setuptools import setup, Extension  # pyright: ignore[reportMissingModuleSource]
@@ -13,14 +15,79 @@ if not os.path.isfile(os.path.join(header_dir, "Python.h")):
         f"Install the development headers, e.g.:  sudo apt install python{v}-dev"
     )
 
-unsafe_backend_enabled = (
-    sys.platform.startswith("linux")
-    and platform.machine() == "x86_64"
-    and sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)}
-)
+machine = platform.machine().lower()
+unsafe_asm_source: str | None = None
+if sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)}:
+    if sys.platform.startswith("linux") and machine in {"x86_64", "amd64"}:
+        unsafe_asm_source = "src/aleff/_multishot/v1/adapters/unsafe_switch_amd64_sysv.S"
+    elif sys.platform == "darwin" and machine in {"x86_64", "amd64"}:
+        unsafe_asm_source = "src/aleff/_multishot/v1/adapters/unsafe_switch_amd64_darwin.S"
+    elif sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
+        unsafe_asm_source = "src/aleff/_multishot/v1/adapters/unsafe_switch_arm64_darwin.S"
+    elif sys.platform == "win32" and machine in {"amd64", "x86_64"}:
+        unsafe_asm_source = "src/aleff/_multishot/v1/adapters/unsafe_switch_amd64_windows.asm"
+
+unsafe_backend_enabled = unsafe_asm_source is not None
 
 
 class BuildExt(build_ext):
+    def _find_msvc_assembler(self) -> str | None:
+        assembler = shutil.which("ml64.exe") or shutil.which("ml64")
+        if assembler is not None:
+            return assembler
+
+        vc_tools = os.environ.get("VCToolsInstallDir")
+        if vc_tools:
+            candidate = os.path.join(vc_tools, "bin", "Hostx64", "x64", "ml64.exe")
+            if os.path.isfile(candidate):
+                return candidate
+
+        program_files = os.environ.get("ProgramFiles(x86)")
+        if not program_files:
+            return None
+        vswhere = os.path.join(program_files, "Microsoft Visual Studio", "Installer", "vswhere.exe")
+        if not os.path.isfile(vswhere):
+            return None
+        result = subprocess.run(
+            [
+                vswhere,
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-property",
+                "installationPath",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        installation_path = result.stdout.strip().splitlines()[:1]
+        if result.returncode != 0 or not installation_path:
+            return None
+        tools_root = os.path.join(installation_path[0], "VC", "Tools", "MSVC")
+        if not os.path.isdir(tools_root):
+            return None
+        versions = sorted(os.listdir(tools_root), reverse=True)
+        for version in versions:
+            candidate = os.path.join(tools_root, version, "bin", "Hostx64", "x64", "ml64.exe")
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    def _compile_msvc_asm(self, source: str) -> str:
+        assembler = self._find_msvc_assembler()
+        if assembler is None:
+            raise RuntimeError("ml64.exe is required to build the aleffy Windows x64 backend")
+        if not self.compiler.initialized:
+            self.compiler.initialize()
+        relative = os.path.splitext(source)[0] + ".obj"
+        output = os.path.join(self.build_temp, relative)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        self.compiler.spawn([assembler, "/c", f"/Fo{output}", source])
+        return output
+
     def build_extensions(self):
         if (
             self.compiler.compiler_type != "msvc"
@@ -31,6 +98,16 @@ class BuildExt(build_ext):
         if self.compiler.compiler_type == "msvc":
             for ext in self.extensions:
                 ext.extra_compile_args = ["/std:c17", "/experimental:c11atomics"]
+                asm_sources: list[str] = [
+                    source for source in ext.sources if isinstance(source, str) and source.endswith(".asm")
+                ]
+                if asm_sources:
+                    ext.sources = [
+                        source for source in ext.sources if not (isinstance(source, str) and source.endswith(".asm"))
+                    ]
+                    extra_objects = list(ext.extra_objects or [])
+                    extra_objects.extend(self._compile_msvc_asm(source) for source in asm_sources)
+                    ext.extra_objects = extra_objects
         else:
             for ext in self.extensions:
                 ext.extra_compile_args = ["-std=c2x"]
@@ -84,8 +161,8 @@ extension_sources = [
     "src/aleff/_multishot/v1/adapters/adapters_bootstrap.c",
 ]
 
-if unsafe_backend_enabled:
-    extension_sources.append("src/aleff/_multishot/v1/adapters/unsafe_switch_amd64_sysv.S")
+if unsafe_asm_source is not None:
+    extension_sources.append(unsafe_asm_source)
 
 
 setup(
