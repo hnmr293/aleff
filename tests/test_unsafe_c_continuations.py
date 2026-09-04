@@ -82,6 +82,24 @@ def _is_supported_platform() -> bool:
     return platform.machine().lower() in SUPPORTED_MACHINES.get(sys.platform, set())
 
 
+def _helper_extra_compile_args(platform_name: str) -> list[str]:
+    if platform_name == "win32":
+        return ["/std:c17", "/experimental:c11atomics"]
+    return ["-std=c2x"]
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "expected"),
+    [
+        ("linux", ["-std=c2x"]),
+        ("darwin", ["-std=c2x"]),
+        ("win32", ["/std:c17", "/experimental:c11atomics"]),
+    ],
+)
+def test_aleffy_helper_compile_args_support_c_atomics(platform_name: str, expected: list[str]) -> None:
+    assert _helper_extra_compile_args(platform_name) == expected
+
+
 @pytest.fixture(scope="session")
 def aleffy_helper(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if not _is_supported_platform():
@@ -100,6 +118,7 @@ setup(
         Extension(
             "aleffy_test_helper",
             sources=[{str(HELPER_SOURCE)!r}],
+            extra_compile_args={_helper_extra_compile_args(sys.platform)!r},
         )
     ]
 )
