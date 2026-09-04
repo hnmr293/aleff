@@ -1,3 +1,4 @@
+#include "api.h"
 #include "buffers.h"
 #include "compression.h"
 #include "module_functions.h"
@@ -185,7 +186,10 @@ install_compression_method(
         Py_DECREF(owned_original);
         return -1;
     }
-    int status = PyDict_SetItemString(dict, name, replacement);
+    int status = aleff_adapter_register_callable(replacement);
+    if (status == 0) {
+        status = PyDict_SetItemString(dict, name, replacement);
+    }
     Py_DECREF(replacement);
     if (status < 0) {
         Py_DECREF(owned_original);

@@ -1,5 +1,6 @@
 #define PY_SSIZE_T_CLEAN
 
+#include "api.h"
 #include "zoneinfo.h"
 #include "internal.h"
 
@@ -479,7 +480,8 @@ adapter_zoneinfo_install(PyObject *module)
     zoneinfo_method.ml_meth = _PyCFunction_CAST(zone_from_file);
     zoneinfo_method.ml_flags = METH_VARARGS | METH_KEYWORDS | METH_CLASS;
     PyObject *descriptor = PyDescr_NewClassMethod(zoneinfo_type, &zoneinfo_method);
-    if (descriptor == NULL || PyDict_SetItemString(dict, "from_file", descriptor) < 0) {
+    if (descriptor == NULL || aleff_adapter_register_callable(descriptor) < 0 ||
+        PyDict_SetItemString(dict, "from_file", descriptor) < 0) {
         Py_XDECREF(descriptor);
         Py_DECREF(dict);
         Py_DECREF(type_object);

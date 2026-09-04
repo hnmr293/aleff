@@ -1,3 +1,4 @@
+#include "api.h"
 #include "marshal.h"
 
 #include "marshal_stream.h"
@@ -526,6 +527,9 @@ adapter_marshal_install(PyObject *marshal_module)
             );
         Py_XDECREF(module_name);
         if (replacements[index] == NULL) {
+            goto error;
+        }
+        if (aleff_adapter_register_callable(replacements[index]) < 0) {
             goto error;
         }
     }

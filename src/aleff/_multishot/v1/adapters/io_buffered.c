@@ -1,3 +1,4 @@
+#include "api.h"
 #include "io_buffered.h"
 
 #ifndef MS_WINDOWS
@@ -2092,7 +2093,8 @@ buffered_replace_method(PyTypeObject *type, const char *name, PyCFunction functi
     replacement->ml_meth = function;
     replacement->ml_flags = METH_VARARGS;
     PyObject *descriptor = PyDescr_NewMethod(type, replacement);
-    if (descriptor == NULL || PyDict_SetItemString(dict, name, descriptor) < 0) {
+    if (descriptor == NULL || aleff_adapter_register_callable(descriptor) < 0 ||
+        PyDict_SetItemString(dict, name, descriptor) < 0) {
         Py_XDECREF(descriptor);
         Py_CLEAR(backup->original);
         Py_DECREF(dict);

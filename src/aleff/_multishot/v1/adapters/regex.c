@@ -1,3 +1,4 @@
+#include "api.h"
 #include "regex.h"
 
 #include <string.h>
@@ -637,7 +638,10 @@ install_method(
     PyObject *dict = PyType_GetDict(type);
     int status = dict == NULL
         ? -1
-        : PyDict_SetItemString(dict, name, descriptor);
+        : aleff_adapter_register_callable(descriptor);
+    if (status == 0) {
+        status = PyDict_SetItemString(dict, name, descriptor);
+    }
     Py_XDECREF(dict);
     Py_DECREF(descriptor);
     if (status == 0) {

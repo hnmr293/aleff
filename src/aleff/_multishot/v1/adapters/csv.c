@@ -1,3 +1,4 @@
+#include "api.h"
 #include "csv.h"
 
 #include "internal.h"
@@ -1652,7 +1653,10 @@ csv_install_method(
         return -1;
     }
     PyObject *dict = PyType_GetDict(type);
-    int status = dict == NULL ? -1 : PyDict_SetItemString(dict, name, descriptor);
+    int status = dict == NULL ? -1 : aleff_adapter_register_callable(descriptor);
+    if (status == 0) {
+        status = PyDict_SetItemString(dict, name, descriptor);
+    }
     Py_XDECREF(dict);
     Py_DECREF(descriptor);
     if (status == 0) {

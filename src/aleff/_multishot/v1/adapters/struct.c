@@ -1,3 +1,4 @@
+#include "api.h"
 #include "struct.h"
 
 typedef struct {
@@ -1165,7 +1166,10 @@ replace_module(StructOperation operation)
     Py_DECREF(module_name);
     Py_DECREF(tag);
     if (replacement == NULL) return -1;
-    int status = PyObject_SetAttrString(struct_module, operation_names[operation], replacement);
+    int status = aleff_adapter_register_callable(replacement);
+    if (status == 0) {
+        status = PyObject_SetAttrString(struct_module, operation_names[operation], replacement);
+    }
     Py_DECREF(replacement);
     return status;
 }
@@ -1185,7 +1189,10 @@ replace_method(StructOperation operation)
     PyObject *dict = PyType_GetDict(struct_type);
     int status = dict == NULL
         ? -1
-        : PyDict_SetItemString(dict, operation_names[operation], descriptor);
+        : aleff_adapter_register_callable(descriptor);
+    if (status == 0) {
+        status = PyDict_SetItemString(dict, operation_names[operation], descriptor);
+    }
     Py_XDECREF(dict);
     Py_DECREF(descriptor);
     if (status == 0) PyType_Modified(struct_type);

@@ -10,6 +10,7 @@
  * calls the callback which caused the suspension a second time.
  */
 
+#include "api.h"
 #include "json_encoder.h"
 
 #include <stdbool.h>
@@ -2358,6 +2359,10 @@ adapter_json_encoder_install(PyObject *module)
         Py_DECREF(factory);
         return -1;
     }
+    if (aleff_adapter_register_callable(factory) < 0) {
+        Py_DECREF(factory);
+        return -1;
+    }
 
     PyObject *encoder_module = PyImport_ImportModule("json.encoder");
     if (encoder_module == NULL) {
@@ -2400,7 +2405,7 @@ adapter_json_encoder_install(PyObject *module)
             module_name
         );
     Py_XDECREF(module_name);
-    if (replacement == NULL || PyObject_SetAttrString(
+    if (replacement == NULL || aleff_adapter_register_callable(replacement) < 0 || PyObject_SetAttrString(
             encoder_module,
             "_make_iterencode",
             replacement
@@ -2433,7 +2438,7 @@ adapter_json_encoder_install(PyObject *module)
         ? NULL
         : PyCFunction_NewEx(&json_dump_bridge_method, NULL, json_name);
     Py_XDECREF(json_name);
-    if (dump_bridge == NULL || PyObject_SetAttrString(
+    if (dump_bridge == NULL || aleff_adapter_register_callable(dump_bridge) < 0 || PyObject_SetAttrString(
             module,
             "_aleff_json_dump",
             dump_bridge
@@ -2490,7 +2495,8 @@ adapter_json_encoder_install(PyObject *module)
     Py_XDECREF(evaluated);
     PyObject *dump_wrapper = evaluated == NULL
         ? NULL : PyDict_GetItemString(globals, "dump");
-    if (dump_wrapper == NULL || PyObject_SetAttrString(module, "dump", dump_wrapper) < 0) {
+    if (dump_wrapper == NULL || aleff_adapter_register_callable(dump_wrapper) < 0 ||
+        PyObject_SetAttrString(module, "dump", dump_wrapper) < 0) {
         Py_DECREF(globals);
         adapter_json_encoder_rollback();
         Py_DECREF(factory);

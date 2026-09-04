@@ -190,12 +190,21 @@ class WindBase[T, S](ABC):
         ``_wind_restore(snapshot)`` to restore the state captured at
         continuation capture time.
 
-        Finally the stack is replaced by the captured entries, so a nested
-        capture inside the resumed continuation cannot observe the handler's.
+        The stack is first reduced to the shared prefix, then extended after
+        each entry succeeds.  This lets effects performed by a later entry's
+        restore/enter callback observe every extent that has already been
+        re-entered, without exposing the handler's branch.
         """
 
         to_entries = [item.entry for item in to_winds]
-        shared = _shared_prefix_len(_get_wind_stack(), to_entries)
+        current_entries = _get_wind_stack()
+        shared = _shared_prefix_len(current_entries, to_entries)
+
+        # This greenlet inherited the handler's context.  Keep only the shared
+        # dynamic ancestors before any callback can capture another
+        # continuation, then publish each successfully re-entered extent below.
+        rewound_stack = to_entries[:shared]
+        _set_wind_stack(rewound_stack)
 
         entered: list[WindBase[Any, Any]] = []
         try:
@@ -203,15 +212,17 @@ class WindBase[T, S](ABC):
                 item.entry._wind_restore(item.snapshot)
                 item.entry._enter_extent()
                 entered.append(item.entry)
+                rewound_stack.append(item.entry)
+                _set_wind_stack(rewound_stack)
         except BaseException:
             # _rewind runs before restore_continuation(), so there is no Python
             # frame yet whose __exit__ would unwind these on propagation.
             # Undo them here, innermost first, or the extents are lost.
             for entry in reversed(entered):
+                popped = _pop_wind_entry()
+                assert popped is entry
                 entry._exit_extent()
             raise
-
-        _set_wind_stack(to_entries)
 
 
 class _Wind[T](WindBase[Ref[T], None]):

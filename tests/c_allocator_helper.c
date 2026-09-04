@@ -9,6 +9,7 @@ static int allocator_installed = 0;
 static int fail_malloc_enabled = 0;
 static int fail_malloc_once = 0;
 static int fail_calloc_enabled = 0;
+static int fail_allocation_once = 0;
 static size_t malloc_calls = 0;
 static size_t fail_malloc_after = 0;
 static PyObject *tracked_reference = NULL;
@@ -18,6 +19,16 @@ static int tracked_reference_acquired = 0;
 static void *test_realloc(void *context, void *pointer, size_t size);
 static void test_free(void *context, void *pointer);
 void aleff_test_allocator_restore(void);
+
+static int
+test_allocation_should_fail(size_t size)
+{
+    if (fail_allocation_once && size != 0) {
+        fail_allocation_once = 0;
+        return 1;
+    }
+    return 0;
+}
 
 static int
 test_tracked_reference_should_fail(void)
@@ -37,6 +48,9 @@ static void *
 test_malloc(void *context, size_t size)
 {
     malloc_calls++;
+    if (test_allocation_should_fail(size)) {
+        return NULL;
+    }
     if (fail_malloc_enabled) {
         int should_fail = tracked_reference == NULL
             ? malloc_calls >= fail_malloc_after
@@ -51,7 +65,8 @@ test_malloc(void *context, size_t size)
 static void *
 test_calloc(void *context, size_t nelem, size_t elsize)
 {
-    if (fail_calloc_enabled ||
+    if (test_allocation_should_fail(nelem != 0 && elsize != 0) ||
+        fail_calloc_enabled ||
         (fail_malloc_enabled && nelem != 0 && elsize != 0 &&
          test_tracked_reference_should_fail())) {
         return NULL;
@@ -78,6 +93,9 @@ test_allocator_install(int domain)
 static void *
 test_realloc(void *context, void *pointer, size_t size)
 {
+    if (test_allocation_should_fail(size)) {
+        return NULL;
+    }
     if (fail_malloc_enabled && size != 0 &&
         test_tracked_reference_should_fail()) {
         return NULL;
@@ -212,6 +230,104 @@ aleff_test_call_compression_install(
     return test_tracked_failure_finish(result);
 }
 
+int
+aleff_test_registry_allocation_failure(
+    void *register_pointer,
+    void *predicate_pointer,
+    void *clear_pointer,
+    PyObject *callable,
+    int mode
+)
+{
+    typedef int (*register_function)(PyObject *);
+    typedef int (*predicate_function)(PyObject *);
+    typedef void (*clear_function)(void);
+    _Static_assert(
+        sizeof(register_function) == sizeof(void *) &&
+        sizeof(predicate_function) == sizeof(void *) &&
+        sizeof(clear_function) == sizeof(void *),
+        "function pointers must fit in void * for this test"
+    );
+    register_function register_callable;
+    predicate_function is_registered;
+    clear_function clear_registry;
+    memcpy(&register_callable, &register_pointer, sizeof(register_callable));
+    memcpy(&is_registered, &predicate_pointer, sizeof(is_registered));
+    memcpy(&clear_registry, &clear_pointer, sizeof(clear_registry));
+
+    clear_registry();
+    if (mode == 0) {
+        PyGC_Collect();
+        test_allocator_install(PYMEM_DOMAIN_OBJ);
+        fail_malloc_enabled = 1;
+        fail_malloc_after = 1;
+        malloc_calls = 0;
+    }
+    else {
+        test_allocator_install(PYMEM_DOMAIN_MEM);
+        fail_allocation_once = 1;
+    }
+
+    int result = register_callable(callable);
+    int had_error = PyErr_Occurred() != NULL;
+    int is_memory_error = PyErr_ExceptionMatches(PyExc_MemoryError);
+    PyErr_Clear();
+    aleff_test_allocator_restore();
+
+    int registered_after_failure = is_registered(callable);
+    int retry = register_callable(callable);
+    int retry_error = PyErr_Occurred() != NULL;
+    PyErr_Clear();
+    int registered_after_retry = is_registered(callable);
+    clear_registry();
+
+    return (result < 0 ? 1 : 0) | (had_error ? 2 : 0) |
+        (is_memory_error ? 4 : 0) | (registered_after_failure ? 8 : 0) |
+        (retry < 0 ? 16 : 0) | (retry_error ? 32 : 0) |
+        (!registered_after_retry ? 64 : 0);
+}
+
+int
+aleff_test_call_install_registry_failure(
+    void *function_pointer,
+    PyObject *tracked,
+    PyObject *original_dir,
+    PyObject *dir_key
+)
+{
+    typedef int (*install_function)(void);
+    _Static_assert(
+        sizeof(install_function) == sizeof(void *),
+        "function pointers must fit in void * for this test"
+    );
+    install_function install;
+    memcpy(&install, &function_pointer, sizeof(install));
+    PyObject *builtins = PyEval_GetBuiltins();
+
+    test_allocator_install(PYMEM_DOMAIN_MEM);
+    fail_malloc_enabled = 1;
+    fail_malloc_once = 1;
+    fail_calloc_enabled = 0;
+    malloc_calls = 0;
+    tracked_reference = tracked;
+    tracked_reference_count = Py_REFCNT(tracked);
+    tracked_reference_acquired = 0;
+
+    int result = install();
+    int had_error = PyErr_Occurred() != NULL;
+    int is_memory_error = PyErr_ExceptionMatches(PyExc_MemoryError);
+    PyObject *current_dir = PyDict_GetItemWithError(builtins, dir_key);
+    int mutated = current_dir != original_dir;
+    int acquired = tracked_reference_acquired;
+    tracked_reference = NULL;
+    PyErr_Clear();
+    aleff_test_allocator_restore();
+
+    return (result < 0 ? 1 : 0) | (had_error ? 2 : 0) |
+        (mutated ? 4 : 0) | (is_memory_error ? 8 : 0) |
+        (acquired ? 16 : 0);
+}
+
 void
 aleff_test_allocator_restore(void)
 {
@@ -219,6 +335,7 @@ aleff_test_allocator_restore(void)
         fail_malloc_enabled = 0;
         fail_malloc_once = 0;
         fail_calloc_enabled = 0;
+        fail_allocation_once = 0;
         PyMem_SetAllocator(allocator_domain, &previous_allocator);
         allocator_installed = 0;
     }

@@ -4,6 +4,7 @@
 #include "internal.h"
 
 int adapter_functools_install(PyObject *functools);
+int adapter_functools_has_callable(PyObject *callable);
 void adapter_functools_rollback(void);
 
 #endif
