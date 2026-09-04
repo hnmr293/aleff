@@ -23,13 +23,13 @@ import sys
 import time
 import weakref
 import zlib
-from zoneinfo import ZoneInfo
 from collections.abc import Callable
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from aleff._multishot.v1._aleff import (  # pyright: ignore[reportPrivateUsage]
-    _has_continuation_adapter,
+from aleff._multishot.v1._aleff import (
+    _has_continuation_adapter,  # pyright: ignore[reportPrivateUsage]
 )
 
 
@@ -43,8 +43,8 @@ def _cached_function() -> None:
     [
         pytest.param(len, id="builtin-function"),
         pytest.param(list, id="builtin-type"),
-        pytest.param(list.extend, id="method-descriptor"),
-        pytest.param([].extend, id="bound-builtin-method"),
+        pytest.param(list[object].extend, id="method-descriptor"),
+        pytest.param(list[object]().extend, id="bound-builtin-method"),
         pytest.param(math.floor, id="numeric-module-function"),
         pytest.param(bisect.bisect_left, id="bisect-module-function"),
         pytest.param(heapq.heappush, id="heapq-module-function"),
