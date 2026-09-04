@@ -45,6 +45,20 @@ ifeq ($(UNAME_S)-$(UNAME_M),Linux-x86_64)
     DEBUG_CFLAGS += -fno-omit-frame-pointer
   endif
 endif
+ifeq ($(UNAME_S)-$(UNAME_M),Darwin-x86_64)
+  ifeq ($(shell $(PYTHON) -c "import sys; print(sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)})"),True)
+    UNSAFE_ASM = adapters/unsafe_switch_amd64_darwin.S
+    CFLAGS += -fno-omit-frame-pointer
+    DEBUG_CFLAGS += -fno-omit-frame-pointer
+  endif
+endif
+ifeq ($(UNAME_S)-$(UNAME_M),Darwin-arm64)
+  ifeq ($(shell $(PYTHON) -c "import sys; print(sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)})"),True)
+    UNSAFE_ASM = adapters/unsafe_switch_arm64_darwin.S
+    CFLAGS += -fno-omit-frame-pointer
+    DEBUG_CFLAGS += -fno-omit-frame-pointer
+  endif
+endif
 
 SRC = _aleff.c $(ADAPTER_SRC) $(UNSAFE_ASM)
 

@@ -10,8 +10,15 @@
 #include "internal.h"
 #include "unsafe.h"
 
-#if defined(__linux__) && defined(__x86_64__) && \
-    PY_VERSION_HEX >= 0x030c0000 && \
+#if (defined(__linux__) && defined(__x86_64__)) || \
+    (defined(__APPLE__) && (defined(__x86_64__) || defined(__aarch64__))) || \
+    defined(_M_X64)
+#  define ALEFF_UNSAFE_SUPPORTED_PLATFORM 1
+#else
+#  define ALEFF_UNSAFE_SUPPORTED_PLATFORM 0
+#endif
+
+#if ALEFF_UNSAFE_SUPPORTED_PLATFORM && PY_VERSION_HEX >= 0x030c0000 && \
     PY_VERSION_HEX < 0x030f0000
 #  define ALEFF_UNSAFE_SUPPORTED 1
 #else
@@ -20,10 +27,19 @@
 
 #if ALEFF_UNSAFE_SUPPORTED
 
-#include <errno.h>
-#include <pthread.h>
-#include <sys/mman.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#  include <intrin.h>
+#  include <windows.h>
+#  pragma intrinsic(_AddressOfReturnAddress)
+#else
+#  include <errno.h>
+#  include <pthread.h>
+#  include <sys/mman.h>
+#  include <unistd.h>
+#  if defined(__APPLE__) && !defined(MAP_ANONYMOUS)
+#    define MAP_ANONYMOUS MAP_ANON
+#  endif
+#endif
 
 #if defined(__clang__)
 #  if __has_feature(address_sanitizer)
@@ -45,8 +61,83 @@
 #  define ALEFF_UNSAFE_NO_ASAN
 #endif
 
+#if defined(_MSC_VER)
+#  define ALEFF_UNSAFE_NOINLINE __declspec(noinline)
+#  define ALEFF_UNSAFE_NORETURN __declspec(noreturn)
+#else
+#  define ALEFF_UNSAFE_NOINLINE __attribute__((noinline))
+#  define ALEFF_UNSAFE_NORETURN [[noreturn]]
+#endif
+
 #define ALEFF_UNSAFE_ALT_STACK_SIZE (1024U * 1024U)
 
+#if defined(_M_X64)
+typedef struct {
+    uint64_t rbx;
+    uint64_t rbp;
+    uint64_t rdi;
+    uint64_t rsi;
+    uint64_t r12;
+    uint64_t r13;
+    uint64_t r14;
+    uint64_t r15;
+    uint64_t rsp;
+    uint64_t rip;
+    uint32_t mxcsr;
+    uint16_t x87_control;
+    uint16_t padding;
+    uint64_t reserved;
+    unsigned char xmm6[16];
+    unsigned char xmm7[16];
+    unsigned char xmm8[16];
+    unsigned char xmm9[16];
+    unsigned char xmm10[16];
+    unsigned char xmm11[16];
+    unsigned char xmm12[16];
+    unsigned char xmm13[16];
+    unsigned char xmm14[16];
+    unsigned char xmm15[16];
+} AleffUnsafeContext;
+
+_Static_assert(offsetof(AleffUnsafeContext, rsp) == 64, "context rsp offset");
+_Static_assert(offsetof(AleffUnsafeContext, rip) == 72, "context rip offset");
+_Static_assert(offsetof(AleffUnsafeContext, mxcsr) == 80, "context mxcsr offset");
+_Static_assert(offsetof(AleffUnsafeContext, x87_control) == 84, "context x87 offset");
+_Static_assert(offsetof(AleffUnsafeContext, xmm6) == 96, "context xmm6 offset");
+#elif defined(__APPLE__) && defined(__aarch64__)
+typedef struct {
+    uint64_t x19;
+    uint64_t x20;
+    uint64_t x21;
+    uint64_t x22;
+    uint64_t x23;
+    uint64_t x24;
+    uint64_t x25;
+    uint64_t x26;
+    uint64_t x27;
+    uint64_t x28;
+    uint64_t x29;
+    uint64_t x30;
+    uint64_t sp;
+    uint32_t fpcr;
+    uint32_t fpsr;
+    uint64_t d8;
+    uint64_t d9;
+    uint64_t d10;
+    uint64_t d11;
+    uint64_t d12;
+    uint64_t d13;
+    uint64_t d14;
+    uint64_t d15;
+} AleffUnsafeContext;
+
+_Static_assert(offsetof(AleffUnsafeContext, x29) == 80, "context x29 offset");
+_Static_assert(offsetof(AleffUnsafeContext, x30) == 88, "context x30 offset");
+_Static_assert(offsetof(AleffUnsafeContext, sp) == 96, "context sp offset");
+_Static_assert(offsetof(AleffUnsafeContext, fpcr) == 104, "context fpcr offset");
+_Static_assert(offsetof(AleffUnsafeContext, fpsr) == 108, "context fpsr offset");
+_Static_assert(offsetof(AleffUnsafeContext, d8) == 112, "context d8 offset");
+#else
 typedef struct {
     uint64_t rbx;
     uint64_t rbp;
@@ -65,13 +156,14 @@ _Static_assert(offsetof(AleffUnsafeContext, rsp) == 48, "context rsp offset");
 _Static_assert(offsetof(AleffUnsafeContext, rip) == 56, "context rip offset");
 _Static_assert(offsetof(AleffUnsafeContext, mxcsr) == 64, "context mxcsr offset");
 _Static_assert(offsetof(AleffUnsafeContext, x87_control) == 68, "context x87 offset");
+#endif
 
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((returns_twice))
 #endif
 int aleff_unsafe_context_save(AleffUnsafeContext *context);
-[[noreturn]] void aleff_unsafe_context_restore(const AleffUnsafeContext *context);
-[[noreturn]] void aleff_unsafe_run_on_stack(
+ALEFF_UNSAFE_NORETURN void aleff_unsafe_context_restore(const AleffUnsafeContext *context);
+ALEFF_UNSAFE_NORETURN void aleff_unsafe_run_on_stack(
     void *stack_top,
     void (*function)(void *),
     void *argument
@@ -238,7 +330,7 @@ static PyObject *unsafe_eval_frame(
     struct _PyInterpreterFrame *frame,
     int throwflag
 );
-[[noreturn]] static void unsafe_restore_return_stack(void *argument);
+ALEFF_UNSAFE_NORETURN static void unsafe_restore_return_stack(void *argument);
 static const AleffAdapterVTable unsafe_vtable;
 
 static AleffUnsafeHookManager *
@@ -343,6 +435,7 @@ unsafe_call_release(AleffUnsafeCall *call)
 static int
 unsafe_get_stack_bounds(AleffUnsafeCall *call)
 {
+#if defined(__linux__)
     pthread_attr_t attributes;
     int error = pthread_getattr_np(pthread_self(), &attributes);
     if (error != 0) {
@@ -373,6 +466,29 @@ unsafe_get_stack_bounds(AleffUnsafeCall *call)
     call->stack_low = low;
     call->stack_high = low + stack_size;
     return 0;
+#elif defined(__APPLE__)
+    void *stack_address = pthread_get_stackaddr_np(pthread_self());
+    size_t stack_size = pthread_get_stacksize_np(pthread_self());
+    uintptr_t high = (uintptr_t)stack_address;
+    if (stack_size == 0 || high < stack_size) {
+        PyErr_SetString(PyExc_RuntimeError, "aleffy received invalid native thread stack bounds");
+        return -1;
+    }
+    call->stack_low = high - stack_size;
+    call->stack_high = high;
+    return 0;
+#elif defined(_WIN32)
+    ULONG_PTR low;
+    ULONG_PTR high;
+    GetCurrentThreadStackLimits(&low, &high);
+    if (low == 0 || high <= low) {
+        PyErr_SetString(PyExc_RuntimeError, "aleffy received invalid native thread stack bounds");
+        return -1;
+    }
+    call->stack_low = (uintptr_t)low;
+    call->stack_high = (uintptr_t)high;
+    return 0;
+#endif
 }
 
 static int
@@ -394,6 +510,32 @@ unsafe_stack_range(
 static int
 unsafe_allocate_alternate_stack(AleffUnsafeSnapshot *snapshot)
 {
+#if defined(_WIN32)
+    SYSTEM_INFO system_info;
+    GetSystemInfo(&system_info);
+    size_t page_size = (size_t)system_info.dwPageSize;
+    size_t usable_size = ALEFF_UNSAFE_ALT_STACK_SIZE;
+    size_t remainder = usable_size % page_size;
+    if (remainder != 0) {
+        usable_size += page_size - remainder;
+    }
+    void *mapping = VirtualAlloc(
+        NULL,
+        usable_size,
+        MEM_RESERVE | MEM_COMMIT,
+        PAGE_READWRITE
+    );
+    if (mapping == NULL) {
+        PyErr_SetFromWindowsErr(0);
+        return -1;
+    }
+    snapshot->alternate_stack_mapping = mapping;
+    snapshot->alternate_stack_mapping_size = usable_size;
+    snapshot->alternate_stack_bottom = mapping;
+    snapshot->alternate_stack_size = usable_size;
+    snapshot->alternate_stack_top = (unsigned char *)mapping + usable_size;
+    return 0;
+#else
     long page_size_value = sysconf(_SC_PAGESIZE);
     if (page_size_value <= 0) {
         PyErr_SetString(PyExc_RuntimeError, "aleffy could not determine the system page size");
@@ -436,16 +578,21 @@ unsafe_allocate_alternate_stack(AleffUnsafeSnapshot *snapshot)
     snapshot->alternate_stack_size = usable_size;
     snapshot->alternate_stack_top = usable + usable_size;
     return 0;
+#endif
 }
 
 static void
 unsafe_free_alternate_stack(AleffUnsafeSnapshot *snapshot)
 {
     if (snapshot->alternate_stack_mapping != NULL) {
+#if defined(_WIN32)
+        VirtualFree(snapshot->alternate_stack_mapping, 0, MEM_RELEASE);
+#else
         munmap(
             snapshot->alternate_stack_mapping,
             snapshot->alternate_stack_mapping_size
         );
+#endif
     }
     snapshot->alternate_stack_mapping = NULL;
     snapshot->alternate_stack_mapping_size = 0;
@@ -645,7 +792,7 @@ static PyObject *unsafe_eval_frame(
     return result;
 }
 
-[[noreturn]] static void
+ALEFF_UNSAFE_NORETURN static void
 unsafe_restore_original_stack(void *argument)
 {
     unsafe_sanitizer_finish_switch();
@@ -675,7 +822,7 @@ unsafe_restore_original_stack(void *argument)
     aleff_unsafe_context_restore(&snapshot->checkpoint);
 }
 
-[[noreturn]] static void
+ALEFF_UNSAFE_NORETURN static void
 unsafe_restore_return_stack(void *argument)
 {
     unsafe_sanitizer_finish_switch();
@@ -700,7 +847,7 @@ unsafe_restore_return_stack(void *argument)
     aleff_unsafe_context_restore(&snapshot->return_context);
 }
 
-[[noreturn]] static void
+ALEFF_UNSAFE_NORETURN static void
 unsafe_complete_restored_call(AleffUnsafeCall *call, PyObject *result)
 {
     AleffUnsafeSnapshot *snapshot = call->active_snapshot;
@@ -905,9 +1052,7 @@ static const AleffAdapterVTable unsafe_vtable = {
     .prepare_resume = unsafe_prepare_resume,
 };
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((noinline))
-#endif
+ALEFF_UNSAFE_NOINLINE
 PyObject *
 aleff_unsafe_call(PyObject *Py_UNUSED(self), PyObject *args)
 {
@@ -934,7 +1079,9 @@ aleff_unsafe_call(PyObject *Py_UNUSED(self), PyObject *args)
         unsafe_call_release(call);
         return NULL;
     }
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(_MSC_VER)
+    call->boundary_top = (uintptr_t)_AddressOfReturnAddress() + sizeof(void *);
+#elif defined(__GNUC__) || defined(__clang__)
     call->boundary_top = (uintptr_t)__builtin_frame_address(0) + 2U * sizeof(void *);
 #else
 #  error "aleffy feasibility spike requires a compiler with __builtin_frame_address"
@@ -978,7 +1125,7 @@ aleff_unsafe_call(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(args))
 {
     PyErr_SetString(
         PyExc_NotImplementedError,
-        "aleffy feasibility spike requires Linux x86-64 with CPython 3.12 through 3.14"
+        "aleffy feasibility spike requires Linux x86-64, macOS x86-64/arm64, or Windows x64 with CPython 3.12 through 3.14"
     );
     return NULL;
 }

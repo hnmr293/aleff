@@ -4,11 +4,10 @@ import builtins
 from collections.abc import Callable
 import ctypes
 import os
+import platform
 from pathlib import Path
-import shutil
 import subprocess
 import sys
-import sysconfig
 from typing import cast
 
 import pytest
@@ -18,6 +17,11 @@ from aleff import aleffy
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER_SOURCE = Path(__file__).with_name("c_aleffy_helper.c")
+SUPPORTED_MACHINES = {
+    "linux": {"x86_64", "amd64"},
+    "darwin": {"x86_64", "amd64", "arm64", "aarch64"},
+    "win32": {"x86_64", "amd64"},
+}
 
 
 def _callable(value: object) -> Callable[..., object]:
@@ -74,38 +78,46 @@ ADAPTER_BACKED_CALLABLES: tuple[Callable[..., object], ...] = (
 )
 
 
+def _is_supported_platform() -> bool:
+    return platform.machine().lower() in SUPPORTED_MACHINES.get(sys.platform, set())
+
+
 @pytest.fixture(scope="session")
 def aleffy_helper(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    if not sys.platform.startswith("linux") or os.uname().machine != "x86_64":
-        pytest.skip("the aleffy feasibility spike supports Linux x86-64 only")
+    if not _is_supported_platform():
+        pytest.skip("the aleffy feasibility spike supports Linux x86-64, macOS x86-64/arm64, and Windows x64 only")
     if sys.version_info[:2] not in {(3, 12), (3, 13), (3, 14)}:
         pytest.skip("the aleffy feasibility spike supports CPython 3.12 through 3.14 only")
-    compiler = shutil.which(os.environ.get("CC", "cc"))
-    include = sysconfig.get_path("include")
-    if compiler is None or not (Path(include) / "Python.h").is_file():
-        pytest.skip("a C compiler and Python development headers are required")
 
-    extension_suffix = sysconfig.get_config_var("EXT_SUFFIX")
-    if not extension_suffix:
-        pytest.fail("Python did not report an extension module suffix")
-    output = tmp_path_factory.mktemp("aleffy-helper") / f"aleffy_test_helper{extension_suffix}"
-    command = [
-        compiler,
-        "-std=c2x",
-        "-Wall",
-        "-Wextra",
-        "-Wpedantic",
-        "-shared",
-        "-fPIC",
-        f"-I{include}",
-        "-o",
-        str(output),
-        str(HELPER_SOURCE),
+    helper_dir = tmp_path_factory.mktemp("aleffy-helper")
+    setup_py = helper_dir / "setup.py"
+    setup_py.write_text(
+        f"""
+from setuptools import Extension, setup
+
+setup(
+    ext_modules=[
+        Extension(
+            "aleffy_test_helper",
+            sources=[{str(HELPER_SOURCE)!r}],
+        )
     ]
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+)
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, "setup.py", "build_ext", "--inplace"],
+        cwd=helper_dir,
+        text=True,
+        capture_output=True,
+    )
     if result.returncode != 0:
         pytest.fail(f"could not compile aleffy helper:\n{result.stdout}\n{result.stderr}")
-    return output
+    candidates = list(helper_dir.glob("aleffy_test_helper.*"))
+    if not candidates:
+        pytest.fail(f"could not locate compiled aleffy helper:\n{result.stdout}\n{result.stderr}")
+    return candidates[0]
 
 
 def _run_isolated(helper: Path, source: str) -> subprocess.CompletedProcess[str]:
@@ -182,15 +194,16 @@ def test_aleffy_dict_uses_existing_multishot_adapter() -> None:
 
 
 @pytest.mark.skipif(
-    sys.platform.startswith("linux")
-    and os.uname().machine == "x86_64"
-    and sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)},
+    _is_supported_platform() and sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)},
     reason="the current interpreter supports the aleffy feasibility spike",
 )
 def test_aleffy_rejects_unsupported_build() -> None:
     with pytest.raises(
         NotImplementedError,
-        match=("aleffy feasibility spike requires Linux x86-64 with CPython 3.12 through 3.14"),
+        match=(
+            "aleffy feasibility spike requires Linux x86-64, macOS x86-64/arm64, "
+            "or Windows x64 with CPython 3.12 through 3.14"
+        ),
     ):
         aleffy(abs)(-1)
 
