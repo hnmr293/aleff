@@ -80,6 +80,8 @@ class BuildExt(build_ext):
         assembler = self._find_msvc_assembler()
         if assembler is None:
             raise RuntimeError("ml64.exe is required to build the aleffy Windows x64 backend")
+        if not self.compiler.initialized:
+            self.compiler.initialize()
         relative = os.path.splitext(source)[0] + ".obj"
         output = os.path.join(self.build_temp, relative)
         os.makedirs(os.path.dirname(output), exist_ok=True)
