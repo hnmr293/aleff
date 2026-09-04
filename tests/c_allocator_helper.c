@@ -9,7 +9,7 @@ static int allocator_installed = 0;
 static int fail_malloc_enabled = 0;
 static int fail_malloc_once = 0;
 static int fail_calloc_enabled = 0;
-static int fail_realloc_once = 0;
+static int fail_allocation_once = 0;
 static size_t malloc_calls = 0;
 static size_t fail_malloc_after = 0;
 static PyObject *tracked_reference = NULL;
@@ -19,6 +19,16 @@ static int tracked_reference_acquired = 0;
 static void *test_realloc(void *context, void *pointer, size_t size);
 static void test_free(void *context, void *pointer);
 void aleff_test_allocator_restore(void);
+
+static int
+test_allocation_should_fail(size_t size)
+{
+    if (fail_allocation_once && size != 0) {
+        fail_allocation_once = 0;
+        return 1;
+    }
+    return 0;
+}
 
 static int
 test_tracked_reference_should_fail(void)
@@ -38,6 +48,9 @@ static void *
 test_malloc(void *context, size_t size)
 {
     malloc_calls++;
+    if (test_allocation_should_fail(size)) {
+        return NULL;
+    }
     if (fail_malloc_enabled) {
         int should_fail = tracked_reference == NULL
             ? malloc_calls >= fail_malloc_after
@@ -52,7 +65,8 @@ test_malloc(void *context, size_t size)
 static void *
 test_calloc(void *context, size_t nelem, size_t elsize)
 {
-    if (fail_calloc_enabled ||
+    if (test_allocation_should_fail(nelem != 0 && elsize != 0) ||
+        fail_calloc_enabled ||
         (fail_malloc_enabled && nelem != 0 && elsize != 0 &&
          test_tracked_reference_should_fail())) {
         return NULL;
@@ -79,8 +93,7 @@ test_allocator_install(int domain)
 static void *
 test_realloc(void *context, void *pointer, size_t size)
 {
-    if (fail_realloc_once && size != 0) {
-        fail_realloc_once = 0;
+    if (test_allocation_should_fail(size)) {
         return NULL;
     }
     if (fail_malloc_enabled && size != 0 &&
@@ -252,7 +265,7 @@ aleff_test_registry_allocation_failure(
     }
     else {
         test_allocator_install(PYMEM_DOMAIN_MEM);
-        fail_realloc_once = 1;
+        fail_allocation_once = 1;
     }
 
     int result = register_callable(callable);
@@ -322,7 +335,7 @@ aleff_test_allocator_restore(void)
         fail_malloc_enabled = 0;
         fail_malloc_once = 0;
         fail_calloc_enabled = 0;
-        fail_realloc_once = 0;
+        fail_allocation_once = 0;
         PyMem_SetAllocator(allocator_domain, &previous_allocator);
         allocator_installed = 0;
     }
