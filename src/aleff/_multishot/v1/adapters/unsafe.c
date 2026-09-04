@@ -158,6 +158,16 @@ _Static_assert(offsetof(AleffUnsafeContext, mxcsr) == 64, "context mxcsr offset"
 _Static_assert(offsetof(AleffUnsafeContext, x87_control) == 68, "context x87 offset");
 #endif
 
+static uintptr_t
+unsafe_context_stack_pointer(const AleffUnsafeContext *context)
+{
+#if defined(__APPLE__) && defined(__aarch64__)
+    return (uintptr_t)context->sp;
+#else
+    return (uintptr_t)context->rsp;
+#endif
+}
+
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((returns_twice))
 #endif
@@ -622,7 +632,7 @@ unsafe_copy_state(const void *state)
             goto error;
         }
         copy->checkpoint = call->checkpoint;
-        copy->native_stack_start = (uintptr_t)call->checkpoint.rsp;
+        copy->native_stack_start = unsafe_context_stack_pointer(&call->checkpoint);
         copy->native_stack_end = call->boundary_top;
         if (unsafe_stack_range(
                 call,
@@ -747,7 +757,7 @@ static PyObject *unsafe_eval_frame(
             return NULL;
         }
 
-        uintptr_t native_start = (uintptr_t)call->checkpoint.rsp;
+        uintptr_t native_start = unsafe_context_stack_pointer(&call->checkpoint);
         size_t native_size;
         if (unsafe_stack_range(
                 call,
@@ -883,7 +893,7 @@ unsafe_switch_to_native(AleffUnsafeSnapshot *snapshot)
         return 0;
     }
 
-    uintptr_t return_start = (uintptr_t)snapshot->return_context.rsp;
+    uintptr_t return_start = unsafe_context_stack_pointer(&snapshot->return_context);
     snapshot->return_stack_start = return_start;
     if (return_start < snapshot->native_stack_end) {
         if (unsafe_stack_range(

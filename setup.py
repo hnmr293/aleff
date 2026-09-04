@@ -1,6 +1,7 @@
 import os
 import platform
 import shutil
+import subprocess
 import sys
 import sysconfig
 from setuptools import setup, Extension  # pyright: ignore[reportMissingModuleSource]
@@ -30,8 +31,53 @@ unsafe_backend_enabled = unsafe_asm_source is not None
 
 
 class BuildExt(build_ext):
-    def _compile_msvc_asm(self, source: str) -> str:
+    def _find_msvc_assembler(self) -> str | None:
         assembler = shutil.which("ml64.exe") or shutil.which("ml64")
+        if assembler is not None:
+            return assembler
+
+        vc_tools = os.environ.get("VCToolsInstallDir")
+        if vc_tools:
+            candidate = os.path.join(vc_tools, "bin", "Hostx64", "x64", "ml64.exe")
+            if os.path.isfile(candidate):
+                return candidate
+
+        program_files = os.environ.get("ProgramFiles(x86)")
+        if not program_files:
+            return None
+        vswhere = os.path.join(program_files, "Microsoft Visual Studio", "Installer", "vswhere.exe")
+        if not os.path.isfile(vswhere):
+            return None
+        result = subprocess.run(
+            [
+                vswhere,
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-property",
+                "installationPath",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        installation_path = result.stdout.strip().splitlines()[:1]
+        if result.returncode != 0 or not installation_path:
+            return None
+        tools_root = os.path.join(installation_path[0], "VC", "Tools", "MSVC")
+        if not os.path.isdir(tools_root):
+            return None
+        versions = sorted(os.listdir(tools_root), reverse=True)
+        for version in versions:
+            candidate = os.path.join(tools_root, version, "bin", "Hostx64", "x64", "ml64.exe")
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    def _compile_msvc_asm(self, source: str) -> str:
+        assembler = self._find_msvc_assembler()
         if assembler is None:
             raise RuntimeError("ml64.exe is required to build the aleffy Windows x64 backend")
         relative = os.path.splitext(source)[0] + ".obj"
