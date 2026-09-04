@@ -16,9 +16,9 @@ def _is_ctypes_callable(value: object) -> bool:
 def aleffy[**P, R](func: Callable[P, R], /) -> Callable[P, R]:
     """Opt a callable into the experimental unsafe C-extension boundary.
 
-    The current backend requires GIL-enabled CPython 3.12 on Linux x86-64.
-    ``ctypes`` function pointers are unsupported. Native resources that remain
-    live across an effect must be safe for multi-shot stack copying.
+    The current backend requires GIL-enabled CPython 3.12 or 3.13 on Linux
+    x86-64. ``ctypes`` function pointers are unsupported. Native resources that
+    remain live across an effect must be safe for multi-shot stack copying.
     """
 
     if not callable(func):

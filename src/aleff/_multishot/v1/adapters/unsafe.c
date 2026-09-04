@@ -12,7 +12,7 @@
 
 #if defined(__linux__) && defined(__x86_64__) && \
     !defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030c0000 && \
-    PY_VERSION_HEX < 0x030d0000
+    PY_VERSION_HEX < 0x030e0000
 #  define ALEFF_UNSAFE_SUPPORTED 1
 #else
 #  define ALEFF_UNSAFE_SUPPORTED 0
@@ -115,8 +115,12 @@ struct AleffUnsafeSnapshot {
     void *alternate_stack_bottom;
     size_t alternate_stack_size;
     void *alternate_stack_top;
+#if PY_VERSION_HEX < 0x030d0000
     _PyCFrame *return_cframe;
     _PyCFrame bridge_cframe;
+#else
+    struct _PyInterpreterFrame *return_current_frame;
+#endif
 
     AleffUnsafeEvent event;
     struct _PyInterpreterFrame *callback_frame;
@@ -198,6 +202,7 @@ unsafe_restore_stack(void *destination, const void *source, size_t size)
 #endif
 }
 
+#if PY_VERSION_HEX < 0x030d0000
 static ALEFF_UNSAFE_NO_ASAN struct _PyInterpreterFrame *
 unsafe_read_current_frame(const _PyCFrame *cframe)
 {
@@ -226,6 +231,7 @@ unsafe_get_current_frame(
     *frame = unsafe_read_current_frame(cframe);
     return 0;
 }
+#endif
 
 static PyObject *unsafe_eval_frame(
     PyThreadState *thread,
@@ -656,7 +662,11 @@ unsafe_restore_original_stack(void *argument)
         snapshot->native_stack_size
     );
     AleffUnsafeCall *call = snapshot->source.call;
+#if PY_VERSION_HEX < 0x030d0000
     call->owner_thread->cframe = &snapshot->bridge_cframe;
+#else
+    call->owner_thread->current_frame = snapshot->return_current_frame;
+#endif
     unsafe_sanitizer_start_switch(
         (const void *)call->stack_low,
         (size_t)(call->stack_high - call->stack_low)
@@ -677,7 +687,11 @@ unsafe_restore_return_stack(void *argument)
         );
     }
     AleffUnsafeCall *call = snapshot->source.call;
+#if PY_VERSION_HEX < 0x030d0000
     call->owner_thread->cframe = snapshot->return_cframe;
+#else
+    call->owner_thread->current_frame = snapshot->return_current_frame;
+#endif
     unsafe_sanitizer_start_switch(
         (const void *)call->stack_low,
         (size_t)(call->stack_high - call->stack_low)
@@ -747,6 +761,7 @@ unsafe_switch_to_native(AleffUnsafeSnapshot *snapshot)
     }
 
     PyThreadState *thread = call->owner_thread;
+#if PY_VERSION_HEX < 0x030d0000
     snapshot->return_cframe = thread->cframe;
     if (unsafe_get_current_frame(call, &snapshot->bridge_cframe.current_frame) < 0) {
         PyMem_Free(snapshot->return_stack);
@@ -756,6 +771,9 @@ unsafe_switch_to_native(AleffUnsafeSnapshot *snapshot)
         return -1;
     }
     snapshot->bridge_cframe.previous = &thread->root_cframe;
+#else
+    snapshot->return_current_frame = thread->current_frame;
+#endif
     snapshot->event = ALEFF_UNSAFE_EVENT_NONE;
     unsafe_sanitizer_start_switch(
         snapshot->alternate_stack_bottom,
@@ -955,7 +973,7 @@ aleff_unsafe_call(PyObject *Py_UNUSED(self), PyObject *Py_UNUSED(args))
 {
     PyErr_SetString(
         PyExc_NotImplementedError,
-        "aleffy feasibility spike requires Linux x86-64 with GIL-enabled CPython 3.12"
+        "aleffy feasibility spike requires Linux x86-64 with GIL-enabled CPython 3.12 or 3.13"
     );
     return NULL;
 }
