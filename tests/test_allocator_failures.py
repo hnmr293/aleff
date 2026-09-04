@@ -167,6 +167,118 @@ with tempfile.NamedTemporaryFile(suffix=".so") as copied:
 
 
 @pytest.mark.parametrize(
+    ("mode", "target"),
+    [
+        (0, "lambda: None"),
+        (1, "lambda: None"),
+        (2, "len"),
+    ],
+    ids=["callable-list", "callable-list-items", "c-function-array"],
+)
+def test_registry_allocation_failure_is_atomic_and_retryable(
+    allocator_helper: AllocatorHelper,
+    mode: int,
+    target: str,
+) -> None:
+    """Each registry allocation must fail atomically and permit a retry."""
+
+    extension_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    if not isinstance(extension_suffix, str):
+        pytest.skip("the extension suffix is unavailable")
+    extension = ROOT / "src/aleff/_multishot/v1" / f"_aleff{extension_suffix}"
+    if not extension.is_file():
+        pytest.skip("the in-place extension is not built")
+
+    script = f"""
+import ctypes
+import shutil
+import sys
+import tempfile
+
+with tempfile.NamedTemporaryFile(suffix=".so") as copied:
+    shutil.copyfile(sys.argv[1], copied.name)
+    library = ctypes.CDLL(copied.name)
+    helper = ctypes.PyDLL(sys.argv[2])
+    call = helper.aleff_test_registry_allocation_failure
+    call.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.py_object, ctypes.c_int,
+    ]
+    call.restype = ctypes.c_int
+    status = call(
+        ctypes.cast(library.aleff_adapter_register_callable, ctypes.c_void_p),
+        ctypes.cast(library.aleff_adapter_callable_is_registered, ctypes.c_void_p),
+        ctypes.cast(library.aleff_adapter_clear_registered_callables, ctypes.c_void_p),
+        {target},
+        {mode},
+    )
+print(status)
+"""
+    result = subprocess.run(
+        [sys.executable, "-X", "faulthandler", "-c", script, str(extension), str(allocator_helper.path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "7"
+
+
+def test_registry_failure_rolls_back_bootstrap_and_permits_retry(
+    allocator_helper: AllocatorHelper,
+) -> None:
+    """A late registry failure must restore mutations and clear registry state."""
+
+    extension_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    if not isinstance(extension_suffix, str):
+        pytest.skip("the extension suffix is unavailable")
+    extension = ROOT / "src/aleff/_multishot/v1" / f"_aleff{extension_suffix}"
+    if not extension.is_file():
+        pytest.skip("the in-place extension is not built")
+
+    script = """
+import builtins
+import ctypes
+import operator
+import shutil
+import sys
+import tempfile
+
+with tempfile.NamedTemporaryFile(suffix=".so") as copied:
+    shutil.copyfile(sys.argv[1], copied.name)
+    library = ctypes.CDLL(copied.name)
+    install = ctypes.cast(library.aleff_adapter_install, ctypes.c_void_p)
+    helper = ctypes.PyDLL(sys.argv[2])
+    fail = helper.aleff_test_call_install_registry_failure
+    fail.argtypes = [
+        ctypes.c_void_p, ctypes.py_object, ctypes.py_object, ctypes.py_object,
+    ]
+    fail.restype = ctypes.c_int
+    retry = helper.aleff_test_call_install
+    retry.argtypes = [
+        ctypes.c_void_p, ctypes.py_object, ctypes.py_object, ctypes.c_size_t,
+    ]
+    retry.restype = ctypes.c_int
+    original_dir = builtins.dir
+    dir_key = "dir"
+    failed = fail(install, operator.attrgetter, original_dir, dir_key)
+    unchanged = builtins.dir is original_dir
+    retried = retry(install, original_dir, dir_key, (1 << 63) - 1)
+    print(f"{failed} {int(unchanged)} {retried}")
+"""
+    result = subprocess.run(
+        [sys.executable, "-X", "faulthandler", "-c", script, str(extension), str(allocator_helper.path)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "27 1 4"
+
+
+@pytest.mark.parametrize(
     ("symbol", "modules", "tracked"),
     [
         (

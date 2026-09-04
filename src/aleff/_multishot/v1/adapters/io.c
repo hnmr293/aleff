@@ -1,3 +1,4 @@
+#include "api.h"
 #include "io.h"
 
 #include <limits.h>
@@ -1593,7 +1594,8 @@ io_replace_method(PyTypeObject *type, const char *name, PyCFunction function)
     replacement->ml_meth = function;
     replacement->ml_flags = METH_VARARGS;
     PyObject *descriptor = PyDescr_NewMethod(type, replacement);
-    if (descriptor == NULL || PyDict_SetItemString(dict, name, descriptor) < 0) {
+    if (descriptor == NULL || aleff_adapter_register_callable(descriptor) < 0 ||
+        PyDict_SetItemString(dict, name, descriptor) < 0) {
         Py_XDECREF(descriptor);
         Py_CLEAR(backup->original);
         io_method_backup_count--;
@@ -1669,7 +1671,8 @@ adapter_io_install(PyObject *io_module)
         module_name
     );
     Py_XDECREF(module_name);
-    if (replacement == NULL || PyObject_SetAttrString(io_module, "open", replacement) < 0) {
+    if (replacement == NULL || aleff_adapter_register_callable(replacement) < 0 ||
+        PyObject_SetAttrString(io_module, "open", replacement) < 0) {
         Py_XDECREF(replacement);
         adapter_io_rollback();
         return -1;

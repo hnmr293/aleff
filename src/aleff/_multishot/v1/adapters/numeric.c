@@ -1,3 +1,4 @@
+#include "api.h"
 #include "numeric.h"
 
 typedef enum {
@@ -827,7 +828,8 @@ numeric_replace(
         Py_DECREF(original);
         return -1;
     }
-    if (PyObject_SetAttrString(module, name, replacement) < 0) {
+    if (aleff_adapter_register_callable(replacement) < 0 ||
+        PyObject_SetAttrString(module, name, replacement) < 0) {
         Py_DECREF(replacement);
         Py_DECREF(original);
         return -1;

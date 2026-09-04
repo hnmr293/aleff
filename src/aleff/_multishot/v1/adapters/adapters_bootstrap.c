@@ -1,3 +1,4 @@
+#include "api.h"
 #include "builtins.h"
 #include "bisect.h"
 #include "binascii.h"
@@ -340,7 +341,7 @@ adapter_method_has_callable(PyMethodDef *method)
         return 0;
     }
     PyCFunction function = method->ml_meth;
-    if (adapter_module_function_is_registered(function)) {
+    if (aleff_adapter_c_function_is_registered(function)) {
         return 1;
     }
     return
@@ -419,6 +420,12 @@ adapter_method_has_callable(PyMethodDef *method)
 int
 aleff_adapter_has_callable(PyObject *callable)
 {
+    if (aleff_adapter_callable_is_registered(callable)) {
+        return 1;
+    }
+    if (adapter_functools_has_callable(callable)) {
+        return 1;
+    }
     if (PyType_Check(callable)) {
         PyTypeObject *type = (PyTypeObject *)callable;
         return
@@ -1541,6 +1548,7 @@ rollback:
         adapter_functools_rollback();
         adapter_itertools_rollback();
         restore_install_backup(&backup);
+        aleff_adapter_clear_registered_callables();
 
         Py_CLEAR(original_input);
         Py_CLEAR(original_dir);

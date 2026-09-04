@@ -1,3 +1,4 @@
+#include "api.h"
 #include "bisect.h"
 
 #include <stddef.h>
@@ -669,6 +670,13 @@ adapter_bisect_install(PyObject *bisect_module)
             &replacements[index]
         );
         if (new_functions[index] == NULL) {
+            for (int item = 0; item < 4; item++) {
+                Py_XDECREF(new_functions[item]);
+            }
+            adapter_bisect_rollback();
+            return -1;
+        }
+        if (aleff_adapter_register_callable(new_functions[index]) < 0) {
             for (int item = 0; item < 4; item++) {
                 Py_XDECREF(new_functions[item]);
             }

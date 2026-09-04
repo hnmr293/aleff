@@ -1,3 +1,4 @@
+#include "api.h"
 #include "internal.h"
 #include "operator.h"
 
@@ -601,6 +602,10 @@ operator_install_accessor_type(
         return -1;
     }
     PyTypeObject *type = (PyTypeObject *)object;
+    if (aleff_adapter_register_callable(object) < 0) {
+        Py_DECREF(object);
+        return -1;
+    }
     operator_accessor_types[kind] = type;
     type->tp_call = operator_accessor_type_call;
     type->tp_flags &= ~Py_TPFLAGS_HAVE_VECTORCALL;
@@ -832,7 +837,10 @@ operator_replace_function(
     if (replacement == NULL) {
         return -1;
     }
-    int result = PyObject_SetAttrString(module, name, replacement);
+    int result = aleff_adapter_register_callable(replacement);
+    if (result == 0) {
+        result = PyObject_SetAttrString(module, name, replacement);
+    }
     Py_DECREF(replacement);
     return result;
 }
@@ -927,7 +935,10 @@ operator_replace_search(
     if (replacement == NULL) {
         return -1;
     }
-    int status = PyObject_SetAttrString(module, name, replacement);
+    int status = aleff_adapter_register_callable(replacement);
+    if (status == 0) {
+        status = PyObject_SetAttrString(module, name, replacement);
+    }
     Py_DECREF(replacement);
     return status;
 }

@@ -5,6 +5,7 @@
  */
 
 #include "internal.h"
+#include "api.h"
 #include "heapq.h"
 
 typedef enum {
@@ -942,7 +943,7 @@ adapter_heapq_install(PyObject *heapq)
             goto error;
         }
         PyObject *key = PyUnicode_FromString(heapq_methods[i].name);
-        if (key == NULL || PyDict_SetItem(
+        if (key == NULL || aleff_adapter_register_callable(replacement) < 0 || PyDict_SetItem(
                 PyModule_GetDict(heapq), key, replacement
             ) < 0) {
             Py_XDECREF(key);

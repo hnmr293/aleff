@@ -1,3 +1,4 @@
+#include "api.h"
 #include "buffers.h"
 #include "hashing.h"
 #include "module_functions.h"
@@ -222,7 +223,10 @@ install_hash_update(PyObject *hash_object)
         Py_DECREF(owned_original);
         return -1;
     }
-    int status = PyDict_SetItemString(dict, "update", replacement);
+    int status = aleff_adapter_register_callable(replacement);
+    if (status == 0) {
+        status = PyDict_SetItemString(dict, "update", replacement);
+    }
     Py_DECREF(replacement);
     if (status < 0) {
         Py_DECREF(owned_original);
