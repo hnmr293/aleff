@@ -35,6 +35,145 @@ struct AleffAdapterSnapshot {
 };
 
 static ALEFF_THREAD_LOCAL AleffAdapterNode *active_adapter = NULL;
+static ALEFF_THREAD_LOCAL AleffAdapterNode *deferred_adapter_nodes = NULL;
+static ALEFF_THREAD_LOCAL unsigned int adapter_node_free_defer_depth = 0;
+static PyObject *registered_callable_objects = NULL;
+static PyObject *registered_callable_types = NULL;
+static PyCFunction *registered_c_functions = NULL;
+static Py_ssize_t registered_c_function_count = 0;
+static Py_ssize_t registered_c_function_capacity = 0;
+
+static int
+register_identity(PyObject **registry, PyObject *value)
+{
+    if (*registry == NULL) {
+        *registry = PyList_New(0);
+        if (*registry == NULL) {
+            return -1;
+        }
+    }
+    Py_ssize_t count = PyList_GET_SIZE(*registry);
+    for (Py_ssize_t index = 0; index < count; index++) {
+        if (PyList_GET_ITEM(*registry, index) == value) {
+            return 0;
+        }
+    }
+    return PyList_Append(*registry, value);
+}
+
+int
+aleff_adapter_register_c_function(PyCFunction function)
+{
+    for (Py_ssize_t index = 0; index < registered_c_function_count; index++) {
+        if (registered_c_functions[index] == function) {
+            return 0;
+        }
+    }
+    if (registered_c_function_count == registered_c_function_capacity) {
+        Py_ssize_t capacity = registered_c_function_capacity == 0
+            ? 32
+            : registered_c_function_capacity * 2;
+        if (capacity < registered_c_function_capacity) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        PyCFunction *functions = PyMem_Realloc(
+            registered_c_functions,
+            (size_t)capacity * sizeof(*functions)
+        );
+        if (functions == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        registered_c_functions = functions;
+        registered_c_function_capacity = capacity;
+    }
+    registered_c_functions[registered_c_function_count++] = function;
+    return 0;
+}
+
+int
+aleff_adapter_register_callable(PyObject *callable)
+{
+    if (!PyCallable_Check(callable)) {
+        PyErr_SetString(PyExc_TypeError, "adapter target must be callable");
+        return -1;
+    }
+    if (PyCFunction_Check(callable)) {
+        return aleff_adapter_register_c_function(
+            ((PyCFunctionObject *)callable)->m_ml->ml_meth
+        );
+    }
+    if (Py_IS_TYPE(callable, &PyMethodDescr_Type) ||
+        Py_IS_TYPE(callable, &PyClassMethodDescr_Type)) {
+        return aleff_adapter_register_c_function(
+            ((PyMethodDescrObject *)callable)->d_method->ml_meth
+        );
+    }
+    if (PyType_Check(callable)) {
+        return register_identity(&registered_callable_types, callable);
+    }
+    return register_identity(&registered_callable_objects, callable);
+}
+
+int
+aleff_adapter_c_function_is_registered(PyCFunction function)
+{
+    for (Py_ssize_t index = 0; index < registered_c_function_count; index++) {
+        if (registered_c_functions[index] == function) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int
+aleff_adapter_callable_is_registered(PyObject *callable)
+{
+    if (!PyCallable_Check(callable)) {
+        return 0;
+    }
+    if (registered_callable_objects != NULL) {
+        Py_ssize_t count = PyList_GET_SIZE(registered_callable_objects);
+        for (Py_ssize_t index = 0; index < count; index++) {
+            if (PyList_GET_ITEM(registered_callable_objects, index) == callable) {
+                return 1;
+            }
+        }
+    }
+    if (registered_callable_types != NULL) {
+        Py_ssize_t count = PyList_GET_SIZE(registered_callable_types);
+        for (Py_ssize_t index = 0; index < count; index++) {
+            PyObject *type = PyList_GET_ITEM(registered_callable_types, index);
+            if (type == callable || type == (PyObject *)Py_TYPE(callable)) {
+                return 1;
+            }
+        }
+    }
+    if (PyCFunction_Check(callable)) {
+        return aleff_adapter_c_function_is_registered(
+            ((PyCFunctionObject *)callable)->m_ml->ml_meth
+        );
+    }
+    if (Py_IS_TYPE(callable, &PyMethodDescr_Type) ||
+        Py_IS_TYPE(callable, &PyClassMethodDescr_Type)) {
+        return aleff_adapter_c_function_is_registered(
+            ((PyMethodDescrObject *)callable)->d_method->ml_meth
+        );
+    }
+    return 0;
+}
+
+void
+aleff_adapter_clear_registered_callables(void)
+{
+    Py_CLEAR(registered_callable_objects);
+    Py_CLEAR(registered_callable_types);
+    PyMem_Free(registered_c_functions);
+    registered_c_functions = NULL;
+    registered_c_function_count = 0;
+    registered_c_function_capacity = 0;
+}
 
 static void
 adapter_node_retain(AleffAdapterNode *node)
@@ -42,6 +181,24 @@ adapter_node_retain(AleffAdapterNode *node)
     if (node != NULL) {
         atomic_fetch_add_explicit(&node->references, 1, memory_order_relaxed);
     }
+}
+
+static void
+adapter_node_destroy(AleffAdapterNode *node)
+{
+    Py_XDECREF(node->outer_frame);
+    PyMem_Free(node);
+}
+
+static void
+adapter_node_retire(AleffAdapterNode *node)
+{
+    if (adapter_node_free_defer_depth == 0) {
+        adapter_node_destroy(node);
+        return;
+    }
+    node->previous = deferred_adapter_nodes;
+    deferred_adapter_nodes = node;
 }
 
 static void
@@ -53,9 +210,38 @@ adapter_node_release(AleffAdapterNode *node)
         memory_order_acq_rel
     ) == 1) {
         AleffAdapterNode *previous = node->previous;
-        Py_XDECREF(node->outer_frame);
-        PyMem_Free(node);
+        adapter_node_retire(node);
         node = previous;
+    }
+}
+
+int
+aleff_adapter_defer_node_frees_enter(void)
+{
+    if (adapter_node_free_defer_depth == UINT_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "adapter node free deferral depth overflowed");
+        return -1;
+    }
+    adapter_node_free_defer_depth++;
+    return 0;
+}
+
+void
+aleff_adapter_defer_node_frees_leave(void)
+{
+    if (adapter_node_free_defer_depth == 0) {
+        Py_FatalError("adapter node free deferral depth underflowed");
+    }
+    adapter_node_free_defer_depth--;
+    if (adapter_node_free_defer_depth != 0) {
+        return;
+    }
+    AleffAdapterNode *node = deferred_adapter_nodes;
+    deferred_adapter_nodes = NULL;
+    while (node != NULL) {
+        AleffAdapterNode *next = node->previous;
+        adapter_node_destroy(node);
+        node = next;
     }
 }
 

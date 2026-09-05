@@ -1,3 +1,4 @@
+#include "api.h"
 #include "json_decoder.h"
 
 #include "internal.h"
@@ -1439,6 +1440,9 @@ adapter_json_decoder_install(PyObject *Py_UNUSED(json_module))
     if (json_decoder_install_type() < 0) {
         return -1;
     }
+    if (aleff_adapter_register_callable((PyObject *)&json_scanner_type) < 0) {
+        return -1;
+    }
     PyObject *scanner_module = PyImport_ImportModule("json.scanner");
     if (scanner_module == NULL) {
         return -1;
@@ -1462,7 +1466,8 @@ adapter_json_decoder_install(PyObject *Py_UNUSED(json_module))
         Py_DECREF(scanner_module);
         return -1;
     }
-    if (PyObject_SetAttrString(scanner_module, "make_scanner", replacement) < 0) {
+    if (aleff_adapter_register_callable(replacement) < 0 ||
+        PyObject_SetAttrString(scanner_module, "make_scanner", replacement) < 0) {
         Py_DECREF(replacement);
         Py_DECREF(original);
         Py_DECREF(scanner_module);

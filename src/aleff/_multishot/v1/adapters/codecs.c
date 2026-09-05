@@ -1,4 +1,5 @@
 #define Py_BUILD_CORE_MODULE
+#include "api.h"
 #include "codecs.h"
 
 #include <string.h>
@@ -1142,6 +1143,7 @@ codec_replace_function(PyObject *module, const char *name, PyCFunction function)
     );
     Py_XDECREF(module_name);
     if (function_object == NULL ||
+        aleff_adapter_register_callable(function_object) < 0 ||
         PyObject_SetAttrString(module, name, function_object) < 0) {
         Py_XDECREF(function_object);
         Py_CLEAR(backup->module);

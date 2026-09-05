@@ -1,3 +1,4 @@
+#include "api.h"
 #include "module_functions.h"
 
 static PyObject *
@@ -116,6 +117,11 @@ adapter_module_functions_install(
             kind
         );
         if (replacement == NULL) {
+            return -1;
+        }
+        if (aleff_adapter_register_c_function(wrappers[index]) < 0 ||
+            aleff_adapter_register_callable(replacement) < 0) {
+            Py_DECREF(replacement);
             return -1;
         }
         int status = PyObject_SetAttrString(

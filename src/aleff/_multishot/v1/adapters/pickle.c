@@ -1,3 +1,4 @@
+#include "api.h"
 #include "pickle.h"
 
 #include <stddef.h>
@@ -2641,7 +2642,10 @@ pickle_install_method(
         Py_DECREF(type_dict);
         return -1;
     }
-    int result = PyDict_SetItemString(type_dict, name, replacement);
+    int result = aleff_adapter_register_callable(replacement);
+    if (result == 0) {
+        result = PyDict_SetItemString(type_dict, name, replacement);
+    }
     Py_DECREF(replacement);
     Py_DECREF(type_dict);
     if (result == 0) {
@@ -2699,6 +2703,9 @@ adapter_pickle_install(PyObject *pickle_module)
             );
         Py_XDECREF(module_name);
         if (replacements[index] == NULL) {
+            goto error;
+        }
+        if (aleff_adapter_register_callable(replacements[index]) < 0) {
             goto error;
         }
     }

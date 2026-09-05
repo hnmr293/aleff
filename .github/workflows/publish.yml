@@ -55,14 +55,46 @@ jobs:
           retention-days: 1
 
   build-wheels:
-    name: "Build wheels (${{ matrix.os }})"
+    name: "Build wheel (${{ matrix.identifier }})"
     needs: check-version
     if: needs.check-version.outputs.should_publish == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15, windows-latest]
+        include:
+          - identifier: cp312-manylinux_x86_64
+            runner: ubuntu-latest
+          - identifier: cp313-manylinux_x86_64
+            runner: ubuntu-latest
+          - identifier: cp314-manylinux_x86_64
+            runner: ubuntu-latest
+          - identifier: cp314t-manylinux_x86_64
+            runner: ubuntu-latest
+          - identifier: cp312-win_amd64
+            runner: windows-latest
+          - identifier: cp313-win_amd64
+            runner: windows-latest
+          - identifier: cp314-win_amd64
+            runner: windows-latest
+          - identifier: cp314t-win_amd64
+            runner: windows-latest
+          - identifier: cp312-macosx_x86_64
+            runner: macos-15-intel
+          - identifier: cp313-macosx_x86_64
+            runner: macos-15-intel
+          - identifier: cp314-macosx_x86_64
+            runner: macos-15-intel
+          - identifier: cp314t-macosx_x86_64
+            runner: macos-15-intel
+          - identifier: cp312-macosx_arm64
+            runner: macos-15
+          - identifier: cp313-macosx_arm64
+            runner: macos-15
+          - identifier: cp314-macosx_arm64
+            runner: macos-15
+          - identifier: cp314t-macosx_arm64
+            runner: macos-15
     steps:
       - uses: actions/checkout@v6
 
@@ -70,10 +102,12 @@ jobs:
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.4.1
+        env:
+          CIBW_BUILD: ${{ matrix.identifier }}
 
       - uses: actions/upload-artifact@v7
         with:
-          name: dist-wheels-${{ matrix.os }}
+          name: dist-wheel-${{ matrix.identifier }}
           path: ./wheelhouse/*.whl
           if-no-files-found: error
           retention-days: 1

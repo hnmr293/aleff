@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include "adapters/api.h"
 #include "adapters/pickle.h"
+#include "adapters/unsafe.h"
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
@@ -144,6 +145,18 @@ _aleff_init_opcode_deopt(void)
 #endif
 #ifdef CALL_ALLOC_AND_ENTER_INIT
     _aleff_opcode_deopt[CALL_ALLOC_AND_ENTER_INIT] = CALL;
+#endif
+    /* PEP 669 instrumentation opcodes are not specialization families, so
+     * CPython's deopt table leaves them unchanged.  Continuation restore must
+     * still interpret them as the calls they instrument. */
+#ifdef INSTRUMENTED_CALL
+    _aleff_opcode_deopt[INSTRUMENTED_CALL] = CALL;
+#endif
+#if defined(INSTRUMENTED_CALL_KW) && defined(CALL_KW)
+    _aleff_opcode_deopt[INSTRUMENTED_CALL_KW] = CALL_KW;
+#endif
+#ifdef INSTRUMENTED_CALL_FUNCTION_EX
+    _aleff_opcode_deopt[INSTRUMENTED_CALL_FUNCTION_EX] = CALL_FUNCTION_EX;
 #endif
     /* 3.12 names */
 #ifdef CALL_NO_KW_BUILTIN_FAST
@@ -1822,16 +1835,48 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
         return nullptr;
     }
 
-    /* Inject the resume value into the innermost frame */
-    inject_resume_value(
-        frames_on_stack[0],
-        value,
-        &snapshot->frames[skip],
-        nullptr
+    /* Resume adapters attached to the first restored frame before injecting
+     * its value.  Later frames take the same path inside the evaluation loop. */
+    int throwflag = 0;
+    PyObject *initial = aleff_adapter_resume_before_frame(
+        snapshot->adapters,
+        skip,
+        Py_NewRef(value)
     );
-    if (PyErr_Occurred()) {
-        tstate->datastack_top = saved_datastack_top;
-        return nullptr;
+    if (initial == nullptr) {
+        PyObject *exception = PyErr_GetRaisedException();
+        if (exception == nullptr) {
+            PyErr_SetString(
+                PyExc_RuntimeError,
+                "restored adapter failed without an active exception"
+            );
+            tstate->datastack_top = saved_datastack_top;
+            return nullptr;
+        }
+        if (prepare_resume_frame(
+                frames_on_stack[0],
+                &snapshot->frames[skip],
+                nullptr
+            ) < 0) {
+            Py_DECREF(exception);
+            tstate->datastack_top = saved_datastack_top;
+            return nullptr;
+        }
+        PyErr_SetRaisedException(exception);
+        throwflag = 1;
+    }
+    else {
+        inject_resume_value(
+            frames_on_stack[0],
+            initial,
+            &snapshot->frames[skip],
+            nullptr
+        );
+        Py_DECREF(initial);
+        if (PyErr_Occurred()) {
+            tstate->datastack_top = saved_datastack_top;
+            return nullptr;
+        }
     }
 
     /* Execute frames one at a time, from innermost to outermost.
@@ -1844,7 +1889,6 @@ _aleff_restore_continuation(_ALEFF_UNUSED PyObject *self, PyObject *args)
      * next outer frame using inject_resume_value, which handles both
      * inline dispatch and generic CALL stack states. */
     PyObject *result = nullptr;
-    int throwflag = 0;
     _PyErr_StackItem restored_exc_state = {
         .exc_value = Py_XNewRef(snapshot->frames[skip].handled_exception),
         .previous_item = tstate->exc_info,
@@ -2864,6 +2908,12 @@ _aleff_debug_frame_stacktop(_ALEFF_UNUSED PyObject *self, PyObject *arg)
     return PyLong_FromLong(_aleff_frame_stacktop(iframe));
 }
 
+static PyObject *
+_aleff_has_continuation_adapter(_ALEFF_UNUSED PyObject *self, PyObject *arg)
+{
+    return PyBool_FromLong(aleff_adapter_has_callable(arg));
+}
+
 /* ========================================================================
  * Module definition
  * ======================================================================== */
@@ -2888,6 +2938,8 @@ static PyMethodDef _aleff_methods[] = {
     {"_debug_frame_stacktop", _aleff_debug_frame_stacktop, METH_O, debug_frame_stacktop_doc},
     {"_suspend_adapters", _aleff_suspend_adapters, METH_NOARGS, nullptr},
     {"_restore_adapters", _aleff_restore_adapters, METH_O, nullptr},
+    {"_has_continuation_adapter", _aleff_has_continuation_adapter, METH_O, nullptr},
+    {"_unsafe_call", aleff_unsafe_call, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr}
 };
 
@@ -2899,6 +2951,65 @@ static struct PyModuleDef _aleff_module = {
     .m_size = -1,
     .m_methods = _aleff_methods,
 };
+
+static int
+_aleff_register_module_callable(PyObject *module, const char *name)
+{
+    PyObject *callable = PyObject_GetAttrString(module, name);
+    if (callable == NULL) {
+        return -1;
+    }
+    int result = aleff_adapter_register_callable(callable);
+    Py_DECREF(callable);
+    return result;
+}
+
+static int
+_aleff_register_type_method(PyTypeObject *type, const char *name)
+{
+    PyObject *descriptor = PyDict_GetItemString(PyType_GetDict(type), name);
+    if (descriptor == NULL) {
+        PyErr_Format(PyExc_RuntimeError, "cannot register %s.%s", type->tp_name, name);
+        return -1;
+    }
+    return aleff_adapter_register_callable(descriptor);
+}
+
+int
+aleff_initialize_adapters(PyObject *module)
+{
+    static const char *managed_module_callables[] = {
+        "restore_continuation",
+        "restore_async_continuation",
+        "_unsafe_call",
+    };
+    for (Py_ssize_t index = 0;
+         index < (Py_ssize_t)(sizeof(managed_module_callables) / sizeof(managed_module_callables[0]));
+         index++) {
+        if (_aleff_register_module_callable(module, managed_module_callables[index]) < 0) {
+            goto registration_error;
+        }
+    }
+
+    static const char *managed_coroutine_methods[] = {"send", "throw", "close"};
+    for (Py_ssize_t index = 0;
+         index < (Py_ssize_t)(sizeof(managed_coroutine_methods) / sizeof(managed_coroutine_methods[0]));
+         index++) {
+        if (_aleff_register_type_method(&PyCoro_Type, managed_coroutine_methods[index]) < 0) {
+            goto registration_error;
+        }
+    }
+
+    if (aleff_adapter_register_callable((PyObject *)&PyMemoryView_Type) < 0) {
+        goto registration_error;
+    }
+
+    return aleff_adapter_install();
+
+registration_error:
+    aleff_adapter_clear_registered_callables();
+    return -1;
+}
 
 PyMODINIT_FUNC
 PyInit__aleff(void)
@@ -2956,7 +3067,7 @@ PyInit__aleff(void)
         return nullptr;
     }
 
-    if (aleff_adapter_install() < 0) {
+    if (aleff_initialize_adapters(m) < 0) {
         Py_DECREF(m);
         return nullptr;
     }

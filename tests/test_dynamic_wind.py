@@ -28,6 +28,9 @@ from aleff import (
 from aleff._multishot.v1.winds import _get_wind_stack  # pyright: ignore[reportPrivateUsage]
 
 
+pytestmark = pytest.mark.publish_wheel
+
+
 # ---------------------------------------------------------------------------
 # Basic behavior (no effects)
 # ---------------------------------------------------------------------------
@@ -1275,6 +1278,112 @@ class TestWindHandlerExtentIsolation:
         assert _get_wind_stack() == []
 
 
+class TestWindEffectDuringRewind:
+    def test_effect_in_nested_before_during_multishot_rewind(self):
+        """An effect in a later before() observes earlier re-entered winds."""
+        main: Effect[[], int] = effect("main")
+        during: Effect[[], int] = effect("during-before")
+        h: Handler[int] = create_handler(main, during)
+
+        counts = {
+            "outer_before": 0,
+            "outer_after": 0,
+            "inner_before": 0,
+            "inner_after": 0,
+        }
+
+        @h.on(main)
+        def _handle_main(k: Resume[int, int]) -> int:
+            return k(1) + k(2)
+
+        @h.on(during)
+        def _handle_during(k: Resume[int, int]) -> int:
+            return k(10) + k(20)
+
+        def before(name: str) -> None:
+            key = f"{name}_before"
+            counts[key] += 1
+            if name == "inner" and counts[key] == 2:
+                during()
+
+        def after(name: str) -> None:
+            counts[f"{name}_after"] += 1
+
+        def body() -> int:
+            with wind(lambda: before("outer"), lambda: after("outer")):
+                with wind(lambda: before("inner"), lambda: after("inner")):
+                    return main()
+
+        assert h(body) == 5
+        assert counts["outer_before"] == counts["outer_after"] == 3
+        assert _get_wind_stack() == []
+
+    def test_effect_error_in_nested_before_rolls_back_reentered_prefix(self):
+        """An error from an effect in before() unwinds the staged prefix."""
+        main: Effect[[], int] = effect("main")
+        during: Effect[[], int] = effect("during-before")
+        h: Handler[int] = create_handler(main, during)
+
+        counts = {"outer_before": 0, "outer_after": 0, "inner_before": 0}
+
+        @h.on(main)
+        def _handle_main(k: Resume[int, int]) -> int:
+            return k(1) + k(2)
+
+        @h.on(during)
+        def _handle_during(k: Resume[int, int]) -> int:
+            raise ValueError("during failed")
+
+        def outer_before() -> None:
+            counts["outer_before"] += 1
+
+        def inner_before() -> None:
+            counts["inner_before"] += 1
+            if counts["inner_before"] == 2:
+                during()
+
+        def body() -> int:
+            with wind(outer_before, lambda: counts.__setitem__("outer_after", counts["outer_after"] + 1)):
+                with wind(inner_before):
+                    return main()
+
+        with pytest.raises(ValueError, match="during failed"):
+            h(body)
+
+        assert counts == {"outer_before": 2, "outer_after": 2, "inner_before": 2}
+        assert _get_wind_stack() == []
+
+    def test_effect_in_single_before_during_multishot_rewind(self):
+        """An effect in the first captured wind remains balanced."""
+        main: Effect[[], int] = effect("main")
+        during: Effect[[], int] = effect("during-before")
+        h: Handler[int] = create_handler(main, during)
+
+        before_calls = 0
+
+        @h.on(main)
+        def _handle_main(k: Resume[int, int]) -> int:
+            return k(1) + k(2)
+
+        @h.on(during)
+        def _handle_during(k: Resume[int, int]) -> int:
+            return k(10) + k(20)
+
+        def before() -> None:
+            nonlocal before_calls
+            before_calls += 1
+            if before_calls == 2:
+                during()
+
+        def body() -> int:
+            with wind(before):
+                return main()
+
+        assert h(body) == 5
+        assert before_calls == 2
+        assert _get_wind_stack() == []
+
+
 class TestWindAsyncHandlerExtentIsolation:
     @pytest.mark.asyncio
     async def test_wind_inside_async_handler_fn_multishot(self):
@@ -1291,6 +1400,46 @@ class TestWindAsyncHandlerExtentIsolation:
 
         assert await h(lambda: e()) == 6
         assert log == ["before", "after"]
+        assert _get_wind_stack() == []
+
+    @pytest.mark.asyncio
+    async def test_effect_in_nested_before_during_multishot_rewind(self):
+        """The async handler path stages re-entered winds before callbacks."""
+        main: Effect[[], int] = effect("main")
+        during: Effect[[], int] = effect("during-before")
+        h: AsyncHandler[int] = create_async_handler(main, during)
+
+        counts = {
+            "outer_before": 0,
+            "outer_after": 0,
+            "inner_before": 0,
+            "inner_after": 0,
+        }
+
+        @h.on(main)
+        async def _handle_main(k: ResumeAsync[int, int]) -> int:
+            return await k(1) + await k(2)
+
+        @h.on(during)
+        async def _handle_during(k: ResumeAsync[int, int]) -> int:
+            return await k(10) + await k(20)
+
+        def before(name: str) -> None:
+            key = f"{name}_before"
+            counts[key] += 1
+            if name == "inner" and counts[key] == 2:
+                during()
+
+        def after(name: str) -> None:
+            counts[f"{name}_after"] += 1
+
+        def body() -> int:
+            with wind(lambda: before("outer"), lambda: after("outer")):
+                with wind(lambda: before("inner"), lambda: after("inner")):
+                    return main()
+
+        assert await h(body) == 5
+        assert counts["outer_before"] == counts["outer_after"] == 3
         assert _get_wind_stack() == []
 
     @pytest.mark.asyncio

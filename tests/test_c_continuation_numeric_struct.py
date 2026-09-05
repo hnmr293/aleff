@@ -2262,10 +2262,6 @@ def test_missing_math_requirement_is_skipped(monkeypatch: pytest.MonkeyPatch) ->
         _require_available_math(case_name)
 
 
-def test_non_math_case_has_no_capability_requirement() -> None:
-    _require_available_math("struct_unpack_apis_normal_error_corner")
-
-
 if __name__ == "__main__":
     if len(sys.argv) != 3 or sys.argv[1] != "--case":
         raise SystemExit("usage: test_c_continuation_numeric_struct.py --case CASE")

@@ -1,4 +1,5 @@
 #include "internal.h"
+#include "api.h"
 #include "functools.h"
 #include <structmember.h>
 
@@ -674,6 +675,23 @@ functools_cache_callable_new(PyObject *func)
 
 static PyObject *functools_original_lru_cache_wrapper = NULL;
 
+int
+adapter_functools_has_callable(PyObject *callable)
+{
+    if (functools_original_lru_cache_wrapper == NULL ||
+        !PyType_Check(functools_original_lru_cache_wrapper) ||
+        !Py_IS_TYPE(
+            callable,
+            (PyTypeObject *)functools_original_lru_cache_wrapper
+        )) {
+        return 0;
+    }
+    FunctoolsLruCacheObject *wrapper =
+        (FunctoolsLruCacheObject *)callable;
+    return wrapper->func != NULL &&
+        Py_IS_TYPE(wrapper->func, &FunctoolsCacheCallableType);
+}
+
 static PyObject *
 functools_cache_wrap(
     PyObject *func,
@@ -748,6 +766,9 @@ adapter_functools_install(PyObject *functools)
     if (PyType_Ready(&FunctoolsCacheCallableType) < 0) {
         return -1;
     }
+    if (aleff_adapter_register_callable((PyObject *)&FunctoolsCacheCallableType) < 0) {
+        return -1;
+    }
     PyObject *cmp_to_key = PyObject_GetAttrString(functools, "cmp_to_key");
     if (cmp_to_key == NULL) {
         return -1;
@@ -790,6 +811,7 @@ adapter_functools_install(PyObject *functools)
         &lru_cache_wrapper_method, NULL, functools
     );
     if (lru_cache_wrapper == NULL ||
+        aleff_adapter_register_callable(lru_cache_wrapper) < 0 ||
         PyObject_SetAttrString(
             functools, "_lru_cache_wrapper", lru_cache_wrapper
         ) < 0) {

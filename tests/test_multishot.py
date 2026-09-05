@@ -28,6 +28,9 @@ from aleff import (
 )
 
 
+pytestmark = pytest.mark.publish_wheel
+
+
 # ---------------------------------------------------------------------------
 # Multi-shot: basic resume multiple times
 # ---------------------------------------------------------------------------

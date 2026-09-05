@@ -1,5 +1,6 @@
 #define PY_SSIZE_T_CLEAN
 
+#include "api.h"
 #include "datetime.h"
 #include "internal.h"
 
@@ -1501,7 +1502,10 @@ replace_method(PyTypeObject *type, const char *name, PyObject *original,
         return -1;
     }
     PyObject *dict = PyType_GetDict(type);
-    int result = dict == NULL ? -1 : PyDict_SetItemString(dict, name, descriptor);
+    int result = dict == NULL ? -1 : aleff_adapter_register_callable(descriptor);
+    if (result == 0) {
+        result = PyDict_SetItemString(dict, name, descriptor);
+    }
     Py_XDECREF(dict);
     Py_DECREF(descriptor);
     if (result == 0) {

@@ -16,6 +16,9 @@ from aleff import (
 )
 
 
+pytestmark = pytest.mark.publish_wheel
+
+
 class _TaskProtocolAwaitable:
     """Awaitable that verifies Task-style resumption after its Future completes."""
 

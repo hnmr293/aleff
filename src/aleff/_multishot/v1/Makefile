@@ -11,7 +11,7 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 TARGET = _aleff$(EXT_SUFFIX)
-ADAPTER_SRC = adapters/framework.c adapters/critical_sections.c \
+ADAPTER_SRC = adapters/framework.c adapters/critical_sections.c adapters/unsafe.c \
 	adapters/buffers.c adapters/binascii.c adapters/compression.c adapters/hashing.c \
 	adapters/module_functions.c \
 	adapters/bisect.c adapters/heapq.c adapters/regex.c \
@@ -24,7 +24,7 @@ ADAPTER_SRC = adapters/framework.c adapters/critical_sections.c \
 	adapters/builtins.c adapters/protocols.c adapters/containers.c adapters/mappings.c \
 	adapters/sets.c adapters/text.c adapters/operator.c adapters/functools.c \
 	adapters/adapters_bootstrap.c adapters/sort_engine.c
-ADAPTER_HEADERS = adapters/api.h adapters/critical_sections.h \
+ADAPTER_HEADERS = adapters/api.h adapters/critical_sections.h adapters/unsafe.h \
 	adapters/binascii.h adapters/buffers.h adapters/compression.h adapters/hashing.h \
 	adapters/module_functions.h \
 	adapters/bisect.h adapters/builtins.h adapters/containers.h \
@@ -36,7 +36,31 @@ ADAPTER_HEADERS = adapters/api.h adapters/critical_sections.h \
 	adapters/marshal_stream.h adapters/operator.h adapters/protocols.h adapters/regex.h adapters/sets.h \
 	adapters/csv.h adapters/json.h adapters/json_encoder.h adapters/json_decoder.h adapters/pickle.h \
 	adapters/sort_engine.h adapters/text.h
-SRC = _aleff.c $(ADAPTER_SRC)
+UNAME_M := $(shell uname -m)
+UNSAFE_ASM =
+ifeq ($(UNAME_S)-$(UNAME_M),Linux-x86_64)
+  ifeq ($(shell $(PYTHON) -c "import sys; print(sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)})"),True)
+    UNSAFE_ASM = adapters/unsafe_switch_amd64_sysv.S
+    CFLAGS += -fno-omit-frame-pointer
+    DEBUG_CFLAGS += -fno-omit-frame-pointer
+  endif
+endif
+ifeq ($(UNAME_S)-$(UNAME_M),Darwin-x86_64)
+  ifeq ($(shell $(PYTHON) -c "import sys; print(sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)})"),True)
+    UNSAFE_ASM = adapters/unsafe_switch_amd64_darwin.S
+    CFLAGS += -fno-omit-frame-pointer
+    DEBUG_CFLAGS += -fno-omit-frame-pointer
+  endif
+endif
+ifeq ($(UNAME_S)-$(UNAME_M),Darwin-arm64)
+  ifeq ($(shell $(PYTHON) -c "import sys; print(sys.version_info[:2] in {(3, 12), (3, 13), (3, 14)})"),True)
+    UNSAFE_ASM = adapters/unsafe_switch_arm64_darwin.S
+    CFLAGS += -fno-omit-frame-pointer
+    DEBUG_CFLAGS += -fno-omit-frame-pointer
+  endif
+endif
+
+SRC = _aleff.c $(ADAPTER_SRC) $(UNSAFE_ASM)
 
 .PHONY: build debug clean
 

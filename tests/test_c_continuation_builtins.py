@@ -13,6 +13,9 @@ import pytest
 from aleff import create_handler, effect
 
 
+pytestmark = pytest.mark.publish_wheel
+
+
 Case = Callable[[], None]
 Choose = Callable[[], Any]
 _CASES: dict[str, Case] = {}

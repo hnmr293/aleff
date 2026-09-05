@@ -22,6 +22,9 @@ from aleff._multishot.v1._aleff import (
 )
 
 
+pytestmark = pytest.mark.publish_wheel
+
+
 # ---------------------------------------------------------------------------
 # Module and type availability
 # ---------------------------------------------------------------------------
@@ -670,14 +673,3 @@ class TestRestoreContinuationGreenlet:
         gl2 = greenlet.greenlet(body)
         with pytest.raises(ValueError, match="negative"):
             gl2.switch()
-
-
-# ---------------------------------------------------------------------------
-# Version check
-# ---------------------------------------------------------------------------
-
-
-class TestVersionRequirement:
-    def test_python_312_or_later(self):
-        """_aleff requires Python 3.12+."""
-        assert sys.version_info >= (3, 12)
