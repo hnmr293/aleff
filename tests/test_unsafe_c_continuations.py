@@ -406,7 +406,7 @@ def test_monitoring_warns_only_for_an_unsupported_c_boundary_active_at_snapshot(
 import time
 import warnings
 import aleffy_test_helper as helper
-from aleff import UnsupportedCContinuationWarning, create_handler, effect
+from aleff import CFrameContinuationWarning, create_handler, effect
 
 suspend = effect("suspend")
 handler = create_handler(suspend)
@@ -426,12 +426,12 @@ for _ in range(20_000):
     helper.aleff_test_aleffy_call(lambda: 1)
 
 with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter("always", UnsupportedCContinuationWarning)
+    warnings.simplefilter("always", CFrameContinuationWarning)
     assert handler(caller) == "handled"
 
 assert len(caught) == 1, caught
 warning = caught[0]
-assert warning.category is UnsupportedCContinuationWarning
+assert warning.category is CFrameContinuationWarning
 assert warning.filename == "<string>"
 assert warning.lineno == caller.__code__.co_firstlineno + 1
 assert "aleffy_test_helper.aleff_test_aleffy_call" in str(warning.message)
@@ -449,7 +449,7 @@ def test_monitoring_treats_aleffy_as_an_explicitly_managed_boundary(
         """
 import warnings
 import aleffy_test_helper as helper
-from aleff import UnsupportedCContinuationWarning, aleffy, create_handler, effect
+from aleff import CFrameContinuationWarning, aleffy, create_handler, effect
 
 choose = effect("choose")
 handler = create_handler(choose)
@@ -460,7 +460,7 @@ def choose_twice(k):
 
 wrapped = aleffy(helper.aleff_test_aleffy_call)
 with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter("always", UnsupportedCContinuationWarning)
+    warnings.simplefilter("always", CFrameContinuationWarning)
     assert handler(lambda: wrapped(choose)) == [701, 702]
 
 assert caught == [], caught
@@ -478,7 +478,7 @@ def test_monitoring_relays_the_original_boundary_to_an_async_handler(
 import asyncio
 import warnings
 import aleffy_test_helper as helper
-from aleff import UnsupportedCContinuationWarning, create_async_handler, create_handler, effect
+from aleff import CFrameContinuationWarning, create_async_handler, create_handler, effect
 
 suspend = effect("suspend")
 outer = create_async_handler(suspend)
@@ -493,7 +493,7 @@ def caller():
 
 async def main():
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert await outer(caller) == "handled"
     assert len(caught) == 1, caught
     assert "aleffy_test_helper.aleff_test_aleffy_call" in str(caught[0].message)
@@ -512,7 +512,7 @@ def test_monitoring_covers_an_unsupported_boundary_in_wind_reentry(
         """
 import warnings
 import aleffy_test_helper as helper
-from aleff import UnsupportedCContinuationWarning, create_handler, effect, wind
+from aleff import CFrameContinuationWarning, create_handler, effect, wind
 
 choose = effect("choose")
 during_before = effect("during-before")
@@ -540,7 +540,7 @@ def caller():
         return choose()
 
 with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter("always", UnsupportedCContinuationWarning)
+    warnings.simplefilter("always", CFrameContinuationWarning)
     assert handler(caller) == "stopped"
 
 assert len(caught) == 1, caught
@@ -559,11 +559,11 @@ def test_monitoring_generation_discards_boundaries_seen_before_reenable(
 import warnings
 import aleffy_test_helper as helper
 from aleff import (
-    UnsupportedCContinuationWarning,
+    CFrameContinuationWarning,
     create_handler,
-    disable_c_boundary_warnings,
+    disable_c_warnings,
     effect,
-    enable_c_boundary_warnings,
+    enable_c_warnings,
 )
 
 suspend = effect("suspend")
@@ -574,12 +574,12 @@ def handle(_resume):
     return "handled"
 
 def reset_monitoring_then_suspend():
-    disable_c_boundary_warnings()
-    enable_c_boundary_warnings()
+    disable_c_warnings()
+    enable_c_warnings()
     return suspend()
 
 with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter("always", UnsupportedCContinuationWarning)
+    warnings.simplefilter("always", CFrameContinuationWarning)
     assert handler(lambda: helper.aleff_test_aleffy_call(reset_monitoring_then_suspend)) == "handled"
     assert handler(lambda: helper.aleff_test_aleffy_call(suspend)) == "handled"
 
@@ -597,7 +597,7 @@ def test_monitoring_warning_as_error_aborts_and_cleans_nested_boundaries(
         """
 import warnings
 import aleffy_test_helper as helper
-from aleff import UnsupportedCContinuationWarning, create_handler, effect
+from aleff import CFrameContinuationWarning, create_handler, effect
 
 suspend = effect("suspend")
 handler = create_handler(suspend)
@@ -612,16 +612,16 @@ def recurse(depth):
     return suspend()
 
 with warnings.catch_warnings():
-    warnings.simplefilter("error", UnsupportedCContinuationWarning)
+    warnings.simplefilter("error", CFrameContinuationWarning)
     try:
         handler(lambda: recurse(3))
-    except UnsupportedCContinuationWarning:
+    except CFrameContinuationWarning:
         pass
     else:
         raise AssertionError("warning did not become an error")
 
 with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter("always", UnsupportedCContinuationWarning)
+    warnings.simplefilter("always", CFrameContinuationWarning)
     helper.aleff_test_aleffy_call(lambda: 1)
     assert handler(suspend) == "handled"
 

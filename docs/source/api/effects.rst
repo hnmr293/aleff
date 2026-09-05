@@ -36,7 +36,7 @@ Unsupported C-boundary monitoring
 Aleff enables C-boundary monitoring by default. When a continuation snapshot
 crosses a C boundary without an installed continuation adapter or an explicit
 ``aleffy()`` opt-in, Aleff emits
-``UnsupportedCContinuationWarning``. Disabling monitoring suppresses the
+``CFrameContinuationWarning``. Disabling monitoring suppresses the
 diagnostic only; it does not make an unsupported boundary safe.
 
 .. automodule:: aleff._multishot.v1.monitoring

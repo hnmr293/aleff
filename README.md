@@ -202,7 +202,7 @@ Multi-shot continuations are implemented via a CPython C extension (`aleff._mult
 
 When an effect is performed while a C-extension call is active, that boundary
 must have an Aleff continuation adapter or an explicitly audited `aleffy()`
-wrapper; otherwise Aleff emits `UnsupportedCContinuationWarning`. See the
+wrapper; otherwise Aleff emits `CFrameContinuationWarning`. See the
 [Effects & Handlers documentation](https://hnmr293.github.io/aleff/api/effects.html#unsafe-c-extension-boundary)
 for the `aleffy()` contract.
 
@@ -249,9 +249,9 @@ See [`examples/`](examples/) for demonstrations:
 | `wind_range(stop)` / `wind_range(start, stop, step)` | Multi-shot-safe `range()` for `for` loops |
 | `Ref[T]` | Reference wrapper returned by `wind`; call `unwrap()` to get the value |
 | `aleffy(func)` | Opt a compatible C-extension callable into experimental native continuation capture |
-| `UnsupportedCContinuationWarning` | Warning emitted when a snapshot crosses an unsupported C boundary |
-| `enable_c_boundary_warnings()` / `disable_c_boundary_warnings()` | Enable or disable C-boundary diagnostics |
-| `c_boundary_warnings_enabled()` | Report whether C-boundary diagnostics are active |
+| `CFrameContinuationWarning` | Warning emitted when a snapshot crosses an unsupported C boundary |
+| `enable_c_warnings()` / `disable_c_warnings()` | Enable or disable C-boundary diagnostics |
+| `c_warnings_enabled()` | Report whether C-boundary diagnostics are active |
 
 ## Development
 

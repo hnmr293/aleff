@@ -19,13 +19,13 @@ import greenlet as gl
 import pytest
 
 from aleff import (
-    UnsupportedCContinuationWarning,
-    c_boundary_warnings_enabled,
+    CFrameContinuationWarning,
+    c_warnings_enabled,
     create_async_handler,
     create_handler,
-    disable_c_boundary_warnings,
+    disable_c_warnings,
     effect,
-    enable_c_boundary_warnings,
+    enable_c_warnings,
 )
 
 
@@ -34,14 +34,14 @@ ROOT = Path(__file__).parents[1]
 
 @pytest.fixture(autouse=True)
 def _restore_monitoring() -> Iterator[None]:
-    enable_c_boundary_warnings()
+    enable_c_warnings()
     yield
-    disable_c_boundary_warnings()
-    enable_c_boundary_warnings()
+    disable_c_warnings()
+    enable_c_warnings()
 
 
 def test_c_boundary_warnings_are_enabled_by_default() -> None:
-    assert c_boundary_warnings_enabled() is True
+    assert c_warnings_enabled() is True
     assert any(sys.monitoring.get_tool(tool_id) == "aleff.c-boundary-warnings" for tool_id in (3, 4))
 
 
@@ -141,7 +141,7 @@ def test_completed_c_call_before_snapshot_does_not_warn() -> None:
         return suspend()
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(caller) == "handled"
 
     assert caught == []
@@ -149,7 +149,7 @@ def test_completed_c_call_before_snapshot_does_not_warn() -> None:
 
 def test_c_call_that_raises_before_snapshot_does_not_warn() -> None:
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         with pytest.raises(ValueError):
             create_handler()(lambda: time.sleep(-1))
 
@@ -175,9 +175,9 @@ def test_default_monitoring_does_not_change_recursion_limit_behavior() -> None:
     previous_limit = sys.getrecursionlimit()
     try:
         sys.setrecursionlimit(80)
-        disable_c_boundary_warnings()
+        disable_c_warnings()
         without_monitoring = count_recursive_comparisons()
-        enable_c_boundary_warnings()
+        enable_c_warnings()
         with_monitoring = count_recursive_comparisons()
     finally:
         sys.setrecursionlimit(previous_limit)
@@ -214,7 +214,7 @@ def test_python_backed_callable_object_is_not_a_c_boundary() -> None:
             return suspend()
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: Callback()()) == "handled"
 
     assert caught == []
@@ -244,11 +244,11 @@ def test_staticmethod_wrapped_unsupported_c_callable_warns(wrapper_depth: int) -
     callback_type = StaticCallback if wrapper_depth == 1 else NestedStaticCallback
     callback = cast(Callable[[Iterable[None]], object], callback_type())
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: callback(Items())) == "handled"
 
     assert len(caught) == 1
-    assert caught[0].category is UnsupportedCContinuationWarning
+    assert caught[0].category is CFrameContinuationWarning
 
 
 def test_classmethod_wrapped_unsupported_c_callable_warns() -> None:
@@ -270,11 +270,11 @@ def test_classmethod_wrapped_unsupported_c_callable_warns() -> None:
 
     callback = cast(Callable[[], object], Callback())
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: callback()) == "handled"
 
     assert len(caught) == 1
-    assert caught[0].category is UnsupportedCContinuationWarning
+    assert caught[0].category is CFrameContinuationWarning
 
 
 def test_staticmethod_wrapped_native_callable_object_warns() -> None:
@@ -297,11 +297,11 @@ def test_staticmethod_wrapped_native_callable_object_warns() -> None:
 
     callback = cast(Callable[[Iterable[None]], object], Callback())
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: callback(Items())) == "handled"
 
     assert len(caught) == 1
-    assert caught[0].category is UnsupportedCContinuationWarning
+    assert caught[0].category is CFrameContinuationWarning
 
 
 def test_staticmethod_wrapped_adapter_backed_callable_does_not_warn() -> None:
@@ -323,7 +323,7 @@ def test_staticmethod_wrapped_adapter_backed_callable_does_not_warn() -> None:
 
     callback = cast(Callable[[Iterable[int]], object], Callback())
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: callback(Items())) == "handled"
 
     assert caught == []
@@ -345,7 +345,7 @@ def test_staticmethod_wrapped_python_callable_object_does_not_warn() -> None:
         return "handled"
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: Callback()()) == "handled"
 
     assert caught == []
@@ -375,11 +375,11 @@ def test_metaclass_staticmethod_wrapped_unsupported_c_callable_warns() -> None:
 
     target = cast(Callable[[Iterable[None]], object], Target)
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: target(Items())) == "handled"
 
     assert len(caught) == 1
-    assert caught[0].category is UnsupportedCContinuationWarning
+    assert caught[0].category is CFrameContinuationWarning
     expected_name = f"{Target.__module__}.{Target.__qualname__}"
     assert str(caught[0].message).startswith(f"{expected_name} is an unsupported C boundary")
 
@@ -419,7 +419,7 @@ def test_warning_name_does_not_invoke_metaclass_hooks(action: Literal["always", 
         return "handled"
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter(action, UnsupportedCContinuationWarning)
+        warnings.simplefilter(action, CFrameContinuationWarning)
         assert handler(lambda: Callback()(Items())) == "handled"
 
     assert len(caught) == warning_count
@@ -449,7 +449,7 @@ def test_warning_name_does_not_invoke_instance_class_hook() -> None:
         return "handled"
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: Callback()(Items())) == "handled"
 
     assert len(caught) == 1
@@ -482,7 +482,7 @@ def test_warning_name_rejects_non_string_metadata_without_formatting_it() -> Non
         return "handled"
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: Callback()(Items())) == "handled"
 
     assert len(caught) == 1
@@ -514,7 +514,7 @@ def test_async_warning_name_does_not_invoke_metaclass_hooks() -> None:
 
     async def run() -> str:
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UnsupportedCContinuationWarning)
+            warnings.simplefilter("ignore", CFrameContinuationWarning)
             return await handler(lambda: Callback()(Items()))
 
     assert asyncio.run(run()) == "handled"
@@ -529,7 +529,7 @@ def test_adapter_backed_boundary_active_at_snapshot_does_not_warn() -> None:
         return "handled"
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: list(map(lambda _: suspend(), [None]))) == "handled"
 
     assert caught == []
@@ -550,7 +550,7 @@ def test_adapter_backed_itertools_constructor_does_not_warn(constructor: object)
         return "handled"
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         if constructor is itertools.product:
             result = handler(lambda: itertools.product([1], repeat=cast(int, Index())))
         else:
@@ -582,7 +582,7 @@ def test_core_restore_and_coroutine_bridge_boundaries_do_not_warn() -> None:
         raise AssertionError("coroutine unexpectedly suspended")
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(caller) == [1, 2]
 
     assert caught == []
@@ -615,7 +615,7 @@ def test_instrumented_call_variants_restore_as_their_base_opcode(
         return [resume(None), resume(None)]
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: caller(suspend)) == expected
 
     assert caught == []
@@ -629,25 +629,25 @@ def test_disabled_monitoring_does_not_warn_for_completed_calls_or_snapshots() ->
     def handle(_resume: object) -> str:
         return "handled"
 
-    disable_c_boundary_warnings()
+    disable_c_warnings()
 
     with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", UnsupportedCContinuationWarning)
+        warnings.simplefilter("always", CFrameContinuationWarning)
         assert handler(lambda: (time.time(), suspend())[1]) == "handled"
 
     assert caught == []
-    assert c_boundary_warnings_enabled() is False
+    assert c_warnings_enabled() is False
 
 
 def test_enable_and_disable_are_idempotent_and_release_the_tool_id() -> None:
-    enable_c_boundary_warnings()
-    enable_c_boundary_warnings()
+    enable_c_warnings()
+    enable_c_warnings()
     claimed = [tool_id for tool_id in (3, 4) if sys.monitoring.get_tool(tool_id) == "aleff.c-boundary-warnings"]
     assert len(claimed) == 1
     assert sys.monitoring.get_events(claimed[0]) == sys.monitoring.events.CALL
 
-    disable_c_boundary_warnings()
-    disable_c_boundary_warnings()
+    disable_c_warnings()
+    disable_c_warnings()
 
     assert all(sys.monitoring.get_tool(tool_id) != "aleff.c-boundary-warnings" for tool_id in (3, 4))
 
@@ -663,7 +663,7 @@ with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
     import aleff
 
-print(aleff.c_boundary_warnings_enabled())
+print(aleff.c_warnings_enabled())
 print(sys.monitoring.get_tool(3))
 print(sys.monitoring.get_tool(4))
 print(type(caught[-1].message).__name__)
@@ -695,16 +695,16 @@ with warnings.catch_warnings():
     import aleff
 
 try:
-    aleff.enable_c_boundary_warnings()
+    aleff.enable_c_warnings()
 except RuntimeError as error:
     print(error)
 else:
     raise AssertionError("enable unexpectedly succeeded")
 
 sys.monitoring.free_tool_id(4)
-aleff.enable_c_boundary_warnings()
-print(aleff.c_boundary_warnings_enabled())
-aleff.disable_c_boundary_warnings()
+aleff.enable_c_warnings()
+print(aleff.c_warnings_enabled())
+aleff.disable_c_warnings()
 print(sys.monitoring.get_tool(4))
 """
     result = subprocess.run(
@@ -738,7 +738,7 @@ import aleff
 
 call_count = 0
 len(())
-print(aleff.c_boundary_warnings_enabled())
+print(aleff.c_warnings_enabled())
 print(sys.monitoring.get_tool(3))
 print(sys.monitoring.get_tool(4))
 print(call_count)
@@ -777,7 +777,7 @@ with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
     import aleff
 
-print(aleff.c_boundary_warnings_enabled())
+print(aleff.c_warnings_enabled())
 print(type(caught[-1].message).__name__)
 print(caught[-1].message)
 for tool_id, sentinel in zip((3, 4), sentinels, strict=True):
@@ -829,8 +829,8 @@ def sentinel(code, instruction_offset, target, argument):
 sys.monitoring.register_callback(tool_id, sys.monitoring.events.CALL, sentinel)
 sys.monitoring.set_events(tool_id, sys.monitoring.events.CALL)
 
-print(aleff.c_boundary_warnings_enabled())
-aleff.disable_c_boundary_warnings()
+print(aleff.c_warnings_enabled())
+aleff.disable_c_warnings()
 len(())
 print(sys.monitoring.get_tool(tool_id))
 print(sys.monitoring.get_events(tool_id))
@@ -862,16 +862,16 @@ import warnings
 import aleff._multishot.v1.monitoring as monitoring
 
 owner = monitoring._TOOL_NAME
-warning_type = monitoring.UnsupportedCContinuationWarning
+warning_type = monitoring.CFrameContinuationWarning
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter("always")
     importlib.reload(monitoring)
 
 claimed = [tool_id for tool_id in (3, 4) if sys.monitoring.get_tool(tool_id) is owner]
-print(monitoring.c_boundary_warnings_enabled())
+print(monitoring.c_warnings_enabled())
 print(len(claimed))
 print(monitoring._TOOL_NAME is owner)
-print(monitoring.UnsupportedCContinuationWarning is warning_type)
+print(monitoring.CFrameContinuationWarning is warning_type)
 print(len(caught))
 """
     result = subprocess.run(
@@ -895,7 +895,7 @@ import warnings
 import aleff
 import aleff._multishot.v1.monitoring as monitoring
 
-warning_type = aleff.UnsupportedCContinuationWarning
+warning_type = aleff.CFrameContinuationWarning
 importlib.reload(monitoring)
 suspend = aleff.effect("suspend")
 handler = aleff.create_handler(suspend)
@@ -909,7 +909,7 @@ class Items:
 def handle(_resume):
     return "handled"
 
-print(monitoring.UnsupportedCContinuationWarning is warning_type)
+print(monitoring.CFrameContinuationWarning is warning_type)
 with warnings.catch_warnings():
     warnings.simplefilter("error", warning_type)
     try:
@@ -949,10 +949,10 @@ claimed = [
     for tool_id in (3, 4)
     if sys.monitoring.get_tool(tool_id) is monitoring._TOOL_NAME
 ]
-print(monitoring.c_boundary_warnings_enabled())
+print(monitoring.c_warnings_enabled())
 print(len(claimed))
 print(len(caught))
-monitoring.disable_c_boundary_warnings()
+monitoring.disable_c_warnings()
 print([sys.monitoring.get_tool(tool_id) for tool_id in (3, 4)])
 """
     result = subprocess.run(
@@ -975,11 +975,11 @@ import sys
 import aleff._multishot.v1.monitoring as monitoring
 
 owner = monitoring._TOOL_NAME
-monitoring.disable_c_boundary_warnings()
+monitoring.disable_c_warnings()
 print([sys.monitoring.get_tool(tool_id) for tool_id in (3, 4)])
 importlib.reload(monitoring)
 claimed = [tool_id for tool_id in (3, 4) if sys.monitoring.get_tool(tool_id) is owner]
-print(monitoring.c_boundary_warnings_enabled())
+print(monitoring.c_warnings_enabled())
 print(len(claimed))
 print(monitoring._TOOL_NAME is owner)
 """

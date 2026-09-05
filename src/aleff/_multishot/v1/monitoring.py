@@ -27,8 +27,8 @@ _previous_tool_name = globals().get("_TOOL_NAME")
 _previous_tool_id = globals().get("_tool_id")
 _previous_generation = globals().get("_generation")
 _previous_warning_type = cast(
-    "type[UnsupportedCContinuationWarning] | None",
-    globals().get("UnsupportedCContinuationWarning"),
+    "type[CFrameContinuationWarning] | None",
+    globals().get("CFrameContinuationWarning"),
 )
 _reloading = _previous_tool_name is not None
 _TOOL_NAME = (
@@ -46,11 +46,11 @@ _warning_registries: weakref.WeakKeyDictionary[CodeType, dict[_WarningRegistryKe
 
 if _previous_warning_type is None:
 
-    class UnsupportedCContinuationWarning(RuntimeWarning):
+    class CFrameContinuationWarning(RuntimeWarning):
         """A continuation snapshot crossed an unsupported C boundary."""
 
 else:
-    UnsupportedCContinuationWarning = _previous_warning_type
+    CFrameContinuationWarning = _previous_warning_type
 
 
 @dataclass(slots=True)
@@ -134,7 +134,7 @@ def _is_python_backed_callable(target: object) -> bool:
 
 
 def _freeze_unsupported_boundaries() -> _BoundaryToken:
-    if not c_boundary_warnings_enabled():
+    if not c_warnings_enabled():
         return ()
     state = getattr(gl.getcurrent(), _STATE_ATTRIBUTE, None)
     if state is None or state.generation != _generation:
@@ -204,7 +204,7 @@ def _warn_unsupported_boundaries(token: _BoundaryToken) -> None:
             registry = _warning_registries.setdefault(code, {})
             warnings.warn_explicit(
                 message,
-                UnsupportedCContinuationWarning,
+                CFrameContinuationWarning,
                 code.co_filename,
                 _line_number(code, instruction_offset),
                 registry=registry,
@@ -250,10 +250,10 @@ def _configure_tool(tool_id: int) -> None:
         raise
 
 
-def _enable_c_boundary_warnings(refresh: bool) -> None:
+def _enable_c_warnings(refresh: bool) -> None:
     global _generation, _tool_id
     with _lock:
-        if c_boundary_warnings_enabled() and not refresh:
+        if c_warnings_enabled() and not refresh:
             return
 
         tool_id, newly_claimed = _claim_tool_id()
@@ -268,13 +268,13 @@ def _enable_c_boundary_warnings(refresh: bool) -> None:
         _tool_id = tool_id
 
 
-def enable_c_boundary_warnings() -> None:
+def enable_c_warnings() -> None:
     """Enable unsupported C-boundary warnings for Aleff snapshots."""
 
-    _enable_c_boundary_warnings(False)
+    _enable_c_warnings(False)
 
 
-def disable_c_boundary_warnings() -> None:
+def disable_c_warnings() -> None:
     """Disable C-boundary warnings and release Aleff's monitoring tool ID."""
 
     global _generation, _tool_id
@@ -294,7 +294,7 @@ def disable_c_boundary_warnings() -> None:
         _tool_id = None
 
 
-def c_boundary_warnings_enabled() -> bool:
+def c_warnings_enabled() -> bool:
     """Return whether unsupported C-boundary monitoring is active."""
 
     tool_id = _tool_id
@@ -306,14 +306,14 @@ def c_boundary_warnings_enabled() -> bool:
 
 
 try:
-    _enable_c_boundary_warnings(_reloading)
+    _enable_c_warnings(_reloading)
 except RuntimeError as error:
     warnings.warn(str(error), RuntimeWarning, stacklevel=2)
 
 
 __all__ = [
-    "UnsupportedCContinuationWarning",
-    "c_boundary_warnings_enabled",
-    "disable_c_boundary_warnings",
-    "enable_c_boundary_warnings",
+    "CFrameContinuationWarning",
+    "c_warnings_enabled",
+    "disable_c_warnings",
+    "enable_c_warnings",
 ]
