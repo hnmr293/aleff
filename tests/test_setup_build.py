@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import runpy
+import tomllib
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
 import setuptools
+from packaging.requirements import Requirement
 from setuptools import Distribution
 
 
@@ -28,6 +30,15 @@ class FakeMsvcCompiler:
     def spawn(self, cmd: list[str]) -> None:
         assert self.initialized
         self.calls.append("spawn")
+
+
+def test_cibuildwheel_test_environment_includes_setuptools() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    requirements = {
+        Requirement(requirement).name.lower() for requirement in pyproject["tool"]["cibuildwheel"]["test-requires"]
+    }
+
+    assert "setuptools" in requirements
 
 
 def load_build_ext(monkeypatch: pytest.MonkeyPatch) -> type[Any]:
