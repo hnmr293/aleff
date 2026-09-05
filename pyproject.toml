@@ -93,6 +93,7 @@ test-command = "pytest {project}/tests -q -m publish_wheel"
 test-requires = [
     "pytest",
     "pytest-asyncio",
+    "setuptools>=77.0.3",
 ]
 
 [tool.pytest.ini_options]
