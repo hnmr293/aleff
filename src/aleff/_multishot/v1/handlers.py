@@ -17,6 +17,10 @@ from .intf import (
 )
 from .effects import EffectContext, ABORT, EffectAborted
 from .misc import debug, eff_str
+from .monitoring import (
+    _new_continuation_greenlet,  # pyright: ignore[reportPrivateUsage]
+    _warn_unsupported_boundaries,  # pyright: ignore[reportPrivateUsage]
+)
 from ._aleff import (
     _snapshot_from_frame_with_adapters,  # pyright: ignore[reportPrivateUsage]
     FrameSnapshot,
@@ -138,7 +142,7 @@ class _Resume[R, V](Resume[R, V]):
             rewind(winds)
             return restore_continuation(ss, value)
 
-        new_gl = gl.greenlet(_body)
+        new_gl = _new_continuation_greenlet(_body)
         new_gl.gr_context = copy_context()
         v = _drive(new_gl, new_gl.switch())
 
@@ -192,7 +196,7 @@ class _ResumeAsync[R, V](ResumeAsync[R, V]):
                 return _run_restored_async_continuation(ss, value)
             return restore_continuation(ss, value)
 
-        new_gl = gl.greenlet(_body)
+        new_gl = _new_continuation_greenlet(_body)
         new_gl.gr_context = copy_context()
         v = await _drive_async(new_gl, new_gl.switch())
 
@@ -302,6 +306,7 @@ def _drive_effect(caller_gl: Any, value: EffectContext[..., Any]) -> Any:
 
     # Take snapshot from the handler greenlet. The caller greenlet is
     # suspended at this point, so its frames have valid stacktop values.
+    _warn_unsupported_boundaries(value.boundary_token)
     snapshot = _snapshot_from_frame_with_adapters(
         caller_gl.gr_frame,
         -1,
@@ -525,7 +530,7 @@ async def _run_handler_fn_in_bridge(
     def _bridge() -> Any:
         return _run_coroutine_in_bridge(fn(*args, **kwargs))
 
-    handler_fn_gl = gl.greenlet(_bridge)
+    handler_fn_gl = _new_continuation_greenlet(_bridge)
     handler_fn_gl.gr_context = copy_context()
     v: Any = handler_fn_gl.switch()
 
@@ -553,7 +558,7 @@ async def _run_handler_fn_in_greenlet(
 ) -> Any:
     """Run a sync handler fn in a greenlet, dispatching effects."""
 
-    handler_fn_gl = gl.greenlet(lambda: fn(*args, **kwargs))
+    handler_fn_gl = _new_continuation_greenlet(lambda: fn(*args, **kwargs))
     handler_fn_gl.gr_context = copy_context()
     v: Any = handler_fn_gl.switch()
 
@@ -621,6 +626,7 @@ async def _drive_effect_async(
     if d.handler.shallow:
         _remove_all_handlers(d.token)
 
+    _warn_unsupported_boundaries(value.boundary_token)
     snapshot, async_continuation = _snapshot_for_async_resume(
         caller_gl,
         value.handled_exception,
@@ -726,7 +732,7 @@ class _Handler[V](
         _put_handlers(token, self, self._reserved_effects)
 
         try:
-            caller_gl = gl.greenlet(caller)
+            caller_gl = _new_continuation_greenlet(caller)
             caller_gl.gr_context = copy_context()
 
             debug(f"|> @caller | {self}")
@@ -799,7 +805,7 @@ class _AsyncHandler[V](
                     coro = cast(Coroutine[Any, Any, V], _orig())
                     return _run_coroutine_in_bridge(coro)
 
-            caller_gl = gl.greenlet(actual_caller)
+            caller_gl = _new_continuation_greenlet(actual_caller)
             caller_gl.gr_context = copy_context()
 
             debug(f"|> @caller | {self}")

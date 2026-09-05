@@ -27,8 +27,21 @@ position.
    perform effects.
 
    Capture and resume must occur in the same OS thread and interpreter, and
-   resumes must be sequential. The current implementation is available only on
-   Linux x86-64 with GIL-enabled CPython 3.12 through 3.14.
+   resumes must be sequential. The current implementation supports CPython
+   3.12 through 3.14 on Linux x86-64, macOS x86-64/arm64, and Windows x64.
+
+Unsupported C-boundary monitoring
+---------------------------------
+
+Aleff enables C-boundary monitoring by default. When a continuation snapshot
+crosses a C boundary without an installed continuation adapter or an explicit
+``aleffy()`` opt-in, Aleff emits
+``CFrameContinuationWarning``. Disabling monitoring suppresses the
+diagnostic only; it does not make an unsupported boundary safe.
+
+.. automodule:: aleff._multishot.v1.monitoring
+   :members:
+   :member-order: bysource
 
 Prohibited callback contexts
 ----------------------------
