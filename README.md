@@ -198,12 +198,13 @@ Because handlers use greenlets (not exceptions), the control flow is:
 
 Multi-shot continuations are implemented via a CPython C extension (`aleff._multishot.v1._aleff`) that snapshots and restores interpreter frame chains.
 
-`aleffy()` additionally provides an experimental unsafe boundary for regular
-CPython C extensions. Its current backend requires GIL-enabled CPython 3.12
-through 3.14 on Linux x86-64. It does not support `ctypes` callables, and C resources held
-across an effect must be safe for every multi-shot branch. See the
+### C-extension boundaries
+
+When an effect is performed while a C-extension call is active, that boundary
+must have an Aleff continuation adapter or an explicitly audited `aleffy()`
+wrapper; otherwise Aleff emits `UnsupportedCContinuationWarning`. See the
 [Effects & Handlers documentation](https://hnmr293.github.io/aleff/api/effects.html#unsafe-c-extension-boundary)
-for the complete contract.
+for the `aleffy()` contract.
 
 ### Package structure
 
@@ -247,6 +248,10 @@ See [`examples/`](examples/) for demonstrations:
 | `wind(before, after, *, auto_exit=True)` | Dynamic wind context manager |
 | `wind_range(stop)` / `wind_range(start, stop, step)` | Multi-shot-safe `range()` for `for` loops |
 | `Ref[T]` | Reference wrapper returned by `wind`; call `unwrap()` to get the value |
+| `aleffy(func)` | Opt a compatible C-extension callable into experimental native continuation capture |
+| `UnsupportedCContinuationWarning` | Warning emitted when a snapshot crosses an unsupported C boundary |
+| `enable_c_boundary_warnings()` / `disable_c_boundary_warnings()` | Enable or disable C-boundary diagnostics |
+| `c_boundary_warnings_enabled()` | Report whether C-boundary diagnostics are active |
 
 ## Development
 
@@ -276,5 +281,7 @@ uv run pyright
 
 aleff's original code is licensed under Apache-2.0. Portions of the CPython
 integration and continuation adapters are derived from CPython and remain
-subject to PSF-2.0. See [LICENSE](LICENSE), [NOTICE](NOTICE), and
-[LICENSES/CPython.txt](LICENSES/CPython.txt).
+subject to PSF-2.0. See
+[LICENSE](https://github.com/hnmr293/aleff/blob/HEAD/LICENSE),
+[NOTICE](https://github.com/hnmr293/aleff/blob/HEAD/NOTICE), and
+[LICENSES/CPython.txt](https://github.com/hnmr293/aleff/blob/HEAD/LICENSES/CPython.txt).
